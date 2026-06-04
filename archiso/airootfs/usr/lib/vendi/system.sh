@@ -117,7 +117,7 @@ VENDIOS_ARCH=x86_64
 VENDIOS_BASE=arch
 EOF
     cat > /mnt/etc/vendios/config << 'EOF'
-VENDIOS_AUR_HELPER=paru
+VENDIOS_AUR_HELPER=yay
 VENDIOS_DEFAULT_SHELL=zsh
 VENDIOS_ACCENT_COLOR="203;166;247"
 VENDIOS_SNAPSHOT_MAX=10
@@ -130,7 +130,7 @@ EOF
 
 sys_install_vendi_cli() {
     # Mirror the future AUR `vendi` package layout (/usr/bin + /usr/lib/vendi)
-    # so `paru -Syu` can manage updates to these paths after install.
+    # so `yay -Syu` can manage updates to these paths after install.
     mkdir -p /mnt/usr/bin /mnt/usr/lib/vendi
     for bin in vendi vendi-install vendi-boot vendi-welcome; do
         [[ -f /usr/bin/$bin ]] && install -m 755 /usr/bin/$bin /mnt/usr/bin/$bin
@@ -139,6 +139,31 @@ sys_install_vendi_cli() {
         [[ -f /usr/lib/vendi/$lib ]] && \
             install -m 644 /usr/lib/vendi/$lib /mnt/usr/lib/vendi/$lib
     done
+}
+
+sys_install_aur_helper() {
+    # Build yay from AUR as the target user (makepkg refuses to run as root).
+    # Requires base-devel + git, which are already in BASE_PKGS, plus a
+    # temporary passwordless-sudo entry so `makepkg -si` can pacman -U.
+    local user=$1
+
+    # temporary NOPASSWD line — removed when the function returns
+    local sudoers_drop=/mnt/etc/sudoers.d/00-vendios-aur
+    echo "${user} ALL=(ALL) NOPASSWD: ALL" > "$sudoers_drop"
+    chmod 0440 "$sudoers_drop"
+
+    arch-chroot /mnt sudo -u "$user" -H bash -c '
+        set -e
+        cd /tmp
+        rm -rf yay-build
+        git clone --depth=1 https://aur.archlinux.org/yay.git yay-build
+        cd yay-build
+        makepkg -si --noconfirm
+    '
+    local rc=$?
+
+    rm -f "$sudoers_drop"
+    return $rc
 }
 
 sys_fastfetch_config() {

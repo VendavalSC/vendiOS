@@ -29,7 +29,7 @@ CFG_HOSTNAME='vendios'
 CFG_USER=''
 CFG_USER_PASS=''
 CFG_ROOT_PASS=''
-CFG_AUR=1            # install AUR helper (paru)
+CFG_AUR=1            # install AUR helper (yay)
 CFG_SWAP=0
 CFG_SWAP_SIZE=4      # GiB
 
@@ -365,7 +365,7 @@ step_extras() {
     ui_hints "Space:toggle" "Enter:continue" "Esc:back"
 
     local -a labels=(
-        "Install paru (AUR helper)"
+        "Install yay (AUR helper)"
         "Create swap file (${CFG_SWAP_SIZE} GiB)"
     )
     local -a states=($CFG_AUR $CFG_SWAP)
@@ -427,7 +427,7 @@ step_confirm() {
     _row 8  "User"       "$CFG_USER"
     _row 9  "Firmware"   "${FIRMWARE^^}"
     _row 10 "Swap"       "$( [[ $CFG_SWAP -eq 1 ]] && echo "${CFG_SWAP_SIZE} GiB swapfile" || echo 'none' )"
-    _row 11 "AUR helper" "$( [[ $CFG_AUR -eq 1 ]] && echo 'paru' || echo 'none' )"
+    _row 11 "AUR helper" "$( [[ $CFG_AUR -eq 1 ]] && echo 'yay' || echo 'none' )"
 
     _at $(( 6+13 )) $sx
     printf "${FG_DIM}--------------------------------------------------${R}"
@@ -582,7 +582,15 @@ step_install() {
     sys_install_wm "$CFG_USER"
     _ok 11 "Desktop configured"
 
-    # ── 16. bootloader ────────────────────────────────────────
+    # ── 16. AUR helper ────────────────────────────────────────
+    if [[ $CFG_AUR -eq 1 ]]; then
+        _status 91 "Installing yay (AUR helper)"
+        _log "yay (clone + makepkg)"
+        # Network failure here shouldn't stop the install — log and continue.
+        sys_install_aur_helper "$CFG_USER" >>"$INSTALL_LOG" 2>&1 || _log "yay install failed (see log)"
+    fi
+
+    # ── 17. bootloader ────────────────────────────────────────
     _status 93 "Installing Limine bootloader"
     _log "limine"
     local partuuid; partuuid=$(disk_partuuid "$CFG_ROOT_PART")

@@ -65,12 +65,12 @@ qemu-system-x86_64 \
 Once published to AUR:
 
 ```bash
-paru -S vendi-git        # rolling
+yay -S vendi-git        # rolling
 # or
-paru -S vendi            # stable
+yay -S vendi            # stable
 ```
 
-Then `pacman -Syu` / `paru -Syu` handles updates like any other package.
+Then `pacman -Syu` / `yay -Syu` handles updates like any other package.
 
 ## Updating an installed vendiOS
 
