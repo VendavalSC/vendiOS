@@ -143,11 +143,13 @@ sys_install_vendi_cli() {
 
 sys_install_aur_helper() {
     # Build yay from AUR as the target user (makepkg refuses to run as root).
-    # Requires base-devel + git, which are already in BASE_PKGS, plus a
-    # temporary passwordless-sudo entry so `makepkg -si` can pacman -U.
+    # Then install vendi-git through yay with --overwrite so pacman takes
+    # ownership of the files sys_install_vendi_cli pre-staged at /usr/bin
+    # and /usr/lib/vendi (otherwise `yay -S vendi-git` later fails with
+    # "file exists in filesystem").
     local user=$1
 
-    # temporary NOPASSWD line — removed when the function returns
+    # temporary NOPASSWD entry — removed when the function returns
     local sudoers_drop=/mnt/etc/sudoers.d/00-vendios-aur
     echo "${user} ALL=(ALL) NOPASSWD: ALL" > "$sudoers_drop"
     chmod 0440 "$sudoers_drop"
@@ -159,6 +161,13 @@ sys_install_aur_helper() {
         git clone --depth=1 https://aur.archlinux.org/yay.git yay-build
         cd yay-build
         makepkg -si --noconfirm
+
+        # Claim the pre-staged vendi files so future updates work via yay.
+        # --overwrite tells pacman it is allowed to replace existing files.
+        yay -S vendi-git --noconfirm \
+            --mflags "--noconfirm" \
+            --answerclean=N --answerdiff=N \
+            --overwrite="/usr/bin/vendi*,/usr/lib/vendi/*,/usr/share/vendios/*"
     '
     local rc=$?
 
