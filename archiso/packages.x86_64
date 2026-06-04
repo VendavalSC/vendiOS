@@ -1,0 +1,106 @@
+# ── base system ──────────────────────────────────────────────
+base
+base-devel
+linux
+linux-headers
+linux-firmware
+amd-ucode
+intel-ucode
+
+# ── bootloader ───────────────────────────────────────────────
+limine
+efibootmgr
+
+# ── filesystem ───────────────────────────────────────────────
+e2fsprogs
+btrfs-progs
+xfsprogs
+dosfstools
+gptfdisk
+parted
+util-linux
+
+# ── network ──────────────────────────────────────────────────
+networkmanager
+wpa_supplicant
+iwd
+inetutils
+dnsutils
+openssh
+
+# ── shell & coreutils ────────────────────────────────────────
+bash
+bash-completion
+zsh
+sudo
+shadow
+coreutils
+findutils
+diffutils
+less
+which
+file
+gawk
+grep
+sed
+tar
+gzip
+xz
+zstd
+
+# ── editors ──────────────────────────────────────────────────
+vim
+nano
+
+# ── hardware info ────────────────────────────────────────────
+usbutils
+pciutils
+dmidecode
+
+# ── user-facing tools ────────────────────────────────────────
+fastfetch
+htop
+man-db
+man-pages
+texinfo
+terminus-font
+
+# ── fonts ─────────────────────────────────────────────────────
+ttf-jetbrains-mono-nerd
+ttf-nerd-fonts-symbols-common
+noto-fonts
+noto-fonts-emoji
+
+# ── installer deps ───────────────────────────────────────────
+arch-install-scripts
+reflector
+git
+curl
+wget
+python
+python-pyparted
+
+# ── desktop (temp: hyprland until vendiWM) ───────────────────
+cage
+hyprland
+xdg-desktop-portal-hyprland
+xdg-desktop-portal-gtk
+waybar
+wofi
+mako
+foot
+brightnessctl
+playerctl
+grim
+slurp
+wl-clipboard
+polkit-kde-agent
+qt5-wayland
+qt6-wayland
+gtk3
+gtk4
+nwg-look
+
+# ── archiso internals ────────────────────────────────────────
+mkinitcpio-archiso
+syslinux

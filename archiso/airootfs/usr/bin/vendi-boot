@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# vendiOS first-boot experience: shows logo, then launches installer.
+
+export TERM=foot
+stty sane 2>/dev/null
+
+A=$'\e[38;2;203;166;247m'   # Catppuccin Mauve
+L=$'\e[38;2;180;190;254m'   # Catppuccin Lavender
+O=$'\e[38;2;108;112;134m'   # Catppuccin Overlay0
+B=$'\e[1m'
+R=$'\e[0m'
+
+# hide cursor, clear screen
+printf '\e[?25l\e[2J\e[H'
+
+COLS=$(tput cols 2>/dev/null || echo 80)
+ROWS=$(tput lines 2>/dev/null || echo 24)
+
+# ── logo lines ────────────────────────────────────────────────────────────────
+logo=(
+"  ██╗   ██╗███████╗███╗   ██╗██████╗ ██╗ ██████╗ ███████╗"
+"  ██║   ██║██╔════╝████╗  ██║██╔══██╗██║██╔═══██╗██╔════╝"
+"  ██║   ██║█████╗  ██╔██╗ ██║██║  ██║██║██║   ██║███████╗"
+"  ╚██╗ ██╔╝██╔══╝  ██║╚██╗██║██║  ██║██║██║   ██║╚════██║"
+"   ╚████╔╝ ███████╗██║ ╚████║██████╔╝██║╚██████╔╝███████║"
+"    ╚═══╝  ╚══════╝╚═╝  ╚═══╝╚═════╝ ╚═╝ ╚═════╝ ╚══════╝"
+)
+
+logo_w=60
+logo_h=${#logo[@]}
+pad_top=$(( (ROWS - logo_h - 4) / 2 ))
+pad_left=$(( (COLS - logo_w) / 2 ))
+[[ $pad_top -lt 2 ]] && pad_top=2
+[[ $pad_left -lt 0 ]] && pad_left=0
+
+# print top padding
+printf '%*s' "$pad_top" '' | tr ' ' '\n'
+
+# print logo
+for line in "${logo[@]}"; do
+    printf "%${pad_left}s${B}${A}%s${R}\n" "" "$line"
+done
+
+printf "\n%${pad_left}s${O}Minimal. Modern. Yours.${R}\n\n" ""
+
+# brief pause, then hand off to installer
+sleep 1.2
+
+# show cursor and launch installer
+printf '\e[?25h'
+exec /usr/bin/vendi-install

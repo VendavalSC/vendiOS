@@ -1,0 +1,682 @@
+#!/usr/bin/env bash
+# vendiOS Installer
+
+set -o pipefail
+export TERM=xterm-256color
+
+LIB=/usr/lib/vendi
+source "${LIB}/ui.sh"
+source "${LIB}/disk.sh"
+source "${LIB}/system.sh"
+
+# ── firmware detection ────────────────────────────────────────────────────────
+if [[ -d /sys/firmware/efi ]]; then
+    FIRMWARE='uefi'
+else
+    FIRMWARE='bios'
+fi
+
+# ── install config ────────────────────────────────────────────────────────────
+CFG_LOCALE='en_US.UTF-8'
+CFG_TIMEZONE='UTC'
+CFG_KEYMAP='us'
+CFG_DISK=''
+CFG_MODE='full'      # full | free | manual
+CFG_EFI_PART=''
+CFG_ROOT_PART=''
+CFG_FS='btrfs'
+CFG_HOSTNAME='vendios'
+CFG_USER=''
+CFG_USER_PASS=''
+CFG_ROOT_PASS=''
+CFG_AUR=1            # install AUR helper (paru)
+CFG_SWAP=0
+CFG_SWAP_SIZE=4      # GiB
+
+STEPS=(welcome locale timezone keyboard disk partmode filesystem users extras confirm install done)
+TOTAL=${#STEPS[@]}
+STEP=0
+
+step_next() { (( STEP < TOTAL-1 )) && (( STEP++ )); }
+step_back() { (( STEP > 0 )) && (( STEP-- )); }
+
+# ── step: welcome ─────────────────────────────────────────────────────────────
+step_welcome() {
+    ui_clear
+    ui_panel_draw 1 "$TOTAL" "Welcome"
+    ui_hints "Enter:begin" "Ctrl+C:quit"
+
+    local sx=$(( UI_X+3 ))
+    ui_center_text 1 "${BOLD}${FG_ACCENT}vendiOS${R}"
+    ui_center_text 2 "${FG_DIM}Minimal · Modern · Yours${R}"
+
+    _at 10 $sx; printf "${FG_DIM}---------------------------------------${R}"
+    _at 12 $sx; printf "${FG_WHITE}This installer will set up vendiOS on your machine.${R}"
+    _at 13 $sx; printf "${FG_DIM}Estimated time: 5–15 minutes depending on your connection.${R}"
+    _at 15 $sx; printf "${FG_DIM}What you'll configure:${R}"
+    _at 16 $sx; printf "${FG_DIM}  ${FG_ACCENT}·${FG_DIM} Locale, timezone & keyboard${R}"
+    _at 17 $sx; printf "${FG_DIM}  ${FG_ACCENT}·${FG_DIM} Disk & partitioning${R}"
+    _at 18 $sx; printf "${FG_DIM}  ${FG_ACCENT}·${FG_DIM} User account${R}"
+    _at 19 $sx; printf "${FG_DIM}  ${FG_ACCENT}·${FG_DIM} Base system + Limine bootloader${R}"
+
+    # network status
+    local net_ok=0
+    ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && net_ok=1 || true
+    _at 21 $sx
+    if [[ $net_ok -eq 1 ]]; then
+        printf "${FG_GREEN}● Network connected${R}"
+    else
+        printf "${FG_RED}● No network — connect with nmtui before continuing${R}"
+    fi
+
+    _at 23 $sx; printf "${BOLD}${FG_ACCENT}Press Enter to begin.${R}"
+    local k; IFS= read -rsn1 k; return 0
+}
+
+# ── step: locale ──────────────────────────────────────────────────────────────
+step_locale() {
+    local locales=(
+        'en_US.UTF-8  (default)'
+        'en_GB.UTF-8  English — United Kingdom'
+        'de_DE.UTF-8  German'
+        'fr_FR.UTF-8  French'
+        'es_ES.UTF-8  Spanish — Spain'
+        'pt_BR.UTF-8  Portuguese — Brazil'
+        'it_IT.UTF-8  Italian'
+        'nl_NL.UTF-8  Dutch'
+        'pl_PL.UTF-8  Polish'
+        'ru_RU.UTF-8  Russian'
+        'ja_JP.UTF-8  Japanese'
+        'zh_CN.UTF-8  Chinese — Simplified'
+        'ko_KR.UTF-8  Korean'
+        'ar_EG.UTF-8  Arabic'
+        'tr_TR.UTF-8  Turkish'
+        'sv_SE.UTF-8  Swedish'
+        'nb_NO.UTF-8  Norwegian'
+        'fi_FI.UTF-8  Finnish'
+        'cs_CZ.UTF-8  Czech'
+        'uk_UA.UTF-8  Ukrainian'
+    )
+    local sel
+    ui_menu "System Locale" 2 "$TOTAL" sel "${locales[@]}" || return 1
+    CFG_LOCALE="${sel%%  *}"
+}
+
+# ── step: timezone ────────────────────────────────────────────────────────────
+_tz_common() {
+    case "$1" in
+        America) echo "New_York Los_Angeles Chicago Toronto Vancouver Mexico_City Sao_Paulo Buenos_Aires Lima Bogota Denver Phoenix" ;;
+        Europe)  echo "London Paris Berlin Rome Madrid Amsterdam Brussels Zurich Stockholm Oslo Helsinki Warsaw Prague Vienna Lisbon Kyiv Istanbul" ;;
+        Asia)    echo "Tokyo Seoul Shanghai Beijing Singapore Bangkok Jakarta Mumbai Kolkata Dubai Riyadh Taipei Hong_Kong" ;;
+        Africa)  echo "Cairo Johannesburg Lagos Nairobi Casablanca Accra" ;;
+        Australia) echo "Sydney Melbourne Brisbane Perth Adelaide" ;;
+        Pacific) echo "Auckland Honolulu Fiji" ;;
+        *) echo "" ;;
+    esac
+}
+
+step_timezone() {
+    local regions=('America  (New York, LA, Toronto…)' 'Europe  (London, Paris, Berlin…)' 'Asia  (Tokyo, Dubai, Singapore…)' 'Africa' 'Australia' 'Pacific')
+    local region_sel
+    ui_menu "Timezone — Select Region" 3 "$TOTAL" region_sel "${regions[@]}" || return 1
+    local region="${region_sel%%  *}"
+
+    local all_cities=()
+    while IFS= read -r tz; do all_cities+=("$tz"); done < \
+        <(find "/usr/share/zoneinfo/${region}" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort)
+
+    if [[ ${#all_cities[@]} -eq 0 ]]; then
+        CFG_TIMEZONE="$region"; return 0
+    fi
+
+    # build ordered list: pinned common cities first, then the rest
+    local ordered=()
+    local -A seen=()
+    for city in $(_tz_common "$region"); do
+        [[ -f "/usr/share/zoneinfo/${region}/${city}" ]] || continue
+        ordered+=("${city}  ★")
+        seen[$city]=1
+    done
+    for city in "${all_cities[@]}"; do
+        [[ -z "${seen[$city]:-}" ]] && ordered+=("$city")
+    done
+
+    local city_sel
+    ui_search_menu "Timezone — ${region}" 3 "$TOTAL" city_sel "${ordered[@]}" || return 1
+    CFG_TIMEZONE="${region}/${city_sel%%  *}"
+}
+
+# ── step: keyboard ────────────────────────────────────────────────────────────
+step_keyboard() {
+    local common=(
+        'us          United States  (default)'
+        'uk          United Kingdom'
+        'de          Germany'
+        'fr          France'
+        'es          Spain'
+        'it          Italy'
+        'pt-latin1   Portugal'
+        'br-abnt2    Brazil'
+        'ru          Russia'
+        'pl          Poland'
+        'nl          Netherlands'
+        'be-latin1   Belgium'
+        'ch          Switzerland'
+        'se-lat6     Sweden'
+        'no-latin1   Norway'
+        'fi          Finland'
+        'tr          Turkey'
+        'ua          Ukraine'
+        'jp106       Japan'
+        'latam       Latin America'
+        'colemak     Colemak'
+        'dvorak      Dvorak'
+        '···         Search all layouts…'
+    )
+    local sel
+    ui_menu "Keyboard Layout" 4 "$TOTAL" sel "${common[@]}" || return 1
+
+    if [[ "$sel" == '···'* ]]; then
+        local all_maps=()
+        while IFS= read -r km; do all_maps+=("${km%.map.gz}"); done < \
+            <(find /usr/share/kbd/keymaps -name '*.map.gz' -printf '%f\n' 2>/dev/null | sort)
+        ui_search_menu "Keyboard Layout — All" 4 "$TOTAL" sel "${all_maps[@]}" || return 1
+        CFG_KEYMAP="$sel"
+    else
+        CFG_KEYMAP="${sel%%[[:space:]]*}"
+    fi
+    loadkeys "$CFG_KEYMAP" 2>/dev/null || true
+}
+
+# ── step: disk selection ──────────────────────────────────────────────────────
+step_disk() {
+    local entries=() names=()
+    while IFS= read -r line; do
+        IFS='|' read -r name size model <<< "$line"
+        entries+=("${name}  ${size}  —  ${model}")
+        names+=("$name")
+    done < <(disk_list)
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        ui_clear; ui_panel_draw 5 "$TOTAL" "Select Disk"
+        ui_pline 2 "${FG_RED}No disks found.${R}"
+        ui_pline 4 "${FG_DIM}Raw lsblk output:${R}"
+        local row=5
+        while IFS= read -r dbg_line; do
+            ui_pline $row "${FG_WHITE}${dbg_line}${R}"
+            (( row++ ))
+        done < /tmp/lsblk.log
+        ui_pline $(( row+2 )) "${FG_DIM}Press Esc to drop to shell and investigate, or any key to retry.${R}"
+        local k; IFS= read -rsn1 k
+        [[ "$k" == $'\x1b' ]] && { ui_cleanup; exec bash; }
+        return 1
+    fi
+
+    local sel
+    ui_menu "Select Target Disk" 5 "$TOTAL" sel "${entries[@]}" || return 1
+    CFG_DISK=$(echo "$sel" | awk '{print $1}')
+}
+
+# ── step: partition mode ──────────────────────────────────────────────────────
+step_partmode() {
+    ui_clear
+    ui_panel_draw 6 "$TOTAL" "Partition Mode"
+    ui_hints "Up/Down:navigate" "Enter:select" "Esc:back"
+
+    # show disk visualization
+    ui_disk_bar "$CFG_DISK" 1
+
+    local opts=(
+        "Full disk  —  erase ${CFG_DISK} and install (recommended)"
+        "Free space —  install alongside existing OS (dual-boot)"
+    )
+
+    # check free space availability for dual-boot option (UEFI only — BIOS
+    # dual-boot would require rewriting an existing MBR partition table)
+    local has_free=0
+    [[ "$FIRMWARE" == 'uefi' ]] && disk_free_ok "$CFG_DISK" 2>/dev/null && has_free=1
+
+    local cursor=0
+    while true; do
+        # redraw options
+        local i
+        for (( i=0; i<${#opts[@]}; i++ )); do
+            local row=$(( UI_ROWS-8+i ))
+            if [[ $i -eq $cursor ]]; then
+                _at "$row" $(( UI_X+1 ))
+                printf "${BG_SEL}%*s${R}" $(( UI_W-2 )) ''
+                _at "$row" $(( UI_X+3 ))
+                printf "${BG_SEL}${FG_ACCENT}${BOLD}>  ${FG_WHITE}${opts[$i]}${R}"
+            else
+                local c=$FG_WHITE
+                [[ $i -eq 1 && $has_free -eq 0 ]] && c=$FG_DIM
+                _at "$row" $(( UI_X+3 ))
+                printf "${FG_DIM}   ${c}${opts[$i]}${R}"
+            fi
+        done
+
+        [[ $has_free -eq 0 ]] && {
+            _at $(( UI_ROWS-5 )) $(( UI_X+3 ))
+            printf "${FG_DIM}No free space >= 8 GiB detected for dual-boot${R}"
+        }
+
+        local key; IFS= read -rsn1 key
+        case "$key" in
+            $'\x1b')
+                read -rsn2 -t 0.05 k2
+                case "$k2" in
+                    '[A') (( cursor > 0 )) && (( cursor-- )) ;;
+                    '[B') (( cursor < ${#opts[@]}-1 )) && (( cursor++ )) ;;
+                    '') return 1 ;;
+                esac ;;
+            '')
+                case $cursor in
+                    0) CFG_MODE='full'
+                       ui_confirm "Confirm Disk Wipe" 6 "$TOTAL" \
+                           "ALL data on ${CFG_DISK} will be permanently erased. Continue?" || return 1
+                       return 0 ;;
+                    1)
+                        if [[ $has_free -eq 1 ]]; then
+                            CFG_MODE='free'; return 0
+                        fi ;;
+                esac ;;
+        esac
+    done
+}
+
+# ── step: filesystem ──────────────────────────────────────────────────────────
+step_filesystem() {
+    ui_clear
+    ui_panel_draw 7 "$TOTAL" "Filesystem"
+    ui_hints "Up/Down:navigate" "Enter:select" "Esc:back"
+
+    local opts=("btrfs" "ext4")
+    local descs=(
+        "Modern, copy-on-write filesystem. Enables snapshots, compression, and rollback."
+        "Classic, reliable filesystem. Broad compatibility and proven stability."
+    )
+    local badges=("${FG_ACCENT}recommended${R}" "${FG_DIM}classic${R}")
+    local cursor=0
+
+    while true; do
+        local i
+        for (( i=0; i<2; i++ )); do
+            local base_row=$(( 7 + i*5 ))
+            if [[ $i -eq $cursor ]]; then
+                _at "$base_row"     $(( UI_X+1 )); printf "${BG_SEL}%*s${R}" $(( UI_W-2 )) ''
+                _at $(( base_row+1 )) $(( UI_X+1 )); printf "${BG_SEL}%*s${R}" $(( UI_W-2 )) ''
+                _at "$base_row"     $(( UI_X+3 ))
+                printf "${BG_SEL}${FG_ACCENT}${BOLD}> ${opts[$i]}${R}${BG_SEL}  "
+                printf "${badges[$i]}"
+                _at $(( base_row+1 )) $(( UI_X+6 ))
+                printf "${BG_SEL}${FG_DIM}${descs[$i]}${R}"
+            else
+                _fill "$base_row" $(( UI_X+1 )) $(( UI_W-2 ))
+                _fill $(( base_row+1 )) $(( UI_X+1 )) $(( UI_W-2 ))
+                _at "$base_row" $(( UI_X+3 ))
+                printf "${FG_DIM}  ${opts[$i]}${R}"
+                _at $(( base_row+1 )) $(( UI_X+6 ))
+                printf "${FG_DIM}${descs[$i]}${R}"
+            fi
+        done
+
+        local key; IFS= read -rsn1 key
+        case "$key" in
+            $'\x1b')
+                read -rsn2 -t 0.05 k2
+                case "$k2" in
+                    '[A') (( cursor > 0 )) && (( cursor-- )) ;;
+                    '[B') (( cursor < 1 )) && (( cursor++ )) ;;
+                    '') return 1 ;;
+                esac ;;
+            '') CFG_FS="${opts[$cursor]}"; return 0 ;;
+        esac
+    done
+}
+
+# ── step: users ───────────────────────────────────────────────────────────────
+step_users() {
+    # hostname
+    ui_input "System Setup" 8 "$TOTAL" \
+        "Hostname — the name of this machine on the network:" \
+        CFG_HOSTNAME 'vendios' || return 1
+
+    # username
+    while true; do
+        ui_input "System Setup" 8 "$TOTAL" \
+            "Username — lowercase letters, digits, hyphens, underscores:" \
+            CFG_USER '' || return 1
+        [[ "$CFG_USER" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] && break
+        ui_flash "  Invalid username — must start with a letter, only lowercase & digits" "$FG_RED"
+        sleep 1.5
+    done
+
+    ui_password "System Setup" 8 "$TOTAL" "Password for ${CFG_USER}:" \
+        CFG_USER_PASS || return 1
+
+    ui_password "System Setup" 8 "$TOTAL" "Root password:" \
+        CFG_ROOT_PASS || return 1
+}
+
+# ── step: extras ──────────────────────────────────────────────────────────────
+step_extras() {
+    ui_clear
+    ui_panel_draw 9 "$TOTAL" "Extra Options"
+    ui_hints "Space:toggle" "Enter:continue" "Esc:back"
+
+    local -a labels=(
+        "Install paru (AUR helper)"
+        "Create swap file (${CFG_SWAP_SIZE} GiB)"
+    )
+    local -a states=($CFG_AUR $CFG_SWAP)
+    local cursor=0
+
+    while true; do
+        local i
+        for (( i=0; i<${#labels[@]}; i++ )); do
+            local row=$(( 7 + i*2 ))
+            local box="${FG_DIM}[ ]${R}"
+            [[ ${states[$i]} -eq 1 ]] && box="${FG_ACCENT}[${BOLD}+${R}${FG_ACCENT}]${R}"
+            if [[ $i -eq $cursor ]]; then
+                _at "$row" $(( UI_X+1 ))
+                printf "${BG_SEL}%*s${R}" $(( UI_W-2 )) ''
+                _at "$row" $(( UI_X+3 ))
+                printf "${BG_SEL}${FG_ACCENT}> ${R}${BG_SEL}${box} ${BOLD}${FG_WHITE}${labels[$i]}${R}"
+            else
+                _fill "$row" $(( UI_X+1 )) $(( UI_W-2 ))
+                _at "$row" $(( UI_X+3 ))
+                printf "  ${box} ${FG_DIM}${labels[$i]}${R}"
+            fi
+        done
+
+        local key; IFS= read -rsn1 key
+        case "$key" in
+            $'\x1b')
+                read -rsn2 -t 0.05 k2
+                case "$k2" in
+                    '[A') (( cursor > 0 )) && (( cursor-- )) ;;
+                    '[B') (( cursor < ${#labels[@]}-1 )) && (( cursor++ )) ;;
+                    '') return 1 ;;
+                esac ;;
+            ' ') states[$cursor]=$(( 1 - states[$cursor] )) ;;
+            '')
+                CFG_AUR=${states[0]}
+                CFG_SWAP=${states[1]}
+                return 0 ;;
+        esac
+    done
+}
+
+# ── step: confirm ─────────────────────────────────────────────────────────────
+step_confirm() {
+    ui_clear
+    ui_panel_draw 10 "$TOTAL" "Review & Confirm"
+    ui_hints "Enter:install" "Esc:back"
+
+    local sx=$(( UI_X+3 ))
+    local pad=12
+
+    _row() { _at $(( 6+$1 )) $sx; printf "${FG_DIM}%-${pad}s${R}${BOLD}${FG_WHITE}%s${R}" "$2" "$3"; }
+    _row 1  "Locale"     "$CFG_LOCALE"
+    _row 2  "Timezone"   "$CFG_TIMEZONE"
+    _row 3  "Keyboard"   "$CFG_KEYMAP"
+    _row 4  "Disk"       "${CFG_DISK}"
+    _row 5  "Mode"       "$( [[ $CFG_MODE == full ]] && echo 'Full disk (wipe)' || echo 'Free space (dual-boot)' )"
+    _row 6  "Filesystem" "$CFG_FS"
+    _row 7  "Hostname"   "$CFG_HOSTNAME"
+    _row 8  "User"       "$CFG_USER"
+    _row 9  "Firmware"   "${FIRMWARE^^}"
+    _row 10 "Swap"       "$( [[ $CFG_SWAP -eq 1 ]] && echo "${CFG_SWAP_SIZE} GiB swapfile" || echo 'none' )"
+    _row 11 "AUR helper" "$( [[ $CFG_AUR -eq 1 ]] && echo 'paru' || echo 'none' )"
+
+    _at $(( 6+13 )) $sx
+    printf "${FG_DIM}--------------------------------------------------${R}"
+    _at $(( 6+14 )) $sx
+    printf "${BOLD}${FG_ACCENT}Press Enter to start installation.${R}"
+
+    while true; do
+        local k; IFS= read -rsn1 k
+        case "$k" in
+            '') return 0 ;;
+            $'\x1b') read -rsn2 -t 0.05 k2; [[ -z "$k2" ]] && return 1 ;;
+        esac
+    done
+}
+
+# ── step: install ─────────────────────────────────────────────────────────────
+step_install() {
+    set -euo pipefail
+    local INSTALL_LOG=/tmp/vendios-install.log
+    : > "$INSTALL_LOG"
+
+    _status() { ui_progress 1 "$1" "$2"; }
+    _log()    {
+        local msg=$1
+        echo "[$(date +%T)] $msg" >> "$INSTALL_LOG"
+        _at $(( UI_CONTENT_BOT-2 )) $(( UI_X+3 ))
+        printf "${BG_BASE}%*s${R}" $(( UI_W-6 )) ''
+        _at $(( UI_CONTENT_BOT-2 )) $(( UI_X+3 ))
+        printf "${FG_DIM}${msg}${R}"
+    }
+    _ok()  { _at $(( 6+$1 )) $(( UI_X+3 )); printf "${FG_GREEN}✓ ${R}${FG_DIM}${2}${R}"; }
+
+    ui_clear
+    ui_panel_draw 11 "$TOTAL" "Installing vendiOS"
+    ui_hints "please wait — do not interrupt"
+
+    # ── 1. disk prep ──────────────────────────────────────────
+    _status 5 "Preparing disk"
+    _log "wipe + partition"
+
+    if [[ "$CFG_MODE" == 'full' ]]; then
+        disk_wipe "$CFG_DISK"
+        if [[ "$FIRMWARE" == 'uefi' ]]; then
+            disk_partition_full_uefi "$CFG_DISK"
+        else
+            disk_partition_full_bios "$CFG_DISK"
+        fi
+        partprobe "$CFG_DISK"; sleep 1
+        # Both layouts: p1 = FAT32 boot, p2 = root
+        CFG_EFI_PART=$(disk_part "$CFG_DISK" 1)
+        CFG_ROOT_PART=$(disk_part "$CFG_DISK" 2)
+    else
+        local parts; parts=$(disk_partition_free_space "$CFG_DISK")
+        read -r CFG_EFI_PART CFG_ROOT_PART <<< "$parts"
+    fi
+    _ok 4 "Disk partitioned"
+
+    # ── 2. format ─────────────────────────────────────────────
+    _status 15 "Formatting partitions"
+    _log "mkfs.${CFG_FS}"
+    [[ -n "$CFG_EFI_PART" ]] && disk_format_boot "$CFG_EFI_PART"
+    if [[ "$CFG_FS" == 'btrfs' ]]; then
+        disk_format_root_btrfs "$CFG_ROOT_PART"
+    else
+        disk_format_root_ext4 "$CFG_ROOT_PART"
+    fi
+    _ok 5 "Partitions formatted"
+
+    # ── 3. mount ──────────────────────────────────────────────
+    _status 20 "Mounting filesystems"
+    _log "mount"
+    if [[ "$CFG_FS" == 'btrfs' ]]; then
+        disk_mount_btrfs "$CFG_ROOT_PART" "$CFG_EFI_PART"
+    else
+        disk_mount_ext4 "$CFG_ROOT_PART" "$CFG_EFI_PART"
+    fi
+    _ok 6 "Filesystems mounted"
+
+    # ── 4. mirrors ────────────────────────────────────────────
+    _status 25 "Optimizing mirrors"
+    _log "reflector"
+    reflector --latest 15 --sort rate --save /etc/pacman.d/mirrorlist >>"$INSTALL_LOG" 2>&1 || true
+    _ok 7 "Mirrors updated"
+
+    # ── 5. pacstrap ───────────────────────────────────────────
+    _status 30 "Installing base system…"
+    _log "pacstrap (this is the slow part)"
+    local extra=()
+    [[ "$CFG_FS" == 'btrfs' ]] && extra+=(btrfs-progs)
+    sys_pacstrap "${extra[@]}" >>"$INSTALL_LOG" 2>&1
+    _ok 8 "Base system installed"
+
+    # ── 6. fstab ──────────────────────────────────────────────
+    _status 65 "Generating fstab"
+    _log "genfstab"
+    sys_genfstab
+
+    # ── 7. locale & timezone ──────────────────────────────────
+    _status 68 "Locale & timezone"
+    _log "locale-gen"
+    sys_locale "$CFG_LOCALE" >>"$INSTALL_LOG" 2>&1
+    sys_timezone "$CFG_TIMEZONE"
+
+    # ── 8. hostname ───────────────────────────────────────────
+    _status 70 "Hostname & hosts"
+    sys_hostname "$CFG_HOSTNAME"
+    sys_keymap "$CFG_KEYMAP"
+
+    # ── 9. initramfs ──────────────────────────────────────────
+    _status 73 "Building initramfs"
+    _log "mkinitcpio"
+    sys_initramfs "$CFG_FS" >>"$INSTALL_LOG" 2>&1
+    _ok 9 "Initramfs built"
+
+    # ── 10. users ─────────────────────────────────────────────
+    _status 78 "Creating users"
+    _log "useradd: ${CFG_USER}"
+    sys_sudo
+    sys_root_password "$CFG_ROOT_PASS"
+    sys_user_create "$CFG_USER" "$CFG_USER_PASS"
+    _ok 10 "Users created"
+
+    # ── 11. swap ──────────────────────────────────────────────
+    if [[ $CFG_SWAP -eq 1 && "$CFG_FS" != 'btrfs' ]]; then
+        _status 80 "Creating swapfile"
+        _log "swapfile ${CFG_SWAP_SIZE}G"
+        dd if=/dev/zero of=/mnt/swapfile bs=1M count=$(( CFG_SWAP_SIZE * 1024 )) status=none
+        chmod 600 /mnt/swapfile
+        mkswap /mnt/swapfile >/dev/null
+        echo '/swapfile none swap defaults 0 0' >> /mnt/etc/fstab
+    fi
+
+    # ── 12. services ──────────────────────────────────────────
+    _status 82 "Enabling services"
+    sys_services_enable >>"$INSTALL_LOG" 2>&1
+
+    # ── 13. system identity ───────────────────────────────────
+    _status 84 "System identity"
+    sys_install_os_release
+    sys_install_vendios_files
+
+    # ── 14. shell & tools ─────────────────────────────────────
+    _status 85 "Configuring shell & tools"
+    _log "zsh + fastfetch"
+    sys_zsh_config "$CFG_USER"
+    sys_fastfetch_config "$CFG_USER"
+    sys_install_vendi_cli
+
+    # ── 15. desktop (Hyprland) ────────────────────────────────
+    _status 89 "Configuring desktop environment"
+    _log "hyprland + waybar + foot + wofi"
+    sys_install_wm "$CFG_USER"
+    _ok 11 "Desktop configured"
+
+    # ── 16. bootloader ────────────────────────────────────────
+    _status 93 "Installing Limine bootloader"
+    _log "limine"
+    local partuuid; partuuid=$(disk_partuuid "$CFG_ROOT_PART")
+    limine_install "$CFG_DISK" "$FIRMWARE" "$partuuid" "$CFG_FS" >>"$INSTALL_LOG" 2>&1
+    _ok 12 "Limine installed"
+
+    # ── 16. done ──────────────────────────────────────────────
+    _status 99 "Finalizing"
+    # Persist install log onto the FAT32 boot partition so it survives reboot
+    # and can be inspected even when boot fails (mount FAT32 from anything).
+    cp "$INSTALL_LOG" /mnt/boot/install.log 2>/dev/null || true
+    sync
+    umount -R /mnt 2>/dev/null || true
+    _status 100 "Complete"
+    sleep 0.8
+}
+
+# ── step: done ────────────────────────────────────────────────────────────────
+step_done() {
+    ui_clear
+    ui_panel_draw 12 "$TOTAL" "Installation Complete"
+    ui_hints "Enter:reboot" "Esc:shell" "L:view log"
+
+    local sx=$(( UI_X+3 ))
+
+    # big check
+    ui_center_text 2 "${FG_GREEN}${BOLD}  ✓ vendiOS installed successfully  ${R}"
+
+    _at 11 $sx; printf "${FG_DIM}Machine:${R}  ${BOLD}${FG_WHITE}${CFG_HOSTNAME}${R}"
+    _at 12 $sx; printf "${FG_DIM}User:    ${R}  ${BOLD}${FG_WHITE}${CFG_USER}${R}"
+    _at 13 $sx; printf "${FG_DIM}Disk:    ${R}  ${FG_WHITE}${CFG_DISK}${R}"
+    _at 14 $sx; printf "${FG_DIM}FS:      ${R}  ${FG_WHITE}${CFG_FS}${R}"
+    _at 16 $sx; printf "${FG_DIM}Remove the installation media before rebooting.${R}"
+    _at 18 $sx; printf "${BOLD}${FG_ACCENT}Enter${R}${FG_DIM} reboot  ${R}${BOLD}${FG_ACCENT}Esc${R}${FG_DIM} drop to shell  ${R}${BOLD}${FG_ACCENT}L${R}${FG_DIM} view install log${R}"
+
+    while true; do
+        local k; IFS= read -rsn1 k
+        case "$k" in
+            '')
+                ui_cleanup
+                printf '\e[2J\e[H'
+                systemctl reboot ;;
+            $'\x1b')
+                read -rsn2 -t 0.05 k2
+                [[ -z "$k2" ]] && { ui_cleanup; exec bash; } ;;
+            'l'|'L')
+                ui_cleanup
+                less /tmp/vendios-install.log 2>/dev/null || true
+                ui_init
+                step_done ;;
+        esac
+    done
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+main() {
+    ui_init
+
+    while true; do
+        local result=0
+        case "${STEPS[$STEP]}" in
+            welcome)    step_welcome    || result=$? ;;
+            locale)     step_locale     || result=$? ;;
+            timezone)   step_timezone   || result=$? ;;
+            keyboard)   step_keyboard   || result=$? ;;
+            disk)       step_disk       || result=$? ;;
+            partmode)   step_partmode   || result=$? ;;
+            filesystem) step_filesystem || result=$? ;;
+            users)      step_users      || result=$? ;;
+            extras)     step_extras     || result=$? ;;
+            confirm)    step_confirm    || result=$? ;;
+            install)
+                # Run install in a subshell so `set -e` inside step_install
+                # actually exits on the first failed command. (Without the
+                # subshell, the `||` below disables errexit inside it.)
+                if ! ( step_install ); then
+                    ui_clear; ui_panel_draw 11 "$TOTAL" "Installation Failed"
+                    ui_pline 3 "${FG_RED}${BOLD}Installation failed.${R}"
+                    ui_pline 5 "${FG_DIM}Log saved to /tmp/vendios-install.log${R}"
+                    ui_hints "L:view log" "Esc:back"
+                    while true; do
+                        local k; IFS= read -rsn1 k
+                        case "$k" in
+                            'l'|'L') ui_cleanup; less /tmp/vendios-install.log; ui_init ;;
+                            $'\x1b') read -rsn2 -t 0.05 k2; [[ -z "$k2" ]] && { step_back; break; } ;;
+                        esac
+                    done
+                    continue
+                fi ;;
+            done) step_done; break ;;
+        esac
+
+        if [[ $result -eq 0 ]]; then step_next; else step_back; fi
+    done
+}
+
+main "$@"

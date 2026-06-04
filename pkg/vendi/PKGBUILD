@@ -1,0 +1,40 @@
+# Maintainer: vendiOS <layoguerrero@gmail.com>
+pkgname=vendi
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="vendiOS CLI, installer, and supporting libraries"
+arch=('any')
+url="https://github.com/VendavalSC/vendiOS"
+license=('MIT')
+depends=(
+    'bash'
+    'coreutils'
+    'util-linux'
+    'parted'
+    'dosfstools'
+    'e2fsprogs'
+    'btrfs-progs'
+    'arch-install-scripts'
+    'limine'
+    'efibootmgr'
+    'reflector'
+    'fastfetch'
+)
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/v${pkgver}.tar.gz")
+sha256sums=('SKIP')   # replace once a release is tagged
+
+package() {
+    cd "vendiOS-${pkgver}"
+
+    install -Dm755 archiso/airootfs/usr/bin/vendi          "${pkgdir}/usr/bin/vendi"
+    install -Dm755 archiso/airootfs/usr/bin/vendi-install  "${pkgdir}/usr/bin/vendi-install"
+    install -Dm755 archiso/airootfs/usr/bin/vendi-boot     "${pkgdir}/usr/bin/vendi-boot"
+    install -Dm755 archiso/airootfs/usr/bin/vendi-welcome  "${pkgdir}/usr/bin/vendi-welcome"
+
+    install -Dm644 archiso/airootfs/usr/lib/vendi/ui.sh     "${pkgdir}/usr/lib/vendi/ui.sh"
+    install -Dm644 archiso/airootfs/usr/lib/vendi/disk.sh   "${pkgdir}/usr/lib/vendi/disk.sh"
+    install -Dm644 archiso/airootfs/usr/lib/vendi/system.sh "${pkgdir}/usr/lib/vendi/system.sh"
+
+    install -Dm644 archiso/airootfs/usr/share/vendios/logo.txt \
+        "${pkgdir}/usr/share/vendios/logo.txt"
+}

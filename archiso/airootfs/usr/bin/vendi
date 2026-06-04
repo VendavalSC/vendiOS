@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Catppuccin Mocha palette ──────────────────────────────────────────────────
+MAUVE=$'\e[38;2;203;166;247m'
+LAVENDER=$'\e[38;2;180;190;254m'
+BLUE=$'\e[38;2;137;180;250m'
+TEXT=$'\e[38;2;205;214;244m'
+SUBTEXT=$'\e[38;2;166;173;200m'
+OVERLAY=$'\e[38;2;108;112;134m'
+GREEN=$'\e[38;2;166;227;161m'
+RED=$'\e[38;2;243;139;168m'
+YELLOW=$'\e[38;2;249;226;175m'
+PEACH=$'\e[38;2;250;179;135m'
+TEAL=$'\e[38;2;148;226;213m'
+BG_SEL=$'\e[48;2;49;35;73m'
+BOLD=$'\e[1m'
+DIM=$'\e[2m'
+R=$'\e[0m'
+
+LOGO_FILE=/usr/share/vendios/logo.txt
+
+_logo() {
+    if [[ -f "$LOGO_FILE" ]]; then
+        cat "$LOGO_FILE"
+    else
+        printf "${MAUVE}${BOLD}  vendiOS${R}\n"
+    fi
+}
+
+_header() {
+    local text=$1 color=${2:-$MAUVE}
+    printf "\n${color}${BOLD}  %s${R}\n" "$text"
+    printf "${OVERLAY}  %s${R}\n\n" "$(printf '─%.0s' $(seq 1 ${#text}))"
+}
+
+_ok()   { printf "  ${GREEN}${BOLD}✓${R}  ${TEXT}%s${R}\n" "$*"; }
+_err()  { printf "  ${RED}${BOLD}✗${R}  ${RED}%s${R}\n" "$*" >&2; }
+_info() { printf "  ${LAVENDER}${BOLD}󰋽${R}  ${SUBTEXT}%s${R}\n" "$*"; }
+_warn() { printf "  ${YELLOW}${BOLD}󰀦${R}  ${YELLOW}%s${R}\n" "$*"; }
+_step() { printf "  ${MAUVE}${BOLD}▸${R}  ${TEXT}%s${R}\n" "$*"; }
+
+_kv() {
+    local key=$1; shift
+    printf "  ${OVERLAY}%-14s${R}${TEXT}%s${R}\n" "$key" "$*"
+}
+
+# ── commands ──────────────────────────────────────────────────────────────────
+
+cmd_update() {
+    _header " system update"
+    _step "refreshing mirrors via reflector…"
+    reflector --latest 15 --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null \
+        && _ok "mirrors updated" || _warn "reflector failed, using cached mirrors"
+    echo
+    _step "upgrading packages…"
+    pacman -Syu
+    _ok "system up to date"
+}
+
+cmd_clean() {
+    _header "󰃺 clean cache"
+    _step "removing unused package cache…"
+    local before after freed
+    before=$(du -sh /var/cache/pacman/pkg 2>/dev/null | cut -f1)
+    yes | pacman -Sc >/dev/null 2>&1 || true
+    after=$(du -sh /var/cache/pacman/pkg 2>/dev/null | cut -f1)
+    _ok "package cache: ${before} → ${after}"
+
+    _step "vacuuming systemd journal (keep 2 weeks)…"
+    journalctl --vacuum-time=2weeks 2>/dev/null | grep -i 'freed\|deleted' | while read -r l; do _info "$l"; done
+
+    _ok "done"
+}
+
+cmd_snapshot() {
+    _header "󰔘 btrfs snapshots"
+
+    # check btrfs
+    if ! findmnt -no FSTYPE / 2>/dev/null | grep -q btrfs; then
+        _warn "root filesystem is not btrfs — snapshots unavailable"
+        return 0
+    fi
+
+    [[ $EUID -ne 0 ]] && { _err "snapshots require root (sudo vendi snapshot)"; return 1; }
+
+    local snap_dir='/.snapshots'
+    mkdir -p "$snap_dir"
+
+    local ts; ts=$(date +%Y-%m-%d_%H-%M)
+    local dest="${snap_dir}/${ts}"
+
+    _step "creating snapshot → ${dest}"
+    btrfs subvolume snapshot / "$dest" >/dev/null
+    _ok "snapshot created: ${ts}"
+    echo
+
+    # list existing
+    local snaps=()
+    while IFS= read -r s; do snaps+=("$s"); done < <(ls -1 "$snap_dir" 2>/dev/null | sort)
+    _info "${#snaps[@]} snapshot(s) stored"
+    for s in "${snaps[@]}"; do
+        printf "  ${OVERLAY}  %s${R}\n" "$s"
+    done
+
+    # enforce max
+    local cfg=/etc/vendios/config
+    local max=10
+    [[ -f "$cfg" ]] && { source "$cfg" 2>/dev/null; max=${VENDIOS_SNAPSHOT_MAX:-10}; }
+    while [[ ${#snaps[@]} -gt $max ]]; do
+        local oldest="${snaps[0]}"
+        _warn "max ${max} snapshots — removing oldest: ${oldest}"
+        btrfs subvolume delete "${snap_dir}/${oldest}" >/dev/null
+        snaps=("${snaps[@]:1}")
+    done
+}
+
+cmd_fetch() {
+    fastfetch --logo "$LOGO_FILE" 2>/dev/null || fastfetch
+}
+
+cmd_info() {
+    _header " vendiOS info"
+
+    local cfg=/etc/vendios/release
+    local ver='unknown' codename='unknown' built='unknown'
+    if [[ -f "$cfg" ]]; then
+        source "$cfg" 2>/dev/null
+        ver=${VENDIOS_VERSION:-unknown}
+        codename=${VENDIOS_CODENAME:-unknown}
+        built=${VENDIOS_BUILD_DATE:-unknown}
+    fi
+
+    _kv "version"   "${ver} (${codename})"
+    _kv "built"     "${built}"
+    _kv "kernel"    "$(uname -r)"
+    _kv "hostname"  "$(hostname)"
+    _kv "uptime"    "$(uptime -p 2>/dev/null | sed 's/up //')"
+    _kv "packages"  "$(pacman -Q 2>/dev/null | wc -l) installed"
+    _kv "disk /"    "$(df -h / 2>/dev/null | awk 'NR==2{print $3" / "$2" ("$5" used)"}')"
+    _kv "memory"    "$(free -h 2>/dev/null | awk '/^Mem/{print $3" / "$2}')"
+    echo
+}
+
+cmd_help() {
+    _logo
+    printf "\n  ${OVERLAY}Minimal. Modern. Yours.${R}\n\n"
+
+    printf "  ${MAUVE}${BOLD}commands${R}\n\n"
+
+    _cmd() {
+        printf "  ${LAVENDER}${BOLD}%-14s${R}${OVERLAY}%s${R}\n" "$1" "$2"
+    }
+
+    _cmd " update"   "refresh mirrors and upgrade all packages"
+    _cmd "󰃺 clean"    "remove cached packages and vacuum journal"
+    _cmd "󰔘 snapshot" "create / manage btrfs snapshots"
+    _cmd " fetch"    "show system info with vendiOS logo"
+    _cmd " info"     "show distro version and system summary"
+    _cmd " help"     "show this message"
+
+    printf "\n  ${OVERLAY}run with sudo for snapshot and update${R}\n\n"
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+case "${1:-help}" in
+    update)   cmd_update   ;;
+    clean)    cmd_clean    ;;
+    snapshot) cmd_snapshot ;;
+    fetch)    cmd_fetch    ;;
+    info)     cmd_info     ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        _err "unknown command: ${1}"
+        cmd_help
+        exit 1
+        ;;
+esac

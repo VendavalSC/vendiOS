@@ -1,0 +1,21 @@
+# Build artifacts
+out/
+work/
+*.iso
+*.pkg.tar.zst
+*.pkg.tar.xz
+
+# Editor / OS
+*.swp
+*.swo
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# pkg build trees
+pkg/*/src/
+pkg/*/pkg/
+pkg/*/*.tar.gz

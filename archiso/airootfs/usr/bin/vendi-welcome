@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# vendiOS live welcome screen
+
+PURPLE='\e[38;2;203;166;247m'
+BOLD='\e[1m'
+DIM='\e[2m'
+RESET='\e[0m'
+
+clear
+printf "${BOLD}${PURPLE}"
+cat << 'EOF'
+
+  ██╗   ██╗███████╗███╗   ██╗██████╗ ██╗ ██████╗ ███████╗
+  ██║   ██║██╔════╝████╗  ██║██╔══██╗██║██╔═══██╗██╔════╝
+  ██║   ██║█████╗  ██╔██╗ ██║██║  ██║██║██║   ██║███████╗
+  ╚██╗ ██╔╝██╔══╝  ██║╚██╗██║██║  ██║██║██║   ██║╚════██║
+   ╚████╔╝ ███████╗██║ ╚████║██████╔╝██║╚██████╔╝███████║
+    ╚═══╝  ╚══════╝╚═╝  ╚═══╝╚═════╝ ╚═╝ ╚═════╝ ╚══════╝
+
+EOF
+printf "${RESET}"
+printf "  ${DIM}Minimal. Modern. Yours.${RESET}\n\n"
+printf "  ${BOLD}vendi-install${RESET}  ${DIM}—${RESET} install vendiOS to disk\n"
+printf "  ${BOLD}fastfetch${RESET}      ${DIM}—${RESET} system information\n"
+printf "  ${BOLD}nmtui${RESET}          ${DIM}—${RESET} connect to a network\n\n"

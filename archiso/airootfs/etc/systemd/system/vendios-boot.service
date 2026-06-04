@@ -1,0 +1,19 @@
+[Unit]
+Description=vendiOS Boot & Installer
+After=systemd-user-sessions.service network.target
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vendi-boot
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
