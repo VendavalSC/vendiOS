@@ -9,7 +9,10 @@ use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::{
     backend::{
         allocator::dmabuf::Dmabuf,
-        input::{InputEvent, KeyboardKeyEvent},
+        input::{
+            AbsolutePositionEvent, Event as InputEventTrait, InputEvent, KeyboardKeyEvent,
+            PointerAxisEvent, PointerButtonEvent,
+        },
         renderer::{
             Color32F, Frame, Renderer, ImportDma, ImportMemWl,
             gles::GlesRenderer,
@@ -18,10 +21,16 @@ use smithay::{
         winit::{self, WinitEvent},
     },
     desktop::{PopupManager, Space, Window, space::space_render_elements},
-    input::keyboard::FilterResult,
+    input::{
+        keyboard::FilterResult,
+        pointer::{AxisFrame, ButtonEvent, MotionEvent},
+    },
     output::{Mode, Output, PhysicalProperties, Subpixel},
-    reexports::wayland_server::{Display, ListeningSocket, protocol::wl_surface},
-    utils::{Rectangle, Transform},
+    reexports::wayland_server::{
+        Display, ListeningSocket,
+        protocol::wl_surface,
+    },
+    utils::{Rectangle, SERIAL_COUNTER, Transform},
     wayland::{
         compositor::{
             CompositorState, SurfaceAttributes, TraversalAction, with_surface_tree_downward,
@@ -98,8 +107,11 @@ pub fn run() -> Result<()> {
         space,
         popups: PopupManager::default(),
         layout: crate::layout::Tree::new(),
+        pointer_location: (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
     };
+
+    let pointer = state.seat.add_pointer();
 
     // Pick the first free wayland-N name. Bail rather than overwrite an
     // existing compositor's socket.
@@ -150,15 +162,48 @@ pub fn run() -> Result<()> {
                         if layout_changed { state.relayout(); }
                     }
                 }
-                InputEvent::PointerMotionAbsolute { .. } => {
-                    // Auto-focus the topmost window in the space so keypresses
-                    // reach the test client. Proper pointer-focus follows once
-                    // the input module lands.
-                    let focus = state.space.elements().next().cloned()
-                        .and_then(|w| w.wl_surface().map(|c| c.into_owned()));
-                    if let Some(surf) = focus {
-                        keyboard.set_focus(&mut state, Some(surf), 0.into());
+                InputEvent::PointerMotionAbsolute { event } => {
+                    // Winit gives us window-relative coordinates. Scale=1 in
+                    // nested mode, so physical == logical numerically.
+                    let size = backend.window_size().to_logical(1);
+                    let pos  = event.position_transformed(size);
+                    state.pointer_location = pos;
+                    let under = state.surface_under(pos).map(|(s, p)| (s.into(), p));
+                    pointer.motion(&mut state, under, &MotionEvent {
+                        location: pos,
+                        serial:   SERIAL_COUNTER.next_serial(),
+                        time:     InputEventTrait::time_msec(&event),
+                    });
+                    pointer.frame(&mut state);
+                }
+                InputEvent::PointerButton { event } => {
+                    let bstate = event.state();
+                    // Click-to-focus on press.
+                    if bstate == smithay::backend::input::ButtonState::Pressed {
+                        state.focus_window_at_cursor();
                     }
+                    if let Some(button) = event.button_code().into() {
+                        pointer.button(&mut state, &ButtonEvent {
+                            button,
+                            state:  bstate,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time:   InputEventTrait::time_msec(&event),
+                        });
+                    }
+                    pointer.frame(&mut state);
+                }
+                InputEvent::PointerAxis { event } => {
+                    use smithay::backend::input::{Axis, AxisSource};
+                    let mut frame = AxisFrame::new(InputEventTrait::time_msec(&event))
+                        .source(AxisSource::Wheel);
+                    if let Some(h) = event.amount(Axis::Horizontal) {
+                        frame = frame.value(Axis::Horizontal, h);
+                    }
+                    if let Some(v) = event.amount(Axis::Vertical) {
+                        frame = frame.value(Axis::Vertical, v);
+                    }
+                    pointer.axis(&mut state, frame);
+                    pointer.frame(&mut state);
                 }
                 _ => {}
             },

@@ -6,18 +6,20 @@
 
 use crate::layout::Tree;
 use smithay::{
-    desktop::{PopupManager, Space, Window},
+    desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{
         Seat, SeatHandler, SeatState,
         pointer::CursorImageStatus,
     },
+    utils::{Logical, Point},
     reexports::wayland_server::{
         Client,
         backend::{ClientData, ClientId, DisconnectReason},
         protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
     },
-    utils::Serial,
+    utils::{SERIAL_COUNTER, Serial},
     wayland::{
+        seat::WaylandFocus,
         buffer::BufferHandler,
         compositor::{
             CompositorClientState, CompositorHandler, CompositorState,
@@ -57,6 +59,9 @@ pub struct State {
     // i3-style split tree. We update window positions in `space` from this
     // tree after every change. Per-workspace trees come later (v0.2+).
     pub layout:                Tree,
+
+    // Current pointer position in compositor logical coordinates.
+    pub pointer_location:      Point<f64, Logical>,
 
     // Queued dmabuf imports — the backend drains and processes these each
     // frame, where it has &mut access to the renderer.
@@ -135,6 +140,32 @@ impl WaylandDndGrabHandler for State {}
 impl OutputHandler for State {}
 
 impl State {
+    /// Find the topmost wl_surface under the given point, along with its
+    /// absolute logical position. Used for pointer focus and click routing.
+    pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
+        // Currently only checks tiled toplevels. Layer-shell + popups + fullscreen
+        // are added when those protocols land.
+        let (window, loc) = self.space.element_under(pos)?;
+        let (surface, surf_loc) = window.surface_under(pos - loc.to_f64(), WindowSurfaceType::ALL)?;
+        Some((surface, (surf_loc + loc).to_f64()))
+    }
+
+    /// Click-to-focus: set keyboard focus to the surface under the cursor.
+    /// No-op if pointer isn't over any client surface.
+    pub fn focus_window_at_cursor(&mut self) {
+        let Some((surf, _)) = self.surface_under(self.pointer_location) else { return };
+        // Raise the matching window in space (clone to drop the iter borrow).
+        let target = self.space.elements()
+            .find(|w| w.wl_surface().map(|s| *s == surf).unwrap_or(false))
+            .cloned();
+        if let Some(window) = target {
+            self.space.raise_element(&window, true);
+        }
+        if let Some(kb) = self.seat.get_keyboard() {
+            kb.set_focus(self, Some(surf), SERIAL_COUNTER.next_serial());
+        }
+    }
+
     /// Execute a keybind action. Returns true if the caller should exit the
     /// main loop (Action::Quit).
     pub fn run_action(&mut self, action: crate::input::Action) -> bool {
