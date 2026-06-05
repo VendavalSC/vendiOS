@@ -1,7 +1,7 @@
 pkgbase = vendi-git
 	pkgdesc = vendiOS CLI, installer, and supporting libraries (git)
 	pkgver = r1
-	pkgrel = 1
+	pkgrel = 2
 	url = https://github.com/VendavalSC/vendiOS
 	arch = any
 	license = MIT

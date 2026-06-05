@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=vendiOS
+Description=vendiOS minimal Catppuccin Mocha boot splash with LUKS prompt
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/vendios
+ScriptFile=/usr/share/plymouth/themes/vendios/vendios.script

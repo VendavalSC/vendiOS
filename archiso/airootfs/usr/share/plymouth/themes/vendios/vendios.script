@@ -1,0 +1,68 @@
+# vendiOS Plymouth theme — Catppuccin Mocha, Mauve accent
+# Brand wordmark + LUKS password prompt. Nothing else.
+
+# ── colors ────────────────────────────────────────────────────────────────────
+# Base    #1E1E2E  (0.117, 0.117, 0.180)
+# Subtext #A6ADC8  (0.651, 0.678, 0.784)
+# Mauve   #CBA6F7  (0.796, 0.651, 0.969)
+# Overlay #6C7086  (0.424, 0.439, 0.525)
+
+Window.SetBackgroundTopColor   (0.117, 0.117, 0.180);
+Window.SetBackgroundBottomColor(0.117, 0.117, 0.180);
+
+cx = Window.GetX() + Window.GetWidth()  / 2;
+cy = Window.GetY() + Window.GetHeight() / 2;
+
+# ── brand wordmark ────────────────────────────────────────────────────────────
+brand.image  = Image.Text("vendiOS", 0.796, 0.651, 0.969, 1, "Sans Bold 56");
+brand.sprite = Sprite(brand.image);
+brand.sprite.SetX(cx - brand.image.GetWidth()  / 2);
+brand.sprite.SetY(cy - brand.image.GetHeight() - 24);
+
+# ── tagline ───────────────────────────────────────────────────────────────────
+tag.image  = Image.Text("Minimal. Modern. Yours.",
+                         0.424, 0.439, 0.525, 1, "Sans 14");
+tag.sprite = Sprite(tag.image);
+tag.sprite.SetX(cx - tag.image.GetWidth() / 2);
+tag.sprite.SetY(cy - 8);
+
+# ── password prompt state ─────────────────────────────────────────────────────
+prompt.sprite  = NULL;
+bullets.sprite = NULL;
+
+fun build_bullets(count) {
+    if (count == 0) return "·";
+    s = "";
+    i = 0;
+    while (i < count) { s = s + "•"; i = i + 1; }
+    return s;
+}
+
+fun display_password_callback(label, count) {
+    text = label;
+    if (text == "") text = "Enter passphrase";
+
+    prompt.image  = Image.Text(text, 0.651, 0.678, 0.784, 1, "Sans 13");
+    prompt.sprite = Sprite(prompt.image);
+    prompt.sprite.SetX(cx - prompt.image.GetWidth() / 2);
+    prompt.sprite.SetY(cy + 64);
+
+    bullets.image  = Image.Text(build_bullets(count),
+                                 0.796, 0.651, 0.969, 1, "Sans Bold 24");
+    bullets.sprite = Sprite(bullets.image);
+    bullets.sprite.SetX(cx - bullets.image.GetWidth() / 2);
+    bullets.sprite.SetY(cy + 92);
+}
+
+fun display_normal_callback() {
+    prompt.sprite  = NULL;
+    bullets.sprite = NULL;
+}
+
+# Swallow everything else — splash stays clean from boot to handoff.
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+Plymouth.SetDisplayNormalFunction  (display_normal_callback);
+Plymouth.SetMessageFunction        (fun(t)        {});
+Plymouth.SetUpdateStatusFunction   (fun(s)        {});
+Plymouth.SetBootProgressFunction   (fun(d, p)     {});
+Plymouth.SetQuitFunction           (fun()         {});

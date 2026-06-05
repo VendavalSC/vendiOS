@@ -115,6 +115,33 @@ cmd_snapshot() {
     done
 }
 
+cmd_rollback() {
+    _header "󰜉 rollback"
+
+    if ! command -v snapper >/dev/null; then
+        _err "snapper not installed — cannot manage rollbacks"
+        return 1
+    fi
+    [[ $EUID -ne 0 ]] && { _err "rollback requires root (sudo vendi rollback)"; return 1; }
+
+    # show available snapshots
+    _step "available snapshots:"
+    echo
+    snapper list | sed 's/^/  /'
+    echo
+
+    local target=${1:-}
+    if [[ -z "$target" ]]; then
+        printf "  ${MAUVE}${BOLD}snapshot number to roll back to: ${R}"
+        read -r target
+    fi
+    [[ -z "$target" ]] && { _warn "no snapshot selected — aborted"; return 1; }
+
+    _step "rolling back to snapshot ${target}…"
+    snapper rollback "$target"
+    _ok "rollback queued — reboot to enter the previous state"
+}
+
 cmd_fetch() {
     fastfetch --logo "$LOGO_FILE" 2>/dev/null || fastfetch
 }
@@ -155,11 +182,12 @@ cmd_help() {
     _cmd " update"   "refresh mirrors and upgrade all packages"
     _cmd "󰃺 clean"    "remove cached packages and vacuum journal"
     _cmd "󰔘 snapshot" "create / manage btrfs snapshots"
+    _cmd "󰜉 rollback" "roll back to a previous snapshot"
     _cmd " fetch"    "show system info with vendiOS logo"
     _cmd " info"     "show distro version and system summary"
     _cmd " help"     "show this message"
 
-    printf "\n  ${OVERLAY}run with sudo for snapshot and update${R}\n\n"
+    printf "\n  ${OVERLAY}run with sudo for snapshot, rollback, update${R}\n\n"
 }
 
 # ── dispatch ──────────────────────────────────────────────────────────────────
@@ -167,6 +195,7 @@ case "${1:-help}" in
     update)   cmd_update   ;;
     clean)    cmd_clean    ;;
     snapshot) cmd_snapshot ;;
+    rollback) shift; cmd_rollback "$@" ;;
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;
     help|--help|-h) cmd_help ;;

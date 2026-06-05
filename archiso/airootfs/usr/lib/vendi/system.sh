@@ -21,6 +21,22 @@ BASE_PKGS=(
     brightnessctl playerctl grim slurp wl-clipboard
     polkit-kde-agent qt5-wayland qt6-wayland
     gtk3 gtk4
+    # default browser
+    firefox
+    # silent boot + LUKS + invisible login manager
+    plymouth cryptsetup greetd
+    # automated snapshots + recovery
+    snapper snap-pac
+    # CLI toolkit (improves the bare shell experience)
+    eza bat ripgrep fd fzf
+    # hardware
+    bluez bluez-utils power-profiles-daemon
+    # auto-mount removable media
+    udisks2 gvfs
+    # firewall + time sync
+    ufw chrony
+    # in-memory swap (no on-disk swap exposure with LUKS) + disk health
+    zram-generator smartmontools
 )
 
 sys_pacstrap() {
@@ -63,12 +79,198 @@ sys_keymap() {
 }
 
 sys_initramfs() {
-    local fs=$1
-    local hooks='base udev autodetect microcode modconf kms keyboard keymap block'
+    # Args: <fs> [encrypted=0|1]
+    # plymouth hook owns the framebuffer; the encrypt hook prompts for the
+    # LUKS passphrase, which plymouth intercepts so the input is drawn through
+    # the theme rather than the bare console.
+    local fs=$1 encrypted=${2:-0}
+    local hooks='base udev plymouth autodetect microcode modconf kms keyboard keymap block'
+    [[ "$encrypted" -eq 1 ]] && hooks+=' encrypt'
     [[ "$fs" == 'btrfs' ]] && hooks+=' btrfs' || hooks+=' filesystems'
     hooks+=' fsck'
     sed -i "s|^HOOKS=.*|HOOKS=(${hooks})|" /mnt/etc/mkinitcpio.conf
     chroot_run mkinitcpio -P
+}
+
+# ── Plymouth theme install ────────────────────────────────────────────────────
+sys_install_plymouth() {
+    # Copy the bundled vendiOS theme into the target and set as default.
+    local theme_src=/usr/share/plymouth/themes/vendios
+    local theme_dst=/mnt/usr/share/plymouth/themes/vendios
+    mkdir -p "$theme_dst"
+    cp "${theme_src}/vendios.plymouth" "${theme_dst}/"
+    cp "${theme_src}/vendios.script"   "${theme_dst}/"
+    # Just set the default — sys_initramfs runs mkinitcpio -P afterwards.
+    chroot_run plymouth-set-default-theme vendios
+}
+
+# ── invisible auto-login via greetd (no agetty, no shell flash) ──────────────
+sys_install_greetd() {
+    # greetd's initial_session launches Hyprland directly as the user on vt1.
+    # No greeter UI, no agetty banner, no shell expansion — Plymouth holds the
+    # splash until Hyprland's first frame thanks to plymouth-quit-wait.service.
+    local user=$1
+    mkdir -p /mnt/etc/greetd
+    cat > /mnt/etc/greetd/config.toml <<EOF
+[terminal]
+vt = 1
+switch = true
+
+[default_session]
+command = "Hyprland"
+user = "${user}"
+
+[initial_session]
+command = "Hyprland"
+user = "${user}"
+EOF
+
+    # Make sure agetty doesn't fight greetd over tty1
+    chroot_run systemctl mask getty@tty1.service >/dev/null 2>&1 || true
+    chroot_run systemctl enable greetd.service   >/dev/null 2>&1 || true
+
+    # Hold Plymouth alive until Hyprland's first frame — mask the early-quit
+    # services so the splash persists from boot straight into the compositor.
+    # Hyprland calls `plymouth quit --retain-splash` from exec-once to release
+    # the DRM master cleanly without a black gap.
+    chroot_run systemctl mask plymouth-quit.service      >/dev/null 2>&1 || true
+    chroot_run systemctl mask plymouth-quit-wait.service >/dev/null 2>&1 || true
+
+    # Suppress any /etc/issue banner that might leak in failure modes
+    : > /mnt/etc/issue
+}
+
+# ── pre-update snapshots (snapper + snap-pac) ─────────────────────────────────
+sys_install_snapper() {
+    # snap-pac runs snapper before+after every pacman transaction, so kernel
+    # updates / package breakage become rollback-able with `vendi rollback`.
+    [[ "$1" != "btrfs" ]] && return 0
+
+    # Snapper refuses to create a config if .snapshots exists. Our @snapshots
+    # subvolume IS already mounted there — temporarily detach it so snapper
+    # can scaffold, then write its config to point back at /.snapshots.
+    chroot_run bash -c '
+        set -e
+        umount -l /.snapshots 2>/dev/null || true
+        rmdir /.snapshots 2>/dev/null || true
+        snapper --no-dbus -c root create-config /
+        # snapper created /.snapshots as a regular dir — drop it and re-mount
+        # the dedicated @snapshots subvolume there.
+        umount -l /.snapshots 2>/dev/null || true
+        rm -rf /.snapshots
+        mkdir -p /.snapshots
+        mount /.snapshots
+        chmod 750 /.snapshots
+    '
+
+    sed -i 's/^TIMELINE_LIMIT_HOURLY=.*/TIMELINE_LIMIT_HOURLY="5"/;
+            s/^TIMELINE_LIMIT_DAILY=.*/TIMELINE_LIMIT_DAILY="7"/;
+            s/^TIMELINE_LIMIT_WEEKLY=.*/TIMELINE_LIMIT_WEEKLY="2"/;
+            s/^TIMELINE_LIMIT_MONTHLY=.*/TIMELINE_LIMIT_MONTHLY="0"/;
+            s/^NUMBER_LIMIT=.*/NUMBER_LIMIT="50"/' \
+        /mnt/etc/snapper/configs/root 2>/dev/null || true
+
+    chroot_run systemctl enable snapper-timeline.timer snapper-cleanup.timer
+}
+
+# ── audio + bluetooth + power-profiles per-user services ──────────────────────
+sys_user_services() {
+    local user=$1
+    chroot_run systemctl enable bluetooth power-profiles-daemon
+    # Enable pipewire / wireplumber as user-level services so sound works on
+    # first login without manual `systemctl --user start`.
+    chroot_run systemctl --global enable pipewire pipewire-pulse wireplumber
+    # Persist the user's session services across reboots
+    chroot_run loginctl enable-linger "$user" 2>/dev/null || true
+}
+
+# ── pacman.conf polish ───────────────────────────────────────────────────────
+sys_pacman_polish() {
+    # Faster installs (parallel downloads), prettier output, ILoveCandy easter egg.
+    sed -i -E \
+        -e 's/^#?Color/Color/' \
+        -e 's/^#?VerbosePkgLists/VerbosePkgLists/' \
+        -e 's/^#?ParallelDownloads.*/ParallelDownloads = 8/' \
+        /mnt/etc/pacman.conf
+    # ILoveCandy goes after Color
+    grep -q '^ILoveCandy' /mnt/etc/pacman.conf || \
+        sed -i '/^Color/a ILoveCandy' /mnt/etc/pacman.conf
+}
+
+# ── firewall (UFW) ───────────────────────────────────────────────────────────
+sys_install_firewall() {
+    # Default-deny incoming, allow outgoing — standard desktop posture.
+    chroot_run bash -c '
+        ufw default deny incoming
+        ufw default allow outgoing
+        ufw --force enable
+    '
+    chroot_run systemctl enable ufw
+}
+
+# ── time sync (chrony beats timesyncd for desktops) ──────────────────────────
+sys_install_time() {
+    # Replace systemd-timesyncd with chrony — faster sync, smaller drift.
+    chroot_run systemctl disable systemd-timesyncd 2>/dev/null || true
+    chroot_run systemctl enable  chronyd
+}
+
+# ── ZRAM swap ─────────────────────────────────────────────────────────────────
+sys_install_zram() {
+    # Compressed in-memory swap. With LUKS-encrypted root + no disk swapfile,
+    # zram is the right answer for memory pressure — fast, never touches disk.
+    cat > /mnt/etc/systemd/zram-generator.conf <<'EOF'
+[zram0]
+zram-size = min(ram / 2, 4096)
+compression-algorithm = zstd
+swap-priority = 100
+fs-type = swap
+EOF
+}
+
+# ── journald + oomd: keep /var lean, handle memory pressure ──────────────────
+sys_install_resilience() {
+    # Cap journal size so /var doesn't grow without bound.
+    mkdir -p /mnt/etc/systemd/journald.conf.d
+    cat > /mnt/etc/systemd/journald.conf.d/vendios.conf <<'EOF'
+[Journal]
+SystemMaxUse=200M
+SystemMaxFileSize=20M
+MaxRetentionSec=2week
+EOF
+
+    # systemd-oomd kicks before the kernel OOM killer — much friendlier.
+    chroot_run systemctl enable systemd-oomd
+}
+
+# ── mkinitcpio compression: zstd is faster and smaller than gzip ─────────────
+sys_initramfs_polish() {
+    sed -i -E 's|^#?COMPRESSION=.*|COMPRESSION="zstd"|' /mnt/etc/mkinitcpio.conf
+    sed -i -E 's|^#?COMPRESSION_OPTIONS=.*|COMPRESSION_OPTIONS=(-3)|' /mnt/etc/mkinitcpio.conf
+}
+
+# ── SMART disk health monitoring ─────────────────────────────────────────────
+sys_install_smartd() {
+    chroot_run systemctl enable smartd 2>/dev/null || true
+}
+
+# ── post-install kernel sanity hook ──────────────────────────────────────────
+sys_install_kernel_sync_hook() {
+    # After every linux package transaction, verify the kernel + initramfs
+    # actually landed on the FAT32 /boot. Catches silent breakage early.
+    mkdir -p /mnt/etc/pacman.d/hooks
+    cat > /mnt/etc/pacman.d/hooks/95-vendios-kernel-sync.hook <<'EOF'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/modules/*/vmlinuz
+
+[Action]
+Description = Verifying kernel + initramfs reached /boot...
+When = PostTransaction
+Exec = /usr/bin/bash -c 'for f in /boot/vmlinuz-linux /boot/initramfs-linux.img; do [ -f "$f" ] || { echo "MISSING: $f"; exit 1; }; done'
+EOF
 }
 
 sys_sudo() {
@@ -83,12 +285,16 @@ sys_user_create() {
     local user=$1 pass=$2
     chroot_run useradd -m -G wheel,audio,video,storage,optical,input -s /bin/zsh "$user"
     printf '%s:%s' "$user" "$pass" | chroot_run chpasswd
+    # Silence "Last login: ..." motd so the screen stays clean during the
+    # tiny window between Plymouth and Hyprland.
+    : > "/mnt/home/${user}/.hushlogin"
+    chroot_run chown "${user}:${user}" "/home/${user}/.hushlogin"
 }
 
 sys_services_enable() {
     chroot_run systemctl enable NetworkManager
-    chroot_run systemctl enable fstrim.timer   2>/dev/null || true
-    chroot_run systemctl enable systemd-timesyncd
+    chroot_run systemctl enable fstrim.timer      2>/dev/null || true
+    chroot_run systemctl enable reflector.timer   2>/dev/null || true
 }
 
 sys_install_os_release() {
@@ -334,15 +540,28 @@ zstyle ':completion:*:descriptions' format '%F{#CBA6F7}── %d ──%f'
 export LS_COLORS='di=38;2;137;180;250:ln=38;2;148;226;213:ex=38;2;166;227;161:fi=38;2;205;214;244:*.zip=38;2;250;179;135:*.tar=38;2;250;179;135:*.gz=38;2;250;179;135'
 
 # ── aliases ───────────────────────────────────────────────────
-alias ls='ls --color=auto --group-directories-first'
-alias ll='ls -la --color=auto --group-directories-first'
-alias la='ls -A --color=auto'
-alias lt='ls -laht --color=auto'
-alias grep='grep --color=auto'
+# Modern replacements for classic tools, with classic-name aliases.
+alias ls='eza --group-directories-first --icons=auto'
+alias ll='eza -la --group-directories-first --icons=auto --git'
+alias la='eza -a  --group-directories-first --icons=auto'
+alias lt='eza -la --sort=modified --reverse --icons=auto'
+alias tree='eza --tree --icons=auto'
+alias cat='bat --paging=never --style=plain'
+alias less='bat --paging=always'
+alias grep='rg'
+alias find='fd'
 alias diff='diff --color=auto'
 alias fetch='fastfetch'
 alias update='vendi update'
+alias rollback='vendi rollback'
 alias cls='clear'
+
+# ── fzf integration ───────────────────────────────────────────
+if [[ -f /usr/share/fzf/key-bindings.zsh ]]; then
+    source /usr/share/fzf/key-bindings.zsh
+    source /usr/share/fzf/completion.zsh 2>/dev/null
+    export FZF_DEFAULT_OPTS='--color=bg+:#313244,bg:#1e1e2e,fg:#cdd6f4,fg+:#cdd6f4,hl:#f38ba8,hl+:#f38ba8,info:#cba6f7,marker:#a6e3a1,prompt:#cba6f7,pointer:#f5c2e7,spinner:#94e2d5,header:#94e2d5,border:#cba6f7,gutter:#1e1e2e'
+fi
 alias ..='cd ..'
 alias ...='cd ../..'
 alias mkdir='mkdir -p'
@@ -363,8 +582,7 @@ ZSHRC
 
     cat > "${home}/.zprofile" << 'ZPRO'
 [[ -f ~/.zshrc ]] && source ~/.zshrc
-# autostart Hyprland on tty1 login
-[[ -z "$WAYLAND_DISPLAY" && "$(tty)" == "/dev/tty1" ]] && exec Hyprland
+# Hyprland is launched directly by greetd's initial_session — no exec here.
 ZPRO
 
     chroot_run chown "${user}:${user}" \
@@ -385,6 +603,8 @@ sys_install_wm() {
 
 monitor = ,preferred,auto,1
 
+# Hand off from Plymouth to Hyprland — splash stays visible until WM is up.
+exec-once = plymouth quit --retain-splash
 exec-once = waybar
 exec-once = mako
 exec-once = /usr/lib/polkit-kde-authentication-agent-1

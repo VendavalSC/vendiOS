@@ -2,7 +2,7 @@
 pkgname=vendi-git
 _pkgname=vendi
 pkgver=r1
-pkgrel=1
+pkgrel=2
 pkgdesc="vendiOS CLI, installer, and supporting libraries (git)"
 arch=('any')
 url="https://github.com/VendavalSC/vendiOS"

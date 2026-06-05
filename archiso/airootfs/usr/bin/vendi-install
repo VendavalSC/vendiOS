@@ -32,8 +32,10 @@ CFG_ROOT_PASS=''
 CFG_AUR=1            # install AUR helper (yay)
 CFG_SWAP=0
 CFG_SWAP_SIZE=4      # GiB
+CFG_LUKS=1           # encrypt root with LUKS (recommended default)
+CFG_LUKS_PASS=''
 
-STEPS=(welcome locale timezone keyboard disk partmode filesystem users extras confirm install done)
+STEPS=(welcome locale timezone keyboard disk partmode filesystem encryption users extras confirm install done)
 TOTAL=${#STEPS[@]}
 STEP=0
 
@@ -334,16 +336,30 @@ step_filesystem() {
     done
 }
 
+# ── step: encryption ──────────────────────────────────────────────────────────
+step_encryption() {
+    # Toggle + passphrase. Default is ON because that's what the user asked for
+    # at distro level.
+    ui_confirm "Encrypt root with LUKS?" 8 "$TOTAL" \
+        "vendiOS encrypts your data at rest by default. You'll be asked for the passphrase on every boot." && CFG_LUKS=1 || CFG_LUKS=0
+
+    if [[ $CFG_LUKS -eq 1 ]]; then
+        ui_password "Encryption Passphrase" 8 "$TOTAL" \
+            "Choose a LUKS passphrase:" \
+            CFG_LUKS_PASS || CFG_LUKS=0
+    fi
+}
+
 # ── step: users ───────────────────────────────────────────────────────────────
 step_users() {
     # hostname
-    ui_input "System Setup" 8 "$TOTAL" \
+    ui_input "System Setup" 9 "$TOTAL" \
         "Hostname — the name of this machine on the network:" \
         CFG_HOSTNAME 'vendios' || return 1
 
     # username
     while true; do
-        ui_input "System Setup" 8 "$TOTAL" \
+        ui_input "System Setup" 9 "$TOTAL" \
             "Username — lowercase letters, digits, hyphens, underscores:" \
             CFG_USER '' || return 1
         [[ "$CFG_USER" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] && break
@@ -351,17 +367,17 @@ step_users() {
         sleep 1.5
     done
 
-    ui_password "System Setup" 8 "$TOTAL" "Password for ${CFG_USER}:" \
+    ui_password "System Setup" 9 "$TOTAL" "Password for ${CFG_USER}:" \
         CFG_USER_PASS || return 1
 
-    ui_password "System Setup" 8 "$TOTAL" "Root password:" \
+    ui_password "System Setup" 9 "$TOTAL" "Root password:" \
         CFG_ROOT_PASS || return 1
 }
 
 # ── step: extras ──────────────────────────────────────────────────────────────
 step_extras() {
     ui_clear
-    ui_panel_draw 9 "$TOTAL" "Extra Options"
+    ui_panel_draw 10 "$TOTAL" "Extra Options"
     ui_hints "Space:toggle" "Enter:continue" "Esc:back"
 
     local -a labels=(
@@ -410,7 +426,7 @@ step_extras() {
 # ── step: confirm ─────────────────────────────────────────────────────────────
 step_confirm() {
     ui_clear
-    ui_panel_draw 10 "$TOTAL" "Review & Confirm"
+    ui_panel_draw 11 "$TOTAL" "Review & Confirm"
     ui_hints "Enter:install" "Esc:back"
 
     local sx=$(( UI_X+3 ))
@@ -423,11 +439,12 @@ step_confirm() {
     _row 4  "Disk"       "${CFG_DISK}"
     _row 5  "Mode"       "$( [[ $CFG_MODE == full ]] && echo 'Full disk (wipe)' || echo 'Free space (dual-boot)' )"
     _row 6  "Filesystem" "$CFG_FS"
-    _row 7  "Hostname"   "$CFG_HOSTNAME"
-    _row 8  "User"       "$CFG_USER"
-    _row 9  "Firmware"   "${FIRMWARE^^}"
-    _row 10 "Swap"       "$( [[ $CFG_SWAP -eq 1 ]] && echo "${CFG_SWAP_SIZE} GiB swapfile" || echo 'none' )"
-    _row 11 "AUR helper" "$( [[ $CFG_AUR -eq 1 ]] && echo 'yay' || echo 'none' )"
+    _row 7  "Encryption" "$( [[ $CFG_LUKS -eq 1 ]] && echo 'LUKS2 (aes-xts-512)' || echo 'none' )"
+    _row 8  "Hostname"   "$CFG_HOSTNAME"
+    _row 9  "User"       "$CFG_USER"
+    _row 10 "Firmware"   "${FIRMWARE^^}"
+    _row 11 "Swap"       "$( [[ $CFG_SWAP -eq 1 ]] && echo "${CFG_SWAP_SIZE} GiB swapfile" || echo 'none' )"
+    _row 12 "AUR helper" "$( [[ $CFG_AUR -eq 1 ]] && echo 'yay' || echo 'none' )"
 
     _at $(( 6+13 )) $sx
     printf "${FG_DIM}--------------------------------------------------${R}"
@@ -461,7 +478,7 @@ step_install() {
     _ok()  { _at $(( 6+$1 )) $(( UI_X+3 )); printf "${FG_GREEN}✓ ${R}${FG_DIM}${2}${R}"; }
 
     ui_clear
-    ui_panel_draw 11 "$TOTAL" "Installing vendiOS"
+    ui_panel_draw 12 "$TOTAL" "Installing vendiOS"
     ui_hints "please wait — do not interrupt"
 
     # ── 1. disk prep ──────────────────────────────────────────
@@ -475,7 +492,7 @@ step_install() {
         else
             disk_partition_full_bios "$CFG_DISK"
         fi
-        partprobe "$CFG_DISK"; sleep 1
+        partprobe "$CFG_DISK" 2>/dev/null; sleep 1
         # Both layouts: p1 = FAT32 boot, p2 = root
         CFG_EFI_PART=$(disk_part "$CFG_DISK" 1)
         CFG_ROOT_PART=$(disk_part "$CFG_DISK" 2)
@@ -485,24 +502,38 @@ step_install() {
     fi
     _ok 4 "Disk partitioned"
 
-    # ── 2. format ─────────────────────────────────────────────
+    # ── 2. encrypt (LUKS) ─────────────────────────────────────
+    # When CFG_LUKS=1, we LUKS-format the root partition first; from this
+    # point on, FS_TARGET is the mapper device, not the raw partition.
+    local FS_TARGET="$CFG_ROOT_PART"
+    local LUKS_UUID=''
+    if [[ $CFG_LUKS -eq 1 ]]; then
+        _status 12 "Encrypting root partition"
+        _log "cryptsetup luksFormat"
+        disk_luks_format "$CFG_ROOT_PART" "$CFG_LUKS_PASS"  >>"$INSTALL_LOG" 2>&1
+        disk_luks_open   "$CFG_ROOT_PART" "$CFG_LUKS_PASS"  >>"$INSTALL_LOG" 2>&1
+        LUKS_UUID=$(disk_luks_uuid "$CFG_ROOT_PART")
+        FS_TARGET=/dev/mapper/cryptroot
+    fi
+
+    # ── 3. format ─────────────────────────────────────────────
     _status 15 "Formatting partitions"
     _log "mkfs.${CFG_FS}"
     [[ -n "$CFG_EFI_PART" ]] && disk_format_boot "$CFG_EFI_PART"
     if [[ "$CFG_FS" == 'btrfs' ]]; then
-        disk_format_root_btrfs "$CFG_ROOT_PART"
+        disk_format_root_btrfs "$FS_TARGET"
     else
-        disk_format_root_ext4 "$CFG_ROOT_PART"
+        disk_format_root_ext4 "$FS_TARGET"
     fi
     _ok 5 "Partitions formatted"
 
-    # ── 3. mount ──────────────────────────────────────────────
+    # ── 4. mount ──────────────────────────────────────────────
     _status 20 "Mounting filesystems"
     _log "mount"
     if [[ "$CFG_FS" == 'btrfs' ]]; then
-        disk_mount_btrfs "$CFG_ROOT_PART" "$CFG_EFI_PART"
+        disk_mount_btrfs "$FS_TARGET" "$CFG_EFI_PART"
     else
-        disk_mount_ext4 "$CFG_ROOT_PART" "$CFG_EFI_PART"
+        disk_mount_ext4 "$FS_TARGET" "$CFG_EFI_PART"
     fi
     _ok 6 "Filesystems mounted"
 
@@ -536,10 +567,14 @@ step_install() {
     sys_hostname "$CFG_HOSTNAME"
     sys_keymap "$CFG_KEYMAP"
 
-    # ── 9. initramfs ──────────────────────────────────────────
-    _status 73 "Building initramfs"
-    _log "mkinitcpio"
-    sys_initramfs "$CFG_FS" >>"$INSTALL_LOG" 2>&1
+    # ── 9. plymouth + initramfs ───────────────────────────────
+    _status 73 "Installing Plymouth splash"
+    _log "plymouth theme"
+    sys_install_plymouth >>"$INSTALL_LOG" 2>&1
+    sys_initramfs_polish
+    _status 75 "Building initramfs"
+    _log "mkinitcpio (zstd)"
+    sys_initramfs "$CFG_FS" "$CFG_LUKS" >>"$INSTALL_LOG" 2>&1
     _ok 9 "Initramfs built"
 
     # ── 10. users ─────────────────────────────────────────────
@@ -560,9 +595,20 @@ step_install() {
         echo '/swapfile none swap defaults 0 0' >> /mnt/etc/fstab
     fi
 
-    # ── 12. services ──────────────────────────────────────────
+    # ── 12. services + polish ─────────────────────────────────
     _status 82 "Enabling services"
-    sys_services_enable >>"$INSTALL_LOG" 2>&1
+    sys_services_enable    >>"$INSTALL_LOG" 2>&1
+    sys_user_services      "$CFG_USER" >>"$INSTALL_LOG" 2>&1
+    sys_install_greetd     "$CFG_USER" >>"$INSTALL_LOG" 2>&1
+    sys_pacman_polish
+    sys_install_firewall   >>"$INSTALL_LOG" 2>&1
+    sys_install_time       >>"$INSTALL_LOG" 2>&1
+    sys_install_zram
+    sys_install_resilience >>"$INSTALL_LOG" 2>&1
+    sys_install_smartd     >>"$INSTALL_LOG" 2>&1
+    [[ "$CFG_FS" == 'btrfs' ]] && \
+        sys_install_snapper "$CFG_FS" >>"$INSTALL_LOG" 2>&1 || true
+    sys_install_kernel_sync_hook
 
     # ── 13. system identity ───────────────────────────────────
     _status 84 "System identity"
@@ -594,7 +640,7 @@ step_install() {
     _status 93 "Installing Limine bootloader"
     _log "limine"
     local partuuid; partuuid=$(disk_partuuid "$CFG_ROOT_PART")
-    limine_install "$CFG_DISK" "$FIRMWARE" "$partuuid" "$CFG_FS" >>"$INSTALL_LOG" 2>&1
+    limine_install "$CFG_DISK" "$FIRMWARE" "$partuuid" "$CFG_FS" "$LUKS_UUID" >>"$INSTALL_LOG" 2>&1
     _ok 12 "Limine installed"
 
     # ── 16. done ──────────────────────────────────────────────
@@ -611,7 +657,7 @@ step_install() {
 # ── step: done ────────────────────────────────────────────────────────────────
 step_done() {
     ui_clear
-    ui_panel_draw 12 "$TOTAL" "Installation Complete"
+    ui_panel_draw 13 "$TOTAL" "Installation Complete"
     ui_hints "Enter:reboot" "Esc:shell" "L:view log"
 
     local sx=$(( UI_X+3 ))
@@ -659,6 +705,7 @@ main() {
             disk)       step_disk       || result=$? ;;
             partmode)   step_partmode   || result=$? ;;
             filesystem) step_filesystem || result=$? ;;
+            encryption) step_encryption || result=$? ;;
             users)      step_users      || result=$? ;;
             extras)     step_extras     || result=$? ;;
             confirm)    step_confirm    || result=$? ;;

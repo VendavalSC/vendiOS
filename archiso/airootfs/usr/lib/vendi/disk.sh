@@ -112,6 +112,24 @@ disk_format_boot()       { mkfs.fat -F32 -n VENDIBOOT "$1" >/dev/null 2>&1; }
 disk_format_root_btrfs() { mkfs.btrfs -f -L vendios "$1" >/dev/null 2>&1; }
 disk_format_root_ext4()  { mkfs.ext4  -F -L vendios "$1" >/dev/null 2>&1; }
 
+# ── LUKS encryption ───────────────────────────────────────────────────────────
+# disk_luks_format <partition> <passphrase>  → creates LUKS container
+# disk_luks_open   <partition> <passphrase>  → opens at /dev/mapper/cryptroot
+# disk_luks_uuid   <partition>               → UUID of the LUKS header
+disk_luks_format() {
+    local part=$1 pass=$2
+    printf '%s' "$pass" | cryptsetup --batch-mode --type luks2 \
+        --cipher aes-xts-plain64 --key-size 512 --hash sha512 \
+        --pbkdf argon2id luksFormat "$part" -
+}
+
+disk_luks_open() {
+    local part=$1 pass=$2
+    printf '%s' "$pass" | cryptsetup --batch-mode open "$part" cryptroot -
+}
+
+disk_luks_uuid() { blkid -s UUID -o value "$1" 2>/dev/null; }
+
 # Legacy alias — used by older code paths
 disk_format_efi() { disk_format_boot "$1"; }
 
@@ -121,31 +139,35 @@ disk_format_efi() { disk_format_boot "$1"; }
 
 disk_mount_btrfs() {
     local root=$1 boot=${2:-}
-    mount "$root" /mnt
-    btrfs subvolume create /mnt/@
-    btrfs subvolume create /mnt/@home
-    btrfs subvolume create /mnt/@var
-    btrfs subvolume create /mnt/@snapshots
-    umount /mnt
+    {
+        mount "$root" /mnt
+        btrfs subvolume create /mnt/@
+        btrfs subvolume create /mnt/@home
+        btrfs subvolume create /mnt/@var
+        btrfs subvolume create /mnt/@snapshots
+        umount /mnt
 
-    local opts='noatime,compress=zstd:1,space_cache=v2'
-    mount -o "${opts},subvol=@"          "$root" /mnt
-    mkdir -p /mnt/{home,var,.snapshots,boot}
-    mount -o "${opts},subvol=@home"      "$root" /mnt/home
-    mount -o "${opts},subvol=@var"       "$root" /mnt/var
-    mount -o "${opts},subvol=@snapshots" "$root" /mnt/.snapshots
-    if [[ -n "$boot" ]]; then
-        mount "$boot" /mnt/boot
-    fi
+        local opts='noatime,compress=zstd:1,space_cache=v2'
+        mount -o "${opts},subvol=@"          "$root" /mnt
+        mkdir -p /mnt/{home,var,.snapshots,boot}
+        mount -o "${opts},subvol=@home"      "$root" /mnt/home
+        mount -o "${opts},subvol=@var"       "$root" /mnt/var
+        mount -o "${opts},subvol=@snapshots" "$root" /mnt/.snapshots
+        if [[ -n "$boot" ]]; then
+            mount "$boot" /mnt/boot
+        fi
+    } >/dev/null 2>&1
 }
 
 disk_mount_ext4() {
     local root=$1 boot=${2:-}
-    mount "$root" /mnt
-    if [[ -n "$boot" ]]; then
-        mkdir -p /mnt/boot
-        mount "$boot" /mnt/boot
-    fi
+    {
+        mount "$root" /mnt
+        if [[ -n "$boot" ]]; then
+            mkdir -p /mnt/boot
+            mount "$boot" /mnt/boot
+        fi
+    } >/dev/null 2>&1
 }
 
 # ── limine install ────────────────────────────────────────────────────────────
@@ -153,10 +175,22 @@ disk_mount_ext4() {
 # live on the FAT32 /boot partition. Pacstrap put the kernel there already.
 
 limine_install() {
-    local disk=$1 firmware=$2 root_partuuid=$3 fs=$4
-    local cmdline="root=PARTUUID=${root_partuuid} rw quiet loglevel=0"
-    cmdline+=" rd.systemd.show_status=false rd.udev.log_level=3"
-    cmdline+=" systemd.show_status=false vt.global_cursor_default=0"
+    # Args: <disk> <firmware> <root_partuuid> <fs> [luks_uuid]
+    # When luks_uuid is set, the cmdline uses cryptdevice= + /dev/mapper/cryptroot
+    # so plymouth-encrypt unlocks the root before mounting.
+    local disk=$1 firmware=$2 root_partuuid=$3 fs=$4 luks_uuid=${5:-}
+    local cmdline=''
+
+    if [[ -n "$luks_uuid" ]]; then
+        cmdline="cryptdevice=UUID=${luks_uuid}:cryptroot root=/dev/mapper/cryptroot"
+    else
+        cmdline="root=PARTUUID=${root_partuuid}"
+    fi
+    cmdline+=" rw quiet loglevel=3"                            # only warnings+errors
+    cmdline+=" rd.systemd.show_status=false rd.udev.log_level=0"  # silence udev in initramfs
+    cmdline+=" systemd.show_status=false udev.log_level=0"
+    cmdline+=" vt.global_cursor_default=0 fbcon=nodefer"        # no cursor, splash unhidden
+    cmdline+=" splash bgrt_disable"                              # Plymouth, no UEFI bgrt
     [[ "$fs" == 'btrfs' ]] && cmdline+=' rootflags=subvol=@'
 
     local boot=/mnt/boot
