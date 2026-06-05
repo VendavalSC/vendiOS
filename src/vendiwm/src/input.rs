@@ -6,9 +6,10 @@
 //
 // The keymap is currently hardcoded; KDL config + hot-reload lands later.
 
-use smithay::input::keyboard::{ModifiersState, xkb};
+use smithay::input::keyboard::ModifiersState;
 use smithay::backend::input::KeyState;
 
+use crate::config::{Config, chord_from};
 use crate::layout::Direction;
 
 #[derive(Debug, Clone)]
@@ -27,26 +28,15 @@ pub enum Action {
     Quit,
 }
 
-/// Resolve a keypress to an Action. Returns None for keys we don't bind.
-pub fn handle(keysym: u32, state: KeyState, mods: &ModifiersState) -> Option<Action> {
-    // Only intercept on press.
+/// Resolve a keypress to an Action via the loaded config. Returns None for
+/// keys not bound by the user (or only on release).
+pub fn handle(config: &Config, keysym: u32, state: KeyState, mods: &ModifiersState) -> Option<Action> {
     if state != KeyState::Pressed { return None; }
-    // Only intercept Super combos. Anything else goes to the focused client.
-    if !mods.logo { return None; }
-
-    match keysym {
-        // Spawn — Super+Return launches a terminal.
-        k if k == xkb::keysyms::KEY_Return  => Some(Action::Spawn("alacritty".into())),
-        // Close focused window.
-        k if k == xkb::keysyms::KEY_q       => Some(Action::Close),
-        // Focus cycling.
-        k if k == xkb::keysyms::KEY_j       => Some(Action::FocusNext),
-        k if k == xkb::keysyms::KEY_k       => Some(Action::FocusPrev),
-        // Next-split direction override.
-        k if k == xkb::keysyms::KEY_h       => Some(Action::SetNextSplit(Direction::Horizontal)),
-        k if k == xkb::keysyms::KEY_v       => Some(Action::SetNextSplit(Direction::Vertical)),
-        // Hard quit (development convenience — Super+Shift+E in real use).
-        k if k == xkb::keysyms::KEY_Escape && mods.shift => Some(Action::Quit),
-        _ => None,
-    }
+    let chord = chord_from(mods, keysym);
+    config.keybinds.get(&chord).cloned()
 }
+
+// Keep Direction in scope for the action-action ladder to silence unused-import
+// warnings when reorganizing.
+#[allow(dead_code)]
+fn _force_direction_import(_: Direction) {}

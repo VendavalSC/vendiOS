@@ -4,6 +4,7 @@
 // Modeled after smithay's `examples/minimal.rs` (the canonical reference for
 // the current API), but split out so backends share the same State.
 
+use crate::config::Config;
 use crate::layout::Tree;
 use smithay::{
     desktop::{LayerSurface, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
@@ -66,6 +67,9 @@ pub struct State {
     // i3-style split tree. We update window positions in `space` from this
     // tree after every change. Per-workspace trees come later (v0.2+).
     pub layout:                Tree,
+
+    // Compiled keybinds + future settings, loaded at startup from KDL.
+    pub config:                Config,
 
     // Current pointer position in compositor logical coordinates.
     pub pointer_location:      Point<f64, Logical>,

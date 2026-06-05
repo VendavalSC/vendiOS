@@ -14,6 +14,7 @@
 //   bar/       — built-in status bar (workspaces, title, tray, indicators)
 
 pub mod backends;
+pub mod config;
 pub mod input;
 pub mod ipc;
 pub mod layout;

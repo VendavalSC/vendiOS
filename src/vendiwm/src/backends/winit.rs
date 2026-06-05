@@ -96,6 +96,12 @@ pub fn run() -> Result<()> {
         Err(e) => tracing::warn!(?e, "failed to bind wl_display — EGL clients may not work"),
     }
 
+    let config = crate::config::Config::load()
+        .unwrap_or_else(|e| {
+            tracing::warn!(?e, "config load failed; using empty keybinds");
+            crate::config::Config { keybinds: Default::default() }
+        });
+
     let mut state = State {
         compositor_state,
         xdg_shell_state,
@@ -109,6 +115,7 @@ pub fn run() -> Result<()> {
         space,
         popups: PopupManager::default(),
         layout: crate::layout::Tree::new(),
+        config,
         pointer_location: (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
     };
@@ -149,9 +156,9 @@ pub fn run() -> Result<()> {
                         event.key_code(),
                         key_state,
                         0.into(), 0,
-                        |_, mods, handle| {
+                        |data, mods, handle| {
                             let sym = handle.modified_sym();
-                            match crate::input::handle(sym.raw(), key_state, mods) {
+                            match crate::input::handle(&data.config, sym.raw(), key_state, mods) {
                                 Some(a) => FilterResult::Intercept(Some(a)),
                                 None    => FilterResult::Forward,
                             }
