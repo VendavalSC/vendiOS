@@ -5,6 +5,7 @@
 // the current API), but split out so backends share the same State.
 
 use smithay::{
+    desktop::{PopupManager, Space, Window},
     input::{
         Seat, SeatHandler, SeatState,
         pointer::CursorImageStatus,
@@ -21,6 +22,7 @@ use smithay::{
             CompositorClientState, CompositorHandler, CompositorState,
         },
         dmabuf::{DmabufHandler, DmabufState, DmabufGlobal, ImportNotifier},
+        output::{OutputHandler, OutputManagerState},
         selection::{
             SelectionHandler,
             data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler},
@@ -37,13 +39,20 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 
 pub struct State {
-    pub compositor_state:   CompositorState,
-    pub xdg_shell_state:    XdgShellState,
-    pub shm_state:          ShmState,
-    pub seat_state:         SeatState<Self>,
-    pub data_device_state:  DataDeviceState,
-    pub dmabuf_state:       DmabufState,
-    pub seat:               Seat<Self>,
+    pub compositor_state:      CompositorState,
+    pub xdg_shell_state:       XdgShellState,
+    pub shm_state:             ShmState,
+    pub seat_state:            SeatState<Self>,
+    pub data_device_state:     DataDeviceState,
+    pub dmabuf_state:          DmabufState,
+    pub output_manager_state:  OutputManagerState,
+    pub seat:                  Seat<Self>,
+
+    // Unified window manager — handles toplevels, popups, layer-shell rendering,
+    // multi-output stacking, focus stack. Tiling layout layers on top of this.
+    pub space:                 Space<Window>,
+    pub popups:                PopupManager,
+
     // Queued dmabuf imports — the backend drains and processes these each
     // frame, where it has &mut access to the renderer.
     pub pending_dmabuf_imports: Vec<(Dmabuf, ImportNotifier)>,
@@ -91,11 +100,14 @@ impl XdgShellHandler for State {
         &mut self.xdg_shell_state
     }
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Mark new toplevels Activated so clients render at full opacity.
-        // Real layout placement lands in the tiling tree (next iteration).
+        // Mark Activated so clients render at full opacity, then wrap in a
+        // smithay Window and map at (0, 0). Tiling layout will reposition
+        // this once the layout tree lands.
         surface.with_pending_state(|s| { s.states.set(xdg_toplevel::State::Activated); });
         surface.send_configure();
-        tracing::info!("new toplevel");
+        let window = Window::new_wayland_window(surface);
+        self.space.map_element(window, (0, 0), true);
+        tracing::info!("new toplevel — mapped at (0, 0)");
     }
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
@@ -112,6 +124,8 @@ impl DataDeviceHandler for State {
     }
 }
 impl WaylandDndGrabHandler for State {}
+
+impl OutputHandler for State {}
 
 impl SeatHandler for State {
     type KeyboardFocus = WlSurface;

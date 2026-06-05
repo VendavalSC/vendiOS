@@ -12,16 +12,14 @@ use smithay::{
         input::{InputEvent, KeyboardKeyEvent},
         renderer::{
             Color32F, Frame, Renderer, ImportDma, ImportMemWl,
-            element::{
-                Kind,
-                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
-            },
             gles::GlesRenderer,
             utils::draw_render_elements,
         },
         winit::{self, WinitEvent},
     },
+    desktop::{PopupManager, Space, Window, space::space_render_elements},
     input::keyboard::FilterResult,
+    output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::wayland_server::{Display, ListeningSocket, protocol::wl_surface},
     utils::{Rectangle, Transform},
     wayland::{
@@ -29,6 +27,8 @@ use smithay::{
             CompositorState, SurfaceAttributes, TraversalAction, with_surface_tree_downward,
         },
         dmabuf::DmabufState,
+        output::OutputManagerState,
+        seat::WaylandFocus,
         selection::data_device::DataDeviceState,
         shell::xdg::XdgShellState,
         shm::ShmState,
@@ -45,12 +45,34 @@ pub fn run() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("init winit backend: {e:?}"))?;
 
     // Globals — every protocol we expose to clients.
-    let compositor_state  = CompositorState::new::<State>(&dh);
-    let xdg_shell_state   = XdgShellState::new::<State>(&dh);
-    let shm_state         = ShmState::new::<State>(&dh, backend.renderer().shm_formats());
-    let data_device_state = DataDeviceState::new::<State>(&dh);
-    let mut seat_state    = smithay::input::SeatState::new();
-    let seat              = seat_state.new_wl_seat(&dh, "vendi-seat-0");
+    let compositor_state     = CompositorState::new::<State>(&dh);
+    let xdg_shell_state      = XdgShellState::new::<State>(&dh);
+    let shm_state            = ShmState::new::<State>(&dh, backend.renderer().shm_formats());
+    let data_device_state    = DataDeviceState::new::<State>(&dh);
+    let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
+    let mut seat_state       = smithay::input::SeatState::new();
+    let seat                 = seat_state.new_wl_seat(&dh, "vendi-seat-0");
+
+    // Set up a wl_output for the winit window — clients use this to size
+    // themselves correctly. Mode is sized to the current window.
+    let window_size = backend.window_size();
+    let output = Output::new(
+        "vendiwm-winit".to_string(),
+        PhysicalProperties {
+            size:          (0, 0).into(),
+            subpixel:      Subpixel::Unknown,
+            make:          "vendi".into(),
+            model:         "Winit".into(),
+            serial_number: "0".into(),
+        },
+    );
+    let _output_global = output.create_global::<State>(&dh);
+    let mode = Mode { size: window_size, refresh: 60_000 };
+    output.change_current_state(Some(mode), Some(Transform::Flipped180), None, Some((0, 0).into()));
+    output.set_preferred(mode);
+
+    let mut space: Space<Window> = Space::default();
+    space.map_output(&output, (0, 0));
 
     // linux-dmabuf v3 (GPU buffer sharing — required for alacritty, firefox).
     let dmabuf_formats = backend.renderer().dmabuf_formats();
@@ -71,7 +93,10 @@ pub fn run() -> Result<()> {
         seat_state,
         data_device_state,
         dmabuf_state,
+        output_manager_state,
         seat,
+        space,
+        popups: PopupManager::default(),
         pending_dmabuf_imports: Vec::new(),
     };
 
@@ -104,12 +129,13 @@ pub fn run() -> Result<()> {
                     );
                 }
                 InputEvent::PointerMotionAbsolute { .. } => {
-                    // Auto-focus the most recent toplevel for now so keypresses
-                    // reach the test client. Proper focus follows once the
-                    // input/focus module lands.
-                    if let Some(surf) = state.xdg_shell_state.toplevel_surfaces().iter().next().cloned() {
-                        let s = surf.wl_surface().clone();
-                        keyboard.set_focus(&mut state, Some(s), 0.into());
+                    // Auto-focus the topmost window in the space so keypresses
+                    // reach the test client. Proper pointer-focus follows once
+                    // the input module lands.
+                    let focus = state.space.elements().next().cloned()
+                        .and_then(|w| w.wl_surface().map(|c| c.into_owned()));
+                    if let Some(surf) = focus {
+                        keyboard.set_focus(&mut state, Some(surf), 0.into());
                     }
                 }
                 _ => {}
@@ -125,22 +151,19 @@ pub fn run() -> Result<()> {
         let size   = backend.window_size();
         let damage = Rectangle::from_size(size);
 
+        // Refresh the space's internal state (window damage, frame timing).
+        state.space.refresh();
+
         // Scope the framebuffer borrow so it's released before backend.submit.
         {
             let (renderer, mut framebuffer) = backend.bind().context("bind framebuffer")?;
 
-            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = state
-                .xdg_shell_state
-                .toplevel_surfaces()
-                .iter()
-                .flat_map(|surf| render_elements_from_surface_tree(
-                    renderer,
-                    surf.wl_surface(),
-                    (0, 0),
-                    1.0, 1.0,
-                    Kind::Unspecified,
-                ))
-                .collect();
+            let elements = space_render_elements(
+                renderer,
+                [&state.space],
+                &output,
+                1.0,
+            ).context("gather space render elements")?;
 
             let mut frame = renderer
                 .render(&mut framebuffer, size, Transform::Flipped180)
@@ -153,8 +176,11 @@ pub fn run() -> Result<()> {
                 .context("draw elements")?;
             let _ = frame.finish().context("finish frame")?;
 
-            for surf in state.xdg_shell_state.toplevel_surfaces() {
-                send_frames_surface_tree(surf.wl_surface(), start_time.elapsed().as_millis() as u32);
+            // Send frame callbacks to every mapped window so they keep drawing.
+            for window in state.space.elements() {
+                if let Some(surf) = window.wl_surface() {
+                    send_frames_surface_tree(&surf, start_time.elapsed().as_millis() as u32);
+                }
             }
 
             if let Some(stream) = listener.accept().context("accept client")? {
