@@ -15,5 +15,6 @@
 
 pub mod backends;
 pub mod input;
+pub mod ipc;
 pub mod layout;
 pub mod state;

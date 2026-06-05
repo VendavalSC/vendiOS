@@ -123,6 +123,10 @@ pub fn run() -> Result<()> {
         .unwrap_or_else(|| "<unknown>".into());
     tracing::info!(socket = %socket_name, "vendiwm listening — set WAYLAND_DISPLAY to this and spawn a client");
 
+    // IPC socket paired with the wayland socket name.
+    let mut ipc = crate::ipc::Server::bind(&socket_name)
+        .context("start IPC server")?;
+
     let mut clients: Vec<_> = Vec::new();
     let start_time = std::time::Instant::now();
     let mut quit_requested = false;
@@ -262,6 +266,9 @@ pub fn run() -> Result<()> {
             }
 
             display.dispatch_clients(&mut state).context("dispatch clients")?;
+
+            // Pump IPC requests once per frame.
+            ipc.poll(&mut state);
 
             // Process queued dmabuf imports — the renderer needs &mut access
             // which the dmabuf_imported handler couldn't get.
