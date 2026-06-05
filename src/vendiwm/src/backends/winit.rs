@@ -65,7 +65,6 @@ pub fn run() -> Result<()> {
 
     // Set up a wl_output for the winit window — clients use this to size
     // themselves correctly. Mode is sized to the current window.
-    let window_size = backend.window_size();
     let output = Output::new(
         "vendiwm-winit".to_string(),
         PhysicalProperties {
@@ -77,8 +76,15 @@ pub fn run() -> Result<()> {
         },
     );
     let _output_global = output.create_global::<State>(&dh);
-    let mode = Mode { size: window_size, refresh: 60_000 };
-    output.change_current_state(Some(mode), Some(Transform::Flipped180), None, Some((0, 0).into()));
+    // Initial mode = whatever winit reports right now. Real size lands on the
+    // first Resized event a frame later — relayout fires then anyway.
+    let mode = Mode { size: backend.window_size(), refresh: 60_000 };
+    output.change_current_state(
+        Some(mode),
+        Some(Transform::Flipped180),
+        Some(smithay::output::Scale::Integer(1)),
+        Some((0, 0).into()),
+    );
     output.set_preferred(mode);
 
     let mut space: Space<Window> = Space::default();
@@ -233,8 +239,17 @@ pub fn run() -> Result<()> {
             return Ok(());
         }
 
+        // Each frame: sync the output's mode to what winit thinks the window
+        // currently is. If it changed, relayout so the client gets reconfigured.
         let size   = backend.window_size();
         let damage = Rectangle::from_size(size);
+        let mode   = Mode { size, refresh: 60_000 };
+        let last_mode = output.current_mode();
+        if last_mode.map(|m| m.size) != Some(size) {
+            output.change_current_state(Some(mode), None, None, None);
+            output.set_preferred(mode);
+            state.relayout();
+        }
 
         // Refresh the space's internal state (window damage, frame timing).
         state.space.refresh();

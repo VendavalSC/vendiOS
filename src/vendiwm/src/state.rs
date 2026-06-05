@@ -114,6 +114,20 @@ impl CompositorHandler for State {
     }
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        // Walk up to the root surface and tell the matching Window to
+        // recompute its bounding box from the (now committed) surface tree.
+        // Without this, Window::geometry() stays (0,0,0,0) and the window
+        // never makes it into render output.
+        use smithay::wayland::compositor::{get_parent, is_sync_subsurface};
+        if is_sync_subsurface(surface) { return; }
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) { root = parent; }
+        let window = self.space.elements()
+            .find(|w| w.wl_surface().map(|s| *s == root).unwrap_or(false))
+            .cloned();
+        if let Some(window) = window {
+            window.on_commit();
+        }
     }
 }
 
@@ -126,19 +140,18 @@ impl XdgShellHandler for State {
         &mut self.xdg_shell_state
     }
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Mark Activated so clients render at full opacity, then insert into
-        // the tiling tree and relayout. relayout() pushes the new positions
-        // into `space` and sends configure to every affected window.
+        // Mark Activated. We defer the configure until relayout has computed
+        // the size — otherwise the client draws at its default size and we
+        // get a half-filled tile until the next round-trip.
         surface.with_pending_state(|s| { s.states.set(xdg_toplevel::State::Activated); });
-        surface.send_configure();
         let id = smithay::reexports::wayland_server::Resource::id(surface.wl_surface()).protocol_id();
         let window = Window::new_wayland_window(surface);
         self.layout.insert(window.clone());
         self.space.map_element(window, (0, 0), true);
-        self.relayout();
+        self.relayout();  // sets size in pending state and sends configure.
         self.pending_ipc_events.push(crate::ipc::Event::WindowOpened {
             id,
-            title: String::new(),  // populated when client sets it via xdg_toplevel.set_title
+            title: String::new(),
         });
         tracing::info!("new toplevel inserted");
     }
@@ -262,24 +275,14 @@ impl State {
     /// Walk the layout tree and push each window's computed rectangle into
     /// the space + send xdg_toplevel.configure so the client resizes.
     pub fn relayout(&mut self) {
-        // Drop any windows whose clients have died — they'd leave a hole
-        // in the tree otherwise.
         self.layout.prune_dead();
-        // Use the first output's geometry as the tile viewport. Once we have
-        // per-monitor workspaces this becomes "the output for this workspace".
         let Some(output) = self.space.outputs().next().cloned() else { return };
-        let geometry = match self.space.output_geometry(&output) {
-            Some(g) => g,
-            None => return,
-        };
+        let Some(geometry) = self.space.output_geometry(&output) else { return };
         for (window, rect) in self.layout.layout(geometry) {
-            // Send size to the client via xdg_toplevel.configure.
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
-                toplevel.send_pending_configure();
+                toplevel.send_configure();
             }
-            // Map at the computed location. `false` = don't activate (focus
-            // is managed by the layout tree, not by map ordering).
             self.space.map_element(window, rect.loc, false);
         }
     }

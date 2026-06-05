@@ -125,12 +125,18 @@ impl WindowHandler for App {
     fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _window: &Window) {
         self.exit = true;
     }
-    fn configure(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, _window: &Window, configure: WindowConfigure, _serial: u32) {
+    fn configure(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, _window: &Window, configure: WindowConfigure, serial: u32) {
+        let old_w = self.w;
+        let old_h = self.h;
+        let nw = configure.new_size.0.map(u32::from);
+        let nh = configure.new_size.1.map(u32::from);
+        eprintln!("[demo] configure serial={serial} new_size=({nw:?},{nh:?})");
         if let Some(size) = configure.new_size.0 { self.w = size.into(); }
         if let Some(size) = configure.new_size.1 { self.h = size.into(); }
         if self.w == 0 { self.w = W; }
         if self.h == 0 { self.h = H; }
-        if self.first_configure {
+        eprintln!("[demo] drawing at {}x{}", self.w, self.h);
+        if self.first_configure || self.w != old_w || self.h != old_h {
             self.first_configure = false;
             self.draw(qh);
         }
