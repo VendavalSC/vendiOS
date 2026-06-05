@@ -13,7 +13,7 @@ name = "vendiwm"
 path = "src/main.rs"
 
 [features]
-default     = ["winit"]
+default     = ["winit", "udev"]
 # Backends
 winit       = ["smithay/backend_winit"]    # nested in another compositor, for dev
 udev        = [
