@@ -18,14 +18,17 @@ use anyhow::{Context, Result};
 use smithay::{
     backend::{
         drm::{DrmDevice, DrmDeviceFd, DrmNode, NodeType},
+        egl::{EGLContext, EGLDisplay, context::ContextPriority},
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
+        renderer::gles::GlesRenderer,
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
     },
     reexports::{
         calloop::EventLoop,
         drm::control::{Device as ControlDevice, connector},
+        gbm::{Device as GbmDevice},
         input::Libinput,
         rustix::fs::OFlags,
         wayland_server::Display,
@@ -117,20 +120,39 @@ pub struct UdevData {
 
 pub struct DeviceState {
     pub _drm:       DrmDevice,
+    pub _gbm:       GbmDevice<DrmDeviceFd>,
+    pub _renderer:  GlesRenderer,
     pub _gpu_path:  PathBuf,
     pub connectors: Vec<connector::Info>,
 }
 
 impl UdevData {
     fn open_drm_device(&mut self, path: &PathBuf) -> Result<()> {
+        // 1. Open the device fd via libseat (rev'd up with DRM master).
         let fd = self.session.open(path,
             OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
         ).map_err(|e| anyhow::anyhow!("session.open {path:?}: {e:?}"))?;
         let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
-        let (drm, _notifier) = DrmDevice::new(device_fd, true)
+
+        // 2. DrmDevice — atomic KMS in modern mode.
+        let (drm, _notifier) = DrmDevice::new(device_fd.clone(), true)
             .map_err(|e| anyhow::anyhow!("DrmDevice::new: {e:?}"))?;
 
-        // Enumerate connectors so we can log + later create surfaces.
+        // 3. GbmDevice on the same fd — used for buffer allocation that
+        //    DRM scanout + EGL can consume.
+        let gbm = GbmDevice::new(device_fd)
+            .map_err(|e| anyhow::anyhow!("GbmDevice::new: {e:?}"))?;
+
+        // 4. EGL on top of GBM, then a GlesRenderer. SAFETY: the EGLDisplay is
+        //    fresh and we don't already have a current context on this thread.
+        let egl_display = unsafe { EGLDisplay::new(gbm.clone())
+            .map_err(|e| anyhow::anyhow!("EGLDisplay::new: {e:?}"))? };
+        let egl_context = EGLContext::new_with_priority(&egl_display, ContextPriority::High)
+            .map_err(|e| anyhow::anyhow!("EGLContext::new: {e:?}"))?;
+        let renderer = unsafe { GlesRenderer::new(egl_context) }
+            .map_err(|e| anyhow::anyhow!("GlesRenderer::new: {e:?}"))?;
+
+        // 5. Enumerate connectors so we can log + later create surfaces.
         let resources = drm.resource_handles()
             .map_err(|e| anyhow::anyhow!("resource_handles: {e:?}"))?;
         let mut connectors = Vec::new();
@@ -150,6 +172,8 @@ impl UdevData {
             .map_err(|e| anyhow::anyhow!("DrmNode::from_path: {e:?}"))?;
         self.drm_devices.insert(node, DeviceState {
             _drm: drm,
+            _gbm: gbm,
+            _renderer: renderer,
             _gpu_path: path.clone(),
             connectors,
         });
