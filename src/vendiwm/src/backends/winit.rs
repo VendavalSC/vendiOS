@@ -8,9 +8,10 @@ use smithay::reexports::winit::platform::pump_events::PumpStatus;
 
 use smithay::{
     backend::{
+        allocator::dmabuf::Dmabuf,
         input::{InputEvent, KeyboardKeyEvent},
         renderer::{
-            Color32F, Frame, Renderer,
+            Color32F, Frame, Renderer, ImportDma, ImportMemWl,
             element::{
                 Kind,
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
@@ -27,6 +28,7 @@ use smithay::{
         compositor::{
             CompositorState, SurfaceAttributes, TraversalAction, with_surface_tree_downward,
         },
+        dmabuf::DmabufState,
         selection::data_device::DataDeviceState,
         shell::xdg::XdgShellState,
         shm::ShmState,
@@ -39,13 +41,28 @@ pub fn run() -> Result<()> {
     let mut display: Display<State> = Display::new().context("create wayland Display")?;
     let dh = display.handle();
 
+    let (mut backend, mut winit_evloop) = winit::init::<GlesRenderer>()
+        .map_err(|e| anyhow::anyhow!("init winit backend: {e:?}"))?;
+
     // Globals — every protocol we expose to clients.
     let compositor_state  = CompositorState::new::<State>(&dh);
     let xdg_shell_state   = XdgShellState::new::<State>(&dh);
-    let shm_state         = ShmState::new::<State>(&dh, vec![]);
+    let shm_state         = ShmState::new::<State>(&dh, backend.renderer().shm_formats());
     let data_device_state = DataDeviceState::new::<State>(&dh);
     let mut seat_state    = smithay::input::SeatState::new();
     let seat              = seat_state.new_wl_seat(&dh, "vendi-seat-0");
+
+    // linux-dmabuf v3 (GPU buffer sharing — required for alacritty, firefox).
+    let dmabuf_formats = backend.renderer().dmabuf_formats();
+    let mut dmabuf_state = DmabufState::new();
+    let _dmabuf_global = dmabuf_state.create_global::<State>(&dh, dmabuf_formats);
+
+    // Legacy wl_drm binding — Mesa EGL clients need this OR dmabuf v4 to talk
+    // to us. Without it alacritty/firefox stay stuck on `libEGL warning: fd -1`.
+    match backend.renderer().egl_context().display().bind_wl_display(&dh) {
+        Ok(_) => tracing::info!("EGL hardware-acceleration enabled (wl_drm bound)"),
+        Err(e) => tracing::warn!(?e, "failed to bind wl_display — EGL clients may not work"),
+    }
 
     let mut state = State {
         compositor_state,
@@ -53,7 +70,9 @@ pub fn run() -> Result<()> {
         shm_state,
         seat_state,
         data_device_state,
+        dmabuf_state,
         seat,
+        pending_dmabuf_imports: Vec::new(),
     };
 
     // Pick the first free wayland-N name. Bail rather than overwrite an
@@ -67,10 +86,6 @@ pub fn run() -> Result<()> {
     tracing::info!(socket = %socket_name, "vendiwm listening — set WAYLAND_DISPLAY to this and spawn a client");
 
     let mut clients: Vec<_> = Vec::new();
-
-    let (mut backend, mut winit_evloop) = winit::init::<GlesRenderer>()
-        .map_err(|e| anyhow::anyhow!("init winit backend: {e:?}"))?;
-
     let start_time = std::time::Instant::now();
     let keyboard = state.seat.add_keyboard(Default::default(), 200, 25)
         .context("add keyboard to seat")?;
@@ -150,6 +165,18 @@ pub fn run() -> Result<()> {
             }
 
             display.dispatch_clients(&mut state).context("dispatch clients")?;
+
+            // Process queued dmabuf imports — the renderer needs &mut access
+            // which the dmabuf_imported handler couldn't get.
+            let pending: Vec<(Dmabuf, _)> = state.pending_dmabuf_imports.drain(..).collect();
+            for (dmabuf, notifier) in pending {
+                if renderer.import_dmabuf(&dmabuf, None).is_ok() {
+                    let _ = notifier.successful::<State>();
+                } else {
+                    notifier.failed();
+                }
+            }
+
             display.flush_clients().context("flush clients")?;
         }
 

@@ -20,6 +20,7 @@ use smithay::{
         compositor::{
             CompositorClientState, CompositorHandler, CompositorState,
         },
+        dmabuf::{DmabufHandler, DmabufState, DmabufGlobal, ImportNotifier},
         selection::{
             SelectionHandler,
             data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler},
@@ -30,6 +31,7 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
     },
+    backend::allocator::dmabuf::Dmabuf,
 };
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
@@ -40,7 +42,11 @@ pub struct State {
     pub shm_state:          ShmState,
     pub seat_state:         SeatState<Self>,
     pub data_device_state:  DataDeviceState,
+    pub dmabuf_state:       DmabufState,
     pub seat:               Seat<Self>,
+    // Queued dmabuf imports — the backend drains and processes these each
+    // frame, where it has &mut access to the renderer.
+    pub pending_dmabuf_imports: Vec<(Dmabuf, ImportNotifier)>,
 }
 
 // ── per-client data ──────────────────────────────────────────────────────────
@@ -115,6 +121,17 @@ impl SeatHandler for State {
     fn seat_state(&mut self) -> &mut SeatState<Self> { &mut self.seat_state }
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+}
+
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+    fn dmabuf_imported(&mut self, _global: &DmabufGlobal, dmabuf: Dmabuf, notifier: ImportNotifier) {
+        // Defer to the backend — it owns the renderer and processes these
+        // in the event loop after dispatch returns.
+        self.pending_dmabuf_imports.push((dmabuf, notifier));
+    }
 }
 
 // Wires up Dispatch for every Wayland global the handlers above implement.

@@ -32,6 +32,7 @@ smithay = { workspace = true, default-features = false, features = [
     "desktop",
     "renderer_gl",
     "renderer_pixman",
+    "use_system_lib",   # exposes wl_drm via bind_wl_display (Mesa EGL clients)
 ] }
 tracing             = { workspace = true }
 tracing-subscriber  = { workspace = true }
