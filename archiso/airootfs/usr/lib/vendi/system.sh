@@ -106,9 +106,11 @@ sys_install_plymouth() {
 
 # ── invisible auto-login via greetd (no agetty, no shell flash) ──────────────
 sys_install_greetd() {
-    # greetd's initial_session launches Hyprland directly as the user on vt1.
-    # No greeter UI, no agetty banner, no shell expansion — Plymouth holds the
-    # splash until Hyprland's first frame thanks to plymouth-quit-wait.service.
+    # greetd's initial_session launches /usr/bin/vendi-session as the user on
+    # vt1. vendi-session picks the actual compositor from /etc/vendi/session.conf
+    # so the user can toggle between Hyprland (default) and vendiwm without
+    # touching greetd config. Plymouth holds the splash until the compositor's
+    # first frame.
     local user=$1
     mkdir -p /mnt/etc/greetd
     cat > /mnt/etc/greetd/config.toml <<EOF
@@ -117,12 +119,21 @@ vt = 1
 switch = true
 
 [default_session]
-command = "Hyprland"
+command = "/usr/bin/vendi-session"
 user = "${user}"
 
 [initial_session]
-command = "Hyprland"
+command = "/usr/bin/vendi-session"
 user = "${user}"
+EOF
+
+    # Default session pick — Hyprland for safety until vendiwm udev rendering
+    # is verified on real hardware. To try vendiwm: edit and reboot.
+    mkdir -p /mnt/etc/vendi
+    cat > /mnt/etc/vendi/session.conf <<EOF
+# vendi-session config. Set VENDI_SESSION to "vendiwm" to use the experimental
+# vendiwm compositor, or "hyprland" for the stable Hyprland-based session.
+VENDI_SESSION=hyprland
 EOF
 
     # Make sure agetty doesn't fight greetd over tty1

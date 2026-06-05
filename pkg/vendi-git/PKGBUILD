@@ -2,26 +2,44 @@
 pkgname=vendi-git
 _pkgname=vendi
 pkgver=r1
-pkgrel=2
-pkgdesc="vendiOS CLI, installer, and supporting libraries (git)"
-arch=('any')
+pkgrel=3
+pkgdesc="vendiOS CLI, installer, vendiwm compositor, supporting libraries (git)"
+arch=('x86_64')
 url="https://github.com/VendavalSC/vendiOS"
 license=('MIT')
 depends=(
     'bash'
     'coreutils'
-    'util-linux'        # lsblk
+    'util-linux'
     'parted'
-    'dosfstools'        # mkfs.fat
-    'e2fsprogs'         # mkfs.ext4
-    'btrfs-progs'       # mkfs.btrfs (optional but commonly needed)
-    'arch-install-scripts'  # pacstrap, arch-chroot, genfstab
+    'dosfstools'
+    'e2fsprogs'
+    'btrfs-progs'
+    'arch-install-scripts'
     'limine'
     'efibootmgr'
     'reflector'
     'fastfetch'
+    # vendiwm runtime dependencies
+    'libxkbcommon'
+    'libinput'
+    'mesa'
+    'libseat'
+    'wayland'
 )
-makedepends=('git')
+makedepends=(
+    'git'
+    'rust'
+    'cargo'
+    # vendiwm build dependencies
+    'pkgconf'
+    'libxkbcommon'
+    'libinput'
+    'mesa'
+    'libseat'
+    'wayland'
+    'systemd'           # for libudev
+)
 provides=("${_pkgname}")
 conflicts=("${_pkgname}")
 source=("${_pkgname}::git+${url}.git")
@@ -32,16 +50,31 @@ pkgver() {
     printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
+build() {
+    cd "${_pkgname}/src"
+    # Build vendiwm + vendi-ctl + vendi-demo. vendi-menu is currently a stub.
+    cargo build --release --locked \
+        -p vendiwm \
+        -p vendi-ctl \
+        -p vendi-demo
+}
+
 package() {
     cd "${_pkgname}"
 
-    # CLIs
+    # Bash CLIs (installer / boot helpers / session launcher)
     install -Dm755 archiso/airootfs/usr/bin/vendi          "${pkgdir}/usr/bin/vendi"
     install -Dm755 archiso/airootfs/usr/bin/vendi-install  "${pkgdir}/usr/bin/vendi-install"
     install -Dm755 archiso/airootfs/usr/bin/vendi-boot     "${pkgdir}/usr/bin/vendi-boot"
     install -Dm755 archiso/airootfs/usr/bin/vendi-welcome  "${pkgdir}/usr/bin/vendi-welcome"
+    install -Dm755 archiso/airootfs/usr/bin/vendi-session  "${pkgdir}/usr/bin/vendi-session"
 
-    # libraries
+    # Rust binaries (compositor + control plane)
+    install -Dm755 src/target/release/vendiwm     "${pkgdir}/usr/bin/vendiwm"
+    install -Dm755 src/target/release/vendi-ctl   "${pkgdir}/usr/bin/vendi-ctl"
+    install -Dm755 src/target/release/vendi-demo  "${pkgdir}/usr/bin/vendi-demo"
+
+    # Bash libraries
     install -Dm644 archiso/airootfs/usr/lib/vendi/ui.sh     "${pkgdir}/usr/lib/vendi/ui.sh"
     install -Dm644 archiso/airootfs/usr/lib/vendi/disk.sh   "${pkgdir}/usr/lib/vendi/disk.sh"
     install -Dm644 archiso/airootfs/usr/lib/vendi/system.sh "${pkgdir}/usr/lib/vendi/system.sh"

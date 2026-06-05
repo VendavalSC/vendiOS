@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# vendi-session — picks the session compositor and launches it.
+#
+# Reads /etc/vendi/session.conf if present. Set VENDI_SESSION to one of:
+#   hyprland   (current stable default)
+#   vendiwm    (experimental; requires udev rendering — may show black screen
+#              if not yet implemented on this build)
+#
+# greetd's initial_session points at this script so users can switch by
+# editing the config file instead of /etc/greetd/config.toml.
+
+set -e
+
+VENDI_SESSION=hyprland
+[[ -f /etc/vendi/session.conf ]] && source /etc/vendi/session.conf
+
+case "${VENDI_SESSION:-hyprland}" in
+    vendiwm)
+        exec vendiwm
+        ;;
+    hyprland|*)
+        exec Hyprland
+        ;;
+esac

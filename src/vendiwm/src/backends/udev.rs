@@ -19,11 +19,18 @@ use smithay::{
     backend::{
         drm::{DrmDevice, DrmDeviceFd, DrmNode, NodeType},
         egl::{EGLContext, EGLDisplay, context::ContextPriority},
-        input::InputEvent,
+        input::{
+            AbsolutePositionEvent, Event as InputEventTrait, InputEvent, KeyboardKeyEvent,
+            PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+        },
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::gles::GlesRenderer,
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
+    },
+    input::{
+        keyboard::FilterResult,
+        pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     reexports::{
         calloop::EventLoop,
@@ -33,7 +40,7 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::Display,
     },
-    utils::DeviceFd,
+    utils::{DeviceFd, SERIAL_COUNTER},
 };
 
 use crate::state::State;
@@ -245,12 +252,121 @@ impl UdevData {
 
 // ── event source handlers ─────────────────────────────────────────────────────
 
-fn on_libinput_event(event: InputEvent<LibinputInputBackend>, _app: &mut UdevApp) {
-    // Phase 2 will route these through the existing input::handle() and
-    // pointer.motion()/button()/axis() pipeline using app.state.
+fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp) {
+    let state = &mut app.state;
     match event {
         InputEvent::DeviceAdded { device }   => tracing::info!(?device, "input device added"),
         InputEvent::DeviceRemoved { device } => tracing::info!(?device, "input device removed"),
+
+        // ── keyboard ─────────────────────────────────────────────────────────
+        InputEvent::Keyboard { event } => {
+            let Some(keyboard) = state.seat.get_keyboard() else { return };
+            let key_state = event.state();
+            let action = keyboard.input::<Option<crate::input::Action>, _>(
+                state,
+                event.key_code(),
+                key_state,
+                SERIAL_COUNTER.next_serial(),
+                InputEventTrait::time_msec(&event),
+                |data, mods, handle| {
+                    let sym = handle.modified_sym();
+                    match crate::input::handle(&data.config, sym.raw(), key_state, mods) {
+                        Some(a) => FilterResult::Intercept(Some(a)),
+                        None    => FilterResult::Forward,
+                    }
+                },
+            );
+            if let Some(Some(act)) = action {
+                let layout_changed = matches!(
+                    &act,
+                    crate::input::Action::Close
+                    | crate::input::Action::FocusNext
+                    | crate::input::Action::FocusPrev,
+                );
+                if state.run_action(act) {
+                    tracing::info!("quit action received");
+                    // TODO: signal calloop event loop to exit.
+                }
+                if layout_changed { state.relayout(); }
+            }
+        }
+
+        // ── pointer motion (relative — typical of mice) ──────────────────────
+        InputEvent::PointerMotion { event } => {
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let delta_x = event.delta_x();
+            let delta_y = event.delta_y();
+            state.pointer_location += (delta_x, delta_y).into();
+            // Clamp to first output's geometry so the cursor can't escape.
+            if let Some(output) = state.space.outputs().next().cloned() {
+                if let Some(geo) = state.space.output_geometry(&output) {
+                    let max_x = (geo.loc.x + geo.size.w) as f64;
+                    let max_y = (geo.loc.y + geo.size.h) as f64;
+                    state.pointer_location.x = state.pointer_location.x.clamp(geo.loc.x as f64, max_x);
+                    state.pointer_location.y = state.pointer_location.y.clamp(geo.loc.y as f64, max_y);
+                }
+            }
+            let location = state.pointer_location;
+            let under = state.surface_under(location).map(|(s, p)| (s.into(), p));
+            pointer.motion(state, under, &MotionEvent {
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time:   InputEventTrait::time_msec(&event),
+            });
+            pointer.frame(state);
+        }
+
+        // ── pointer motion (absolute — touchscreens/tablets) ─────────────────
+        InputEvent::PointerMotionAbsolute { event } => {
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let Some(output) = state.space.outputs().next().cloned() else { return };
+            let Some(geo) = state.space.output_geometry(&output) else { return };
+            let pos = event.position_transformed(geo.size);
+            state.pointer_location = pos + geo.loc.to_f64();
+            let location = state.pointer_location;
+            let under = state.surface_under(location).map(|(s, p)| (s.into(), p));
+            pointer.motion(state, under, &MotionEvent {
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time:   InputEventTrait::time_msec(&event),
+            });
+            pointer.frame(state);
+        }
+
+        // ── click ────────────────────────────────────────────────────────────
+        InputEvent::PointerButton { event } => {
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let bstate = event.state();
+            if bstate == smithay::backend::input::ButtonState::Pressed {
+                state.focus_window_at_cursor();
+            }
+            if let Some(button) = event.button_code().into() {
+                pointer.button(state, &ButtonEvent {
+                    button,
+                    state:  bstate,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time:   InputEventTrait::time_msec(&event),
+                });
+            }
+            pointer.frame(state);
+        }
+
+        // ── scroll ──────────────────────────────────────────────────────────
+        InputEvent::PointerAxis { event } => {
+            use smithay::backend::input::{Axis, AxisSource};
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let mut frame = AxisFrame::new(InputEventTrait::time_msec(&event))
+                .source(AxisSource::Wheel);
+            if let Some(h) = event.amount(Axis::Horizontal) {
+                frame = frame.value(Axis::Horizontal, h);
+            }
+            if let Some(v) = event.amount(Axis::Vertical) {
+                frame = frame.value(Axis::Vertical, v);
+            }
+            pointer.axis(state, frame);
+            pointer.frame(state);
+        }
+
         _ => {}
     }
 }
