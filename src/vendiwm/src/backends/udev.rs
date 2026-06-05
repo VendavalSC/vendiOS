@@ -38,9 +38,16 @@ use smithay::{
 
 use crate::state::State;
 
+/// Top-level event-loop data — gives every calloop callback &mut access to
+/// both the wayland state and the udev/DRM bits.
+pub struct UdevApp {
+    pub state: State,
+    pub udev:  UdevData,
+}
+
 pub fn run() -> Result<()> {
-    let mut event_loop: EventLoop<UdevData> = EventLoop::try_new().context("calloop event loop")?;
-    let loop_handle  = event_loop.handle();
+    let mut event_loop: EventLoop<UdevApp> = EventLoop::try_new().context("calloop event loop")?;
+    let loop_handle = event_loop.handle();
 
     let _display: Display<State> = Display::new().context("create wayland Display")?;
 
@@ -75,38 +82,92 @@ pub fn run() -> Result<()> {
     let udev_backend = UdevBackend::new(&seat_name)
         .context("UdevBackend::new")?;
 
-    let mut data = UdevData {
+    let mut udev = UdevData {
         seat_name: seat_name.clone(),
         session,
         primary_gpu: primary_gpu_node,
         drm_devices: HashMap::new(),
     };
 
-    // 5. Open the primary GPU and probe its connectors. Surfaces / rendering
-    //    come in phase 2 — for now we just log what's attached.
-    if let Err(e) = data.open_drm_device(&primary_gpu_path) {
+    // 5. Open primary GPU. Rendering (mode + DrmCompositor + present loop)
+    //    is the next phase — currently we just init the renderer + enumerate
+    //    connectors so a future render pass has what it needs.
+    if let Err(e) = udev.open_drm_device(&primary_gpu_path) {
         tracing::warn!(?e, "failed to open primary GPU");
     }
 
-    // 6. Wire calloop event sources.
-    loop_handle.insert_source(libinput_backend, move |event, _, data| {
-        on_libinput_event(event, data);
+    // 6. Build the wayland State — same globals as the winit backend, but
+    //    Output/Space population happens per-connector in phase 2.
+    let state = build_state(&_display)?;
+    let mut app = UdevApp { state, udev };
+
+    // 7. Wire calloop event sources.
+    loop_handle.insert_source(libinput_backend, move |event, _, app: &mut UdevApp| {
+        on_libinput_event(event, app);
     }).map_err(|e| anyhow::anyhow!("insert libinput source: {e:?}"))?;
 
-    loop_handle.insert_source(notifier, move |event, _, data| {
-        on_session_event(event, data);
+    loop_handle.insert_source(notifier, move |event, _, app: &mut UdevApp| {
+        on_session_event(event, app);
     }).map_err(|e| anyhow::anyhow!("insert session source: {e:?}"))?;
 
-    loop_handle.insert_source(udev_backend, move |event, _, data| {
-        on_udev_event(event, data);
+    loop_handle.insert_source(udev_backend, move |event, _, app: &mut UdevApp| {
+        on_udev_event(event, app);
     }).map_err(|e| anyhow::anyhow!("insert udev source: {e:?}"))?;
 
     tracing::info!("vendiwm udev backend running. Press Ctrl+C to exit.");
-    event_loop.run(Duration::from_millis(16), &mut data, |_data| {
-        // Per-tick callback — when we add the IPC + rendering loop they hook in here.
+    event_loop.run(Duration::from_millis(16), &mut app, |_app| {
+        // Per-tick: phase 2 schedules redraws + IPC poll here.
     }).context("run event loop")?;
 
     Ok(())
+}
+
+fn build_state(display: &Display<State>) -> Result<State> {
+    use smithay::wayland::{
+        compositor::CompositorState,
+        dmabuf::DmabufState,
+        output::OutputManagerState,
+        selection::data_device::DataDeviceState,
+        shell::{xdg::XdgShellState, wlr_layer::WlrLayerShellState},
+        shm::ShmState,
+    };
+    use smithay::desktop::{PopupManager, Space};
+    use smithay::input::SeatState;
+    let dh = display.handle();
+
+    let compositor_state     = CompositorState::new::<State>(&dh);
+    let xdg_shell_state      = XdgShellState::new::<State>(&dh);
+    let shm_state            = ShmState::new::<State>(&dh, Vec::new()); // formats added once renderer is ready
+    let data_device_state    = DataDeviceState::new::<State>(&dh);
+    let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
+    let layer_shell_state    = WlrLayerShellState::new::<State>(&dh);
+    let dmabuf_state         = DmabufState::new();
+
+    let mut seat_state = SeatState::new();
+    let seat = seat_state.new_wl_seat(&dh, "vendi-seat-0");
+
+    let config = crate::config::Config::load().unwrap_or_else(|e| {
+        tracing::warn!(?e, "config load failed; using empty keybinds");
+        crate::config::Config { keybinds: Default::default() }
+    });
+
+    Ok(State {
+        compositor_state,
+        xdg_shell_state,
+        shm_state,
+        seat_state,
+        data_device_state,
+        dmabuf_state,
+        layer_shell_state,
+        output_manager_state,
+        seat,
+        space:                  Space::default(),
+        popups:                 PopupManager::default(),
+        layout:                 crate::layout::Tree::new(),
+        config,
+        pointer_location:       (0.0, 0.0).into(),
+        pending_dmabuf_imports: Vec::new(),
+    })
 }
 
 // ── runtime state ─────────────────────────────────────────────────────────────
@@ -183,10 +244,9 @@ impl UdevData {
 
 // ── event source handlers ─────────────────────────────────────────────────────
 
-fn on_libinput_event(event: InputEvent<LibinputInputBackend>, _data: &mut UdevData) {
+fn on_libinput_event(event: InputEvent<LibinputInputBackend>, _app: &mut UdevApp) {
     // Phase 2 will route these through the existing input::handle() and
-    // pointer.motion()/button()/axis() pipeline by holding &mut State alongside
-    // UdevData. For now just log device hot-plug to confirm the backend is alive.
+    // pointer.motion()/button()/axis() pipeline using app.state.
     match event {
         InputEvent::DeviceAdded { device }   => tracing::info!(?device, "input device added"),
         InputEvent::DeviceRemoved { device } => tracing::info!(?device, "input device removed"),
@@ -194,21 +254,14 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, _data: &mut UdevDa
     }
 }
 
-fn on_session_event(event: SessionEvent, data: &mut UdevData) {
+fn on_session_event(event: SessionEvent, _app: &mut UdevApp) {
     match event {
-        SessionEvent::PauseSession => {
-            tracing::info!("session paused (VT switched away)");
-            // TODO: suspend libinput, release DRM master.
-        }
-        SessionEvent::ActivateSession => {
-            tracing::info!("session activated (VT switched in)");
-            // TODO: resume libinput, reclaim DRM master + force redraw.
-            let _ = data;
-        }
+        SessionEvent::PauseSession    => tracing::info!("session paused (VT switched away)"),
+        SessionEvent::ActivateSession => tracing::info!("session activated (VT switched in)"),
     }
 }
 
-fn on_udev_event(event: UdevEvent, _data: &mut UdevData) {
+fn on_udev_event(event: UdevEvent, _app: &mut UdevApp) {
     match event {
         UdevEvent::Added   { device_id, path } => tracing::info!(?device_id, ?path, "udev: device added"),
         UdevEvent::Changed { device_id }       => tracing::info!(?device_id,        "udev: device changed"),
