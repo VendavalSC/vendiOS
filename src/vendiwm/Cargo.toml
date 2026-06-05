@@ -1,0 +1,45 @@
+[package]
+name        = "vendiwm"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+description = "vendiWM — definitive Wayland compositor for vendiOS"
+
+[[bin]]
+name = "vendiwm"
+path = "src/main.rs"
+
+[features]
+default     = ["winit"]
+# Backends
+winit       = ["smithay/backend_winit"]    # nested in another compositor, for dev
+udev        = [
+    "smithay/backend_udev",
+    "smithay/backend_libinput",
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_session_libseat",
+]
+# XWayland support (deferred past v0.1)
+xwayland    = ["smithay/xwayland"]
+
+[dependencies]
+smithay = { workspace = true, default-features = false, features = [
+    "wayland_frontend",
+    "desktop",
+    "renderer_gl",
+    "renderer_pixman",
+] }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+anyhow              = { workspace = true }
+thiserror           = { workspace = true }
+kdl                 = { workspace = true }
+knus                = { workspace = true }
+notify              = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+calloop             = { workspace = true }

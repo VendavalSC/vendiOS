@@ -1,0 +1,43 @@
+[workspace]
+members = ["vendiwm", "vendi-menu"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["vendi <layoguerrero@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/VendavalSC/vendiOS"
+
+[workspace.dependencies]
+# Compositor framework — Wayland server-side toolkit.
+# Pinned to git because smithay's published crate trails master significantly.
+smithay = { git = "https://github.com/Smithay/smithay.git", default-features = false }
+
+# Logging / errors
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow             = "1"
+thiserror          = "1"
+
+# Config (KDL with hot-reload)
+kdl   = "6"
+knus  = "3"   # KDL → struct derive
+notify = "6"  # filesystem watcher for hot-reload
+
+# IPC (Unix socket + JSON, sway-style)
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+
+# Event loop (smithay uses calloop natively, not tokio)
+calloop = "0.13"
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+
+[profile.dev]
+# smithay deps are huge — speed up dev builds
+opt-level = 1

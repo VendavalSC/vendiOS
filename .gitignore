@@ -19,3 +19,6 @@ work/
 pkg/*/src/
 pkg/*/pkg/
 pkg/*/*.tar.gz
+
+# Rust workspace build outputs (Cargo.lock IS committed — binary crate)
+src/target/
