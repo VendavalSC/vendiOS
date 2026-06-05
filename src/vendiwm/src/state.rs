@@ -77,6 +77,11 @@ pub struct State {
     // Queued dmabuf imports — the backend drains and processes these each
     // frame, where it has &mut access to the renderer.
     pub pending_dmabuf_imports: Vec<(Dmabuf, ImportNotifier)>,
+
+    // Events the IPC server should push to subscribed clients. The backend
+    // drains this each tick and hands it to the IPC server (we keep them as
+    // separate concerns rather than letting State own the IPC).
+    pub pending_ipc_events:     Vec<crate::ipc::Event>,
 }
 
 // ── per-client data ──────────────────────────────────────────────────────────
@@ -126,10 +131,15 @@ impl XdgShellHandler for State {
         // into `space` and sends configure to every affected window.
         surface.with_pending_state(|s| { s.states.set(xdg_toplevel::State::Activated); });
         surface.send_configure();
+        let id = smithay::reexports::wayland_server::Resource::id(surface.wl_surface()).protocol_id();
         let window = Window::new_wayland_window(surface);
         self.layout.insert(window.clone());
         self.space.map_element(window, (0, 0), true);
         self.relayout();
+        self.pending_ipc_events.push(crate::ipc::Event::WindowOpened {
+            id,
+            title: String::new(),  // populated when client sets it via xdg_toplevel.set_title
+        });
         tracing::info!("new toplevel inserted");
     }
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
@@ -212,12 +222,14 @@ impl State {
         let target = self.space.elements()
             .find(|w| w.wl_surface().map(|s| *s == surf).unwrap_or(false))
             .cloned();
+        let id = smithay::reexports::wayland_server::Resource::id(&surf).protocol_id();
         if let Some(window) = target {
             self.space.raise_element(&window, true);
         }
         if let Some(kb) = self.seat.get_keyboard() {
             kb.set_focus(self, Some(surf), SERIAL_COUNTER.next_serial());
         }
+        self.pending_ipc_events.push(crate::ipc::Event::WindowFocused { id });
     }
 
     /// Execute a keybind action. Returns true if the caller should exit the

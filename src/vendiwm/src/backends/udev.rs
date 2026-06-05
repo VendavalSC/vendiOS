@@ -167,6 +167,7 @@ fn build_state(display: &Display<State>) -> Result<State> {
         config,
         pointer_location:       (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
+        pending_ipc_events:     Vec::new(),
     })
 }
 

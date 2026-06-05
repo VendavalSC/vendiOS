@@ -118,6 +118,7 @@ pub fn run() -> Result<()> {
         config,
         pointer_location: (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
+        pending_ipc_events: Vec::new(),
     };
 
     let pointer = state.seat.add_pointer();
@@ -276,8 +277,12 @@ pub fn run() -> Result<()> {
 
             display.dispatch_clients(&mut state).context("dispatch clients")?;
 
-            // Pump IPC requests once per frame.
+            // Pump IPC requests once per frame, then push any queued events
+            // (window opened/focused/etc.) to subscribed clients.
             ipc.poll(&mut state);
+            for event in state.pending_ipc_events.drain(..) {
+                ipc.emit(event);
+            }
 
             // Process queued dmabuf imports — the renderer needs &mut access
             // which the dmabuf_imported handler couldn't get.
