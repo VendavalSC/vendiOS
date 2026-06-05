@@ -97,6 +97,7 @@ pub fn run() -> Result<()> {
         seat,
         space,
         popups: PopupManager::default(),
+        layout: crate::layout::Tree::new(),
         pending_dmabuf_imports: Vec::new(),
     };
 
@@ -112,6 +113,7 @@ pub fn run() -> Result<()> {
 
     let mut clients: Vec<_> = Vec::new();
     let start_time = std::time::Instant::now();
+    let mut quit_requested = false;
     let keyboard = state.seat.add_keyboard(Default::default(), 200, 25)
         .context("add keyboard to seat")?;
 
@@ -120,13 +122,33 @@ pub fn run() -> Result<()> {
             WinitEvent::Resized { .. } => {}
             WinitEvent::Input(event) => match event {
                 InputEvent::Keyboard { event } => {
-                    keyboard.input::<(), _>(
+                    // Resolve to a keysym + check modifiers; intercept Super-
+                    // chords for our bindings, forward everything else to the
+                    // focused client.
+                    let key_state = event.state();
+                    let action = keyboard.input::<Option<crate::input::Action>, _>(
                         &mut state,
                         event.key_code(),
-                        event.state(),
+                        key_state,
                         0.into(), 0,
-                        |_, _, _| FilterResult::Forward,
+                        |_, mods, handle| {
+                            let sym = handle.modified_sym();
+                            match crate::input::handle(sym.raw(), key_state, mods) {
+                                Some(a) => FilterResult::Intercept(Some(a)),
+                                None    => FilterResult::Forward,
+                            }
+                        },
                     );
+                    if let Some(Some(act)) = action {
+                        let layout_changed = matches!(
+                            &act,
+                            crate::input::Action::Close
+                            | crate::input::Action::FocusNext
+                            | crate::input::Action::FocusPrev,
+                        );
+                        if state.run_action(act) { quit_requested = true; }
+                        if layout_changed { state.relayout(); }
+                    }
                 }
                 InputEvent::PointerMotionAbsolute { .. } => {
                     // Auto-focus the topmost window in the space so keypresses
@@ -145,6 +167,10 @@ pub fn run() -> Result<()> {
 
         if let PumpStatus::Exit(_) = status {
             tracing::info!("winit window closed, exiting");
+            return Ok(());
+        }
+        if quit_requested {
+            tracing::info!("quit action received, exiting");
             return Ok(());
         }
 

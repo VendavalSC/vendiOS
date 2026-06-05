@@ -4,6 +4,7 @@
 // Modeled after smithay's `examples/minimal.rs` (the canonical reference for
 // the current API), but split out so backends share the same State.
 
+use crate::layout::Tree;
 use smithay::{
     desktop::{PopupManager, Space, Window},
     input::{
@@ -53,6 +54,10 @@ pub struct State {
     pub space:                 Space<Window>,
     pub popups:                PopupManager,
 
+    // i3-style split tree. We update window positions in `space` from this
+    // tree after every change. Per-workspace trees come later (v0.2+).
+    pub layout:                Tree,
+
     // Queued dmabuf imports — the backend drains and processes these each
     // frame, where it has &mut access to the renderer.
     pub pending_dmabuf_imports: Vec<(Dmabuf, ImportNotifier)>,
@@ -100,14 +105,16 @@ impl XdgShellHandler for State {
         &mut self.xdg_shell_state
     }
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Mark Activated so clients render at full opacity, then wrap in a
-        // smithay Window and map at (0, 0). Tiling layout will reposition
-        // this once the layout tree lands.
+        // Mark Activated so clients render at full opacity, then insert into
+        // the tiling tree and relayout. relayout() pushes the new positions
+        // into `space` and sends configure to every affected window.
         surface.with_pending_state(|s| { s.states.set(xdg_toplevel::State::Activated); });
         surface.send_configure();
         let window = Window::new_wayland_window(surface);
+        self.layout.insert(window.clone());
         self.space.map_element(window, (0, 0), true);
-        tracing::info!("new toplevel — mapped at (0, 0)");
+        self.relayout();
+        tracing::info!("new toplevel inserted");
     }
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
@@ -126,6 +133,60 @@ impl DataDeviceHandler for State {
 impl WaylandDndGrabHandler for State {}
 
 impl OutputHandler for State {}
+
+impl State {
+    /// Execute a keybind action. Returns true if the caller should exit the
+    /// main loop (Action::Quit).
+    pub fn run_action(&mut self, action: crate::input::Action) -> bool {
+        use crate::input::Action::*;
+        match action {
+            Spawn(cmd) => {
+                tracing::info!(%cmd, "spawn");
+                // Detach so vendiwm doesn't accumulate zombies.
+                if let Err(e) = std::process::Command::new("sh").arg("-c").arg(&cmd).spawn() {
+                    tracing::warn!(?e, %cmd, "spawn failed");
+                }
+            }
+            Close => {
+                if let Some(w) = self.layout.focused().cloned() {
+                    if let Some(t) = w.toplevel() {
+                        t.send_close();
+                    }
+                }
+            }
+            FocusNext => { self.layout.focus_next(); }
+            FocusPrev => { self.layout.focus_prev(); }
+            SetNextSplit(dir) => { self.layout.next_split_override = Some(dir); }
+            Quit => return true,
+        }
+        false
+    }
+
+    /// Walk the layout tree and push each window's computed rectangle into
+    /// the space + send xdg_toplevel.configure so the client resizes.
+    pub fn relayout(&mut self) {
+        // Drop any windows whose clients have died — they'd leave a hole
+        // in the tree otherwise.
+        self.layout.prune_dead();
+        // Use the first output's geometry as the tile viewport. Once we have
+        // per-monitor workspaces this becomes "the output for this workspace".
+        let Some(output) = self.space.outputs().next().cloned() else { return };
+        let geometry = match self.space.output_geometry(&output) {
+            Some(g) => g,
+            None => return,
+        };
+        for (window, rect) in self.layout.layout(geometry) {
+            // Send size to the client via xdg_toplevel.configure.
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
+                toplevel.send_pending_configure();
+            }
+            // Map at the computed location. `false` = don't activate (focus
+            // is managed by the layout tree, not by map ordering).
+            self.space.map_element(window, rect.loc, false);
+        }
+    }
+}
 
 impl SeatHandler for State {
     type KeyboardFocus = WlSurface;
