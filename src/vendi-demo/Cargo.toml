@@ -1,0 +1,16 @@
+[package]
+name        = "vendi-demo"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+description = "vendi-demo — minimal Wayland client that opens a Mauve window. Proof-of-life for the compositor."
+
+[[bin]]
+name = "vendi-demo"
+path = "src/main.rs"
+
+[dependencies]
+smithay-client-toolkit = { workspace = true }

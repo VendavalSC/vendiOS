@@ -1,5 +1,5 @@
 [workspace]
-members = ["vendiwm", "vendi-menu", "vendi-ctl"]
+members = ["vendiwm", "vendi-menu", "vendi-ctl", "vendi-demo"]
 resolver = "2"
 
 [workspace.package]
@@ -14,6 +14,8 @@ repository = "https://github.com/VendavalSC/vendiOS"
 # Compositor framework — Wayland server-side toolkit.
 # Pinned to git because smithay's published crate trails master significantly.
 smithay = { git = "https://github.com/Smithay/smithay.git", default-features = false }
+# Wayland client-side toolkit (vendi-demo, vendi-menu, vendi-bar).
+smithay-client-toolkit = "0.19"
 
 # Logging / errors
 tracing            = "0.1"
