@@ -6,18 +6,17 @@
 
 use crate::layout::Tree;
 use smithay::{
-    desktop::{PopupManager, Space, Window, WindowSurfaceType},
+    desktop::{LayerSurface, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
     input::{
         Seat, SeatHandler, SeatState,
         pointer::CursorImageStatus,
     },
-    utils::{Logical, Point},
+    utils::{Logical, Point, SERIAL_COUNTER, Serial},
     reexports::wayland_server::{
         Client,
         backend::{ClientData, ClientId, DisconnectReason},
-        protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
+        protocol::{wl_buffer, wl_output, wl_seat, wl_surface::WlSurface},
     },
-    utils::{SERIAL_COUNTER, Serial},
     wayland::{
         seat::WaylandFocus,
         buffer::BufferHandler,
@@ -30,13 +29,20 @@ use smithay::{
             SelectionHandler,
             data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler},
         },
-        shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface,
-            XdgShellHandler, XdgShellState,
+        shell::{
+            xdg::{
+                PopupSurface, PositionerState, ToplevelSurface,
+                XdgShellHandler, XdgShellState,
+            },
+            wlr_layer::{
+                Layer, LayerSurface as WlrLayerSurface, WlrLayerShellHandler,
+                WlrLayerShellState,
+            },
         },
         shm::{ShmHandler, ShmState},
     },
     backend::allocator::dmabuf::Dmabuf,
+    output::Output,
 };
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
@@ -48,6 +54,7 @@ pub struct State {
     pub seat_state:            SeatState<Self>,
     pub data_device_state:     DataDeviceState,
     pub dmabuf_state:          DmabufState,
+    pub layer_shell_state:     WlrLayerShellState,
     pub output_manager_state:  OutputManagerState,
     pub seat:                  Seat<Self>,
 
@@ -138,6 +145,49 @@ impl DataDeviceHandler for State {
 impl WaylandDndGrabHandler for State {}
 
 impl OutputHandler for State {}
+
+impl WlrLayerShellHandler for State {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell_state
+    }
+    fn new_layer_surface(
+        &mut self,
+        surface: WlrLayerSurface,
+        wl_output: Option<wl_output::WlOutput>,
+        _layer: Layer,
+        namespace: String,
+    ) {
+        // Attach to the named output (or the first available one).
+        let output = wl_output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .or_else(|| self.space.outputs().next().cloned());
+        let Some(output) = output else {
+            tracing::warn!("layer surface with no output — dropping");
+            return;
+        };
+        let mut map = layer_map_for_output(&output);
+        if let Err(e) = map.map_layer(&LayerSurface::new(surface, namespace.clone())) {
+            tracing::warn!(?e, "map_layer failed");
+        } else {
+            tracing::info!(%namespace, "new layer surface");
+        }
+    }
+    fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        let outputs: Vec<_> = self.space.outputs().cloned().collect();
+        for output in outputs {
+            let mut map = layer_map_for_output(&output);
+            let layer = map.layers()
+                .find(|l| l.layer_surface() == &surface)
+                .cloned();
+            if let Some(layer) = layer {
+                map.unmap_layer(&layer);
+                tracing::info!("layer destroyed");
+                return;
+            }
+        }
+    }
+}
 
 impl State {
     /// Find the topmost wl_surface under the given point, along with its

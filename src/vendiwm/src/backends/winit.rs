@@ -59,6 +59,7 @@ pub fn run() -> Result<()> {
     let shm_state            = ShmState::new::<State>(&dh, backend.renderer().shm_formats());
     let data_device_state    = DataDeviceState::new::<State>(&dh);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
+    let layer_shell_state    = smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<State>(&dh);
     let mut seat_state       = smithay::input::SeatState::new();
     let seat                 = seat_state.new_wl_seat(&dh, "vendi-seat-0");
 
@@ -102,6 +103,7 @@ pub fn run() -> Result<()> {
         seat_state,
         data_device_state,
         dmabuf_state,
+        layer_shell_state,
         output_manager_state,
         seat,
         space,
