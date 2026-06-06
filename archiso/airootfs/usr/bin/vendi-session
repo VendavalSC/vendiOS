@@ -11,14 +11,18 @@
 
 set -e
 
-VENDI_SESSION=hyprland
+VENDI_SESSION=vendiwm
 [[ -f /etc/vendi/session.conf ]] && source /etc/vendi/session.conf
 
-case "${VENDI_SESSION:-hyprland}" in
-    vendiwm)
-        exec vendiwm
-        ;;
-    hyprland|*)
+# Release the Plymouth splash so the compositor can take over the DRM master.
+# Non-fatal: plymouth may not be running (e.g. invoked outside greetd).
+plymouth quit --retain-splash 2>/dev/null || true
+
+case "${VENDI_SESSION:-vendiwm}" in
+    hyprland)
         exec Hyprland
+        ;;
+    vendiwm|*)
+        exec vendiwm
         ;;
 esac

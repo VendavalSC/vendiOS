@@ -83,6 +83,11 @@ python-pyparted
 # ── desktop (temp: hyprland until vendiWM) ───────────────────
 cage
 hyprland
+# vendiwm runtime deps (most overlap with hyprland but be explicit)
+seatd
+libinput
+libxkbcommon
+mesa
 xdg-desktop-portal-hyprland
 xdg-desktop-portal-gtk
 waybar

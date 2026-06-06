@@ -24,7 +24,7 @@ depends=(
     'libxkbcommon'
     'libinput'
     'mesa'
-    'libseat'
+    'seatd'
     'wayland'
 )
 makedepends=(
@@ -36,7 +36,7 @@ makedepends=(
     'libxkbcommon'
     'libinput'
     'mesa'
-    'libseat'
+    'seatd'
     'wayland'
     'systemd'           # for libudev
 )

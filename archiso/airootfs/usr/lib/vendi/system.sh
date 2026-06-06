@@ -25,6 +25,8 @@ BASE_PKGS=(
     firefox
     # silent boot + LUKS + invisible login manager
     plymouth cryptsetup greetd
+    # vendiwm runtime deps (most overlap with hyprland; explicit for safety)
+    seatd libinput libxkbcommon mesa
     # automated snapshots + recovery
     snapper snap-pac
     # CLI toolkit (improves the bare shell experience)
@@ -127,13 +129,13 @@ command = "/usr/bin/vendi-session"
 user = "${user}"
 EOF
 
-    # Default session pick — Hyprland for safety until vendiwm udev rendering
-    # is verified on real hardware. To try vendiwm: edit and reboot.
+    # Default session pick — vendiwm, the in-house compositor. Set this to
+    # "hyprland" and reboot to fall back to the bundled Hyprland session.
     mkdir -p /mnt/etc/vendi
     cat > /mnt/etc/vendi/session.conf <<EOF
-# vendi-session config. Set VENDI_SESSION to "vendiwm" to use the experimental
-# vendiwm compositor, or "hyprland" for the stable Hyprland-based session.
-VENDI_SESSION=hyprland
+# vendi-session config. Set VENDI_SESSION to "vendiwm" for the default
+# in-house compositor, or "hyprland" for the bundled fallback.
+VENDI_SESSION=vendiwm
 EOF
 
     # Make sure agetty doesn't fight greetd over tty1
@@ -349,7 +351,11 @@ sys_install_vendi_cli() {
     # Mirror the future AUR `vendi` package layout (/usr/bin + /usr/lib/vendi)
     # so `yay -Syu` can manage updates to these paths after install.
     mkdir -p /mnt/usr/bin /mnt/usr/lib/vendi
-    for bin in vendi vendi-install vendi-boot vendi-welcome; do
+    # Bash CLIs + the session launcher + the Rust binaries (vendiwm compositor,
+    # vendi-ctl IPC, vendi-demo test client). All shipped from the live ISO's
+    # /usr/bin since the airootfs is built with them in place.
+    for bin in vendi vendi-install vendi-boot vendi-welcome vendi-session \
+               vendiwm vendi-ctl vendi-demo; do
         [[ -f /usr/bin/$bin ]] && install -m 755 /usr/bin/$bin /mnt/usr/bin/$bin
     done
     for lib in ui.sh disk.sh system.sh; do
@@ -895,7 +901,8 @@ selection-background=313244
 selection-foreground=cdd6f4
 
 [cursor]
-color=1e1e2e cba6f7
+text-color=1e1e2e
+cursor-color=cba6f7
 
 [mouse]
 hide-when-typing=yes
