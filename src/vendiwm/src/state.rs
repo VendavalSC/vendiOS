@@ -82,6 +82,17 @@ pub struct State {
     // drains this each tick and hands it to the IPC server (we keep them as
     // separate concerns rather than letting State own the IPC).
     pub pending_ipc_events:     Vec<crate::ipc::Event>,
+
+    // Set by handlers when something changed that needs the backend to
+    // re-render (new toplevel, surface commit, layout change). The udev/winit
+    // backend reads + clears this each event-loop tick. Without this, the
+    // VBlank-driven render loop stalls after the first empty frame because no
+    // page-flip ever queues.
+    pub pending_redraw:         bool,
+
+    // Set by the Quit action; the backend's per-tick callback reads this and
+    // breaks the calloop event loop.
+    pub quit_requested:         bool,
 }
 
 // ── per-client data ──────────────────────────────────────────────────────────
@@ -128,6 +139,8 @@ impl CompositorHandler for State {
         if let Some(window) = window {
             window.on_commit();
         }
+        // New buffer / damage → ask the backend to render this tick.
+        self.pending_redraw = true;
     }
 }
 
@@ -267,7 +280,7 @@ impl State {
             FocusNext => { self.layout.focus_next(); }
             FocusPrev => { self.layout.focus_prev(); }
             SetNextSplit(dir) => { self.layout.next_split_override = Some(dir); }
-            Quit => return true,
+            Quit => { self.quit_requested = true; return true; }
         }
         false
     }
@@ -285,6 +298,7 @@ impl State {
             }
             self.space.map_element(window, rect.loc, false);
         }
+        self.pending_redraw = true;
     }
 }
 

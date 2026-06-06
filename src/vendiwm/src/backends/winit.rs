@@ -125,6 +125,8 @@ pub fn run() -> Result<()> {
         pointer_location: (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
         pending_ipc_events: Vec::new(),
+        pending_redraw: true,
+        quit_requested: false,
     };
 
     let pointer = state.seat.add_pointer();
