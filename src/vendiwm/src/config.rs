@@ -15,17 +15,42 @@ use smithay::input::keyboard::xkb;
 use crate::input::Action;
 use crate::layout::Direction;
 
-/// Bundled defaults — used when no user config is present.
+/// Bundled defaults — used when no user config is present. Targets the
+/// packages that vendiOS ships in BASE_PKGS so every binding works out of
+/// the box on a fresh install (foot, firefox, wofi, grim, slurp, wl-copy,
+/// playerctl, brightnessctl, pipewire/wpctl).
 const DEFAULT_CONFIG: &str = r#"
 binds {
-    bind "super+return"        "spawn alacritty"
-    bind "super+d"             "spawn vendi-menu"
+    // ── apps ───────────────────────────────────────────────────
+    bind "super+return"        "spawn foot"
+    bind "super+b"             "spawn firefox"
+    bind "super+d"             "spawn wofi --show drun --allow-images --prompt \"\""
+    bind "super+space"         "spawn wofi --show drun --allow-images --prompt \"\""
+
+    // ── window management ──────────────────────────────────────
     bind "super+q"             "close"
     bind "super+j"             "focus-next"
     bind "super+k"             "focus-prev"
     bind "super+h"             "split-horizontal"
     bind "super+v"             "split-vertical"
     bind "super+shift+escape"  "quit"
+
+    // ── screenshots ────────────────────────────────────────────
+    bind "print"               "spawn sh -c 'mkdir -p ~/Pictures && grim ~/Pictures/screenshot-$(date +%s).png'"
+    bind "super+shift+s"       "spawn sh -c 'grim -g \"$(slurp)\" - | wl-copy'"
+
+    // ── media keys ─────────────────────────────────────────────
+    bind "XF86AudioRaiseVolume" "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
+    bind "XF86AudioLowerVolume" "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
+    bind "XF86AudioMute"        "spawn wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+    bind "XF86AudioMicMute"     "spawn wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"
+    bind "XF86AudioPlay"        "spawn playerctl play-pause"
+    bind "XF86AudioNext"        "spawn playerctl next"
+    bind "XF86AudioPrev"        "spawn playerctl previous"
+
+    // ── brightness ─────────────────────────────────────────────
+    bind "XF86MonBrightnessUp"   "spawn brightnessctl set 5%+"
+    bind "XF86MonBrightnessDown" "spawn brightnessctl set 5%-"
 }
 "#;
 
