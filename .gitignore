@@ -22,3 +22,11 @@ pkg/*/*.tar.gz
 
 # Rust workspace build outputs (Cargo.lock IS committed — binary crate)
 src/target/
+
+# Rust binaries staged into the ISO by build.sh (rebuilt each run)
+archiso/airootfs/usr/bin/vendiwm
+archiso/airootfs/usr/bin/vendi-ctl
+archiso/airootfs/usr/bin/vendi-demo
+
+# QEMU test fixtures (disk image, OVMF NVRAM copy)
+vm/

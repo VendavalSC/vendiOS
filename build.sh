@@ -40,6 +40,34 @@ echo ""
 
 mkdir -p "$OUT"
 
+# ── Build Rust binaries (compositor + CLI + demo) ─────────────────────────────
+# These don't come from packages.x86_64 — they're vendored into the airootfs
+# overlay so mkarchiso picks them up. Built as the invoking user so cargo can
+# use their ~/.cargo cache; copied into archiso/airootfs/usr/bin/ before the
+# squashfs is built.
+RUST_SRC="$(cd "$(dirname "$0")/src" && pwd)"
+RUST_BIN_DIR="${PROFILE}/airootfs/usr/bin"
+BUILD_USER="${SUDO_USER:-$(whoami)}"
+
+echo "  Building Rust workspace as user '${BUILD_USER}'..."
+if [[ "$BUILD_USER" != "root" ]]; then
+    sudo -u "$BUILD_USER" -H bash -lc \
+        "cd '${RUST_SRC}' && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo"
+else
+    (cd "$RUST_SRC" && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo)
+fi
+
+for bin in vendiwm vendi-ctl vendi-demo; do
+    src="${RUST_SRC}/target/release/${bin}"
+    if [[ ! -x "$src" ]]; then
+        echo "error: built binary missing: ${src}"
+        exit 1
+    fi
+    install -Dm755 "$src" "${RUST_BIN_DIR}/${bin}"
+done
+echo "  Rust binaries staged into airootfs."
+
+
 if $CLEAN; then
     # unmount any stale bind-mounts from a previous interrupted build
     for mnt in proc sys dev dev/pts run; do
