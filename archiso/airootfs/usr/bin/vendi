@@ -36,8 +36,8 @@ _header() {
 
 _ok()   { printf "  ${GREEN}${BOLD}✓${R}  ${TEXT}%s${R}\n" "$*"; }
 _err()  { printf "  ${RED}${BOLD}✗${R}  ${RED}%s${R}\n" "$*" >&2; }
-_info() { printf "  ${LAVENDER}${BOLD}󰋽${R}  ${SUBTEXT}%s${R}\n" "$*"; }
-_warn() { printf "  ${YELLOW}${BOLD}󰀦${R}  ${YELLOW}%s${R}\n" "$*"; }
+_info() { printf "  ${LAVENDER}${BOLD}·${R}  ${SUBTEXT}%s${R}\n" "$*"; }
+_warn() { printf "  ${YELLOW}${BOLD}!${R}  ${YELLOW}%s${R}\n" "$*"; }
 _step() { printf "  ${MAUVE}${BOLD}▸${R}  ${TEXT}%s${R}\n" "$*"; }
 
 _kv() {
@@ -48,7 +48,7 @@ _kv() {
 # ── commands ──────────────────────────────────────────────────────────────────
 
 cmd_update() {
-    _header " system update"
+    _header "system update"
     _step "refreshing mirrors via reflector…"
     reflector --latest 15 --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null \
         && _ok "mirrors updated" || _warn "reflector failed, using cached mirrors"
@@ -59,7 +59,7 @@ cmd_update() {
 }
 
 cmd_clean() {
-    _header "󰃺 clean cache"
+    _header "clean cache"
     _step "removing unused package cache…"
     local before after freed
     before=$(du -sh /var/cache/pacman/pkg 2>/dev/null | cut -f1)
@@ -74,7 +74,7 @@ cmd_clean() {
 }
 
 cmd_snapshot() {
-    _header "󰔘 btrfs snapshots"
+    _header "btrfs snapshots"
 
     # check btrfs
     if ! findmnt -no FSTYPE / 2>/dev/null | grep -q btrfs; then
@@ -116,7 +116,7 @@ cmd_snapshot() {
 }
 
 cmd_rollback() {
-    _header "󰜉 rollback"
+    _header "rollback"
 
     if ! command -v snapper >/dev/null; then
         _err "snapper not installed — cannot manage rollbacks"
@@ -147,7 +147,7 @@ cmd_fetch() {
 }
 
 cmd_info() {
-    _header " vendiOS info"
+    _header "vendiOS info"
 
     local cfg=/etc/vendios/release
     local ver='unknown' codename='unknown' built='unknown'
@@ -179,13 +179,13 @@ cmd_help() {
         printf "  ${LAVENDER}${BOLD}%-14s${R}${OVERLAY}%s${R}\n" "$1" "$2"
     }
 
-    _cmd " update"   "refresh mirrors and upgrade all packages"
-    _cmd "󰃺 clean"    "remove cached packages and vacuum journal"
-    _cmd "󰔘 snapshot" "create / manage btrfs snapshots"
-    _cmd "󰜉 rollback" "roll back to a previous snapshot"
-    _cmd " fetch"    "show system info with vendiOS logo"
-    _cmd " info"     "show distro version and system summary"
-    _cmd " help"     "show this message"
+    _cmd "update"   "refresh mirrors and upgrade all packages"
+    _cmd "clean"    "remove cached packages and vacuum journal"
+    _cmd "snapshot" "create / manage btrfs snapshots"
+    _cmd "rollback" "roll back to a previous snapshot"
+    _cmd "fetch"    "show system info with vendiOS logo"
+    _cmd "info"     "show distro version and system summary"
+    _cmd "help"     "show this message"
 
     printf "\n  ${OVERLAY}run with sudo for snapshot, rollback, update${R}\n\n"
 }

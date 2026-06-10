@@ -99,6 +99,7 @@ brightnessctl
 playerctl
 grim
 slurp
+swaylock
 wl-clipboard
 polkit-kde-agent
 qt5-wayland

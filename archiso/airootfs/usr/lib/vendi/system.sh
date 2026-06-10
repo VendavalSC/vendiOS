@@ -18,7 +18,7 @@ BASE_PKGS=(
     pipewire pipewire-audio pipewire-alsa pipewire-pulse wireplumber
     hyprland xdg-desktop-portal-hyprland xdg-desktop-portal-gtk
     waybar wofi mako foot alacritty
-    brightnessctl playerctl grim slurp wl-clipboard
+    brightnessctl playerctl grim slurp wl-clipboard swaylock
     polkit-kde-agent qt5-wayland qt6-wayland
     gtk3 gtk4 gtk4-layer-shell
     # default browser
@@ -591,12 +591,6 @@ export VISUAL=vim
 export PAGER='less -R'
 export MANPAGER='less -R'
 export TERM=xterm-256color
-
-# ── welcome on first shell ────────────────────────────────────
-[[ -z "$VENDI_GREETED" ]] && {
-    export VENDI_GREETED=1
-    vendi fetch 2>/dev/null || true
-}
 ZSHRC
 
     cat > "${home}/.zprofile" << 'ZPRO'
@@ -908,6 +902,36 @@ cursor-color=cba6f7
 
 [mouse]
 hide-when-typing=yes
+EOF
+
+    # ── swaylock (lock screen, Mocha) ─────────────────────────
+    local slcfg="${home}/.config/swaylock"
+    mkdir -p "$slcfg"
+    cat > "${slcfg}/config" << 'EOF'
+ignore-empty-password
+indicator-radius=90
+indicator-thickness=10
+color=11111b
+inside-color=1e1e2e
+inside-clear-color=1e1e2e
+inside-ver-color=1e1e2e
+inside-wrong-color=1e1e2e
+ring-color=45475a
+ring-clear-color=f9e2af
+ring-ver-color=cba6f7
+ring-wrong-color=f38ba8
+line-color=00000000
+line-clear-color=00000000
+line-ver-color=00000000
+line-wrong-color=00000000
+separator-color=00000000
+key-hl-color=cba6f7
+bs-hl-color=f38ba8
+text-color=cdd6f4
+text-clear-color=cdd6f4
+text-ver-color=cdd6f4
+text-wrong-color=f38ba8
+font=JetBrainsMono Nerd Font
 EOF
 
     # ── wofi ─────────────────────────────────────────────────
