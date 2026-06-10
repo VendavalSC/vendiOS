@@ -60,6 +60,10 @@ pub fn run() -> Result<()> {
     let data_device_state    = DataDeviceState::new::<State>(&dh);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
     let layer_shell_state    = smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<State>(&dh);
+    let session_lock_state   = smithay::wayland::session_lock::SessionLockManagerState::new::<State, _>(&dh, |_| true);
+    let primary_selection_state = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<State>(&dh);
+    let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(&dh);
+    let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(&dh);
     let mut seat_state       = smithay::input::SeatState::new();
     let seat                 = seat_state.new_wl_seat(&dh, "vendi-seat-0");
 
@@ -105,7 +109,7 @@ pub fn run() -> Result<()> {
     let config = crate::config::Config::load()
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "config load failed; using empty keybinds");
-            crate::config::Config { keybinds: Default::default(), theme: Default::default() }
+            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default() }
         });
 
     let mut state = State {
@@ -117,11 +121,19 @@ pub fn run() -> Result<()> {
         dmabuf_state,
         layer_shell_state,
         output_manager_state,
+        session_lock_state,
+        primary_selection_state,
+        xdg_decoration_state,
+        viewporter_state,
         seat,
+        lock_pending: None,
+        locked: false,
+        lock_surface: None,
         space,
         popups: PopupManager::default(),
         workspaces: crate::workspaces::Workspaces::new(),
         window_titles: Default::default(),
+        rule_checked: Default::default(),
         drag: None,
         swipe: None,
         last_zone: None,

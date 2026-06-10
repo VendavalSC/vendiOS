@@ -362,6 +362,10 @@ fn build_state(
     let data_device_state    = DataDeviceState::new::<State>(dh);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(dh);
     let layer_shell_state    = WlrLayerShellState::new::<State>(dh);
+    let session_lock_state   = smithay::wayland::session_lock::SessionLockManagerState::new::<State, _>(dh, |_| true);
+    let primary_selection_state = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<State>(dh);
+    let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(dh);
+    let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(dh);
     let dmabuf_state         = DmabufState::new();
 
     let mut seat_state = SeatState::new();
@@ -372,7 +376,7 @@ fn build_state(
 
     let config = crate::config::Config::load().unwrap_or_else(|e| {
         tracing::warn!(?e, "config load failed; using empty keybinds");
-        crate::config::Config { keybinds: Default::default(), theme: Default::default() }
+        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default() }
     });
 
     Ok(State {
@@ -384,11 +388,19 @@ fn build_state(
         dmabuf_state,
         layer_shell_state,
         output_manager_state,
+        session_lock_state,
+        primary_selection_state,
+        xdg_decoration_state,
+        viewporter_state,
         seat,
+        lock_pending:           None,
+        locked:                 false,
+        lock_surface:           None,
         space:                  Space::default(),
         popups:                 PopupManager::default(),
         workspaces:             crate::workspaces::Workspaces::new(),
         window_titles:          Default::default(),
+        rule_checked:           Default::default(),
         drag:                   None,
         swipe:                  None,
         last_zone:              None,
@@ -649,14 +661,64 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
 
     let scale = smithay::utils::Scale::from(1.0_f64);
 
+    // ── session lock: render ONLY the lock surface ──────────────────────────
+    // From the moment a lock is requested, nothing of the desktop may reach
+    // the screen — black until the client (swaylock) maps its surface. The
+    // lock is confirmed to the client only after the first locked frame has
+    // been queued, per the ext-session-lock spec.
+    if state.is_locked() {
+        let mut elements: Vec<FrameElement> = Vec::new();
+        let pointer_phys = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
+            state.pointer_location.x - cursor.hotspot.0 as f64,
+            state.pointer_location.y - cursor.hotspot.1 as f64,
+        ));
+        if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
+            renderer, pointer_phys, &cursor.buffer, None, None, None, Kind::Cursor,
+        ) {
+            elements.push(OutputRenderElements::Memory(elem));
+        }
+        if let Some(lock) = &state.lock_surface {
+            elements.extend(
+                smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
+                    _, WaylandSurfaceRenderElement<GlesRenderer>,
+                >(renderer, lock.wl_surface(), (0, 0), scale, 1.0, Kind::Unspecified)
+                .into_iter()
+                .map(OutputRenderElements::Layer),
+            );
+        }
+        surface.compositor.render_frame(renderer, &elements, Color32F::new(0.0, 0.0, 0.0, 1.0), FrameFlags::DEFAULT)
+            .map_err(|e| anyhow::anyhow!("render_frame: {e:?}"))?;
+        surface.compositor.queue_frame(())
+            .map_err(|e| anyhow::anyhow!("queue_frame: {e:?}"))?;
+        if let Some(locker) = state.lock_pending.take() {
+            locker.lock();
+            state.locked = true;
+            tracing::info!("session locked");
+        }
+        let time_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u32)
+            .unwrap_or(0);
+        if let Some(lock) = &state.lock_surface {
+            send_frames_surface_tree(lock.wl_surface(), time_ms);
+        }
+        return Ok(());
+    }
+
     // ── animation clocks ────────────────────────────────────────────────────
     // Open: fade + scale-in per window. Workspace switch: the whole desk
     // fades + settles. Eased with cubic ease-out; while anything is in
     // flight we keep pending_redraw set so the loop renders every tick.
-    const OPEN_MS: f32 = 220.0;
-    const WS_MS:   f32 = 180.0;
-    const MOVE_MS: f32 = 200.0;
+    const OPEN_MS: f32 = 260.0;
+    const WS_MS:   f32 = 220.0;
+    const MOVE_MS: f32 = 220.0;
     fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t).powi(3) }
+    // Spring-ish: overshoots the target by ~10% then settles — the iOS feel.
+    fn ease_out_back(t: f32) -> f32 {
+        const C1: f32 = 1.70158;
+        const C3: f32 = C1 + 1.0;
+        1.0 + C3 * (t - 1.0).powi(3) + C1 * (t - 1.0).powi(2)
+    }
     let now = std::time::Instant::now();
     state.open_anims.retain(|(w, t)| {
         smithay::utils::IsAlive::alive(w)
@@ -666,13 +728,18 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         smithay::utils::IsAlive::alive(w)
             && (now.duration_since(*t).as_secs_f32() * 1000.0) < MOVE_MS
     });
-    let ws_progress = state.ws_anim.map(|t| now.duration_since(t).as_secs_f32() * 1000.0 / WS_MS);
+    let ws_progress = state.ws_anim.map(|(t, _)| now.duration_since(t).as_secs_f32() * 1000.0 / WS_MS);
+    let ws_dir = state.ws_anim.map(|(_, d)| d).unwrap_or(0);
     if ws_progress.map(|p| p >= 1.0).unwrap_or(false) {
         state.ws_anim = None;
     }
-    let (ws_alpha, ws_scale) = match ws_progress.filter(|p| *p < 1.0) {
-        Some(p) => { let e = ease_out(p); (0.25 + 0.75 * e, 0.97 + 0.03 * e as f64) }
-        None    => (1.0, 1.0),
+    // The incoming desk fades in and slides from the side it lives on.
+    let (ws_alpha, ws_scale, ws_off) = match ws_progress.filter(|p| *p < 1.0) {
+        Some(p) => {
+            let e = ease_out(p);
+            (0.25 + 0.75 * e, 0.97 + 0.03 * e as f64, (ws_dir as f32 * 46.0 * (1.0 - e)).round() as i32)
+        }
+        None => (1.0, 1.0, 0),
     };
     let anims_active = state.ws_anim.is_some()
         || !state.open_anims.is_empty()
@@ -751,13 +818,16 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         let Some(geo) = state.space.element_geometry(window) else { continue };
 
         // Per-window open animation on top of the workspace-switch one.
-        let open_e = state.open_anims.iter()
+        // Alpha eases out plainly; scale takes the spring (slight overshoot).
+        let open_t = state.open_anims.iter()
             .find(|(w, _)| w == window)
-            .map(|(_, t)| ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / OPEN_MS).min(1.0)));
-        let alpha = ws_alpha * open_e.unwrap_or(1.0);
-        let scale_anim: f64 = ws_scale * open_e.map(|e| 0.92 + 0.08 * e as f64).unwrap_or(1.0);
+            .map(|(_, t)| (now.duration_since(*t).as_secs_f32() * 1000.0 / OPEN_MS).min(1.0));
+        let alpha = ws_alpha * open_t.map(ease_out).unwrap_or(1.0);
+        let scale_anim: f64 = ws_scale
+            * open_t.map(|t| 0.90 + 0.10 * ease_out_back(t) as f64).unwrap_or(1.0);
 
         // Tile-move glide: offset from the old slot toward the new one.
+        // The workspace slide rides on the same offset.
         let move_off = state.move_anims.iter()
             .find(|(w, _, _)| w == window)
             .map(|(_, from, t)| {
@@ -767,6 +837,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                 (dx, dy)
             })
             .unwrap_or((0, 0));
+        let move_off = (move_off.0 + ws_off, move_off.1);
 
         let center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
             geo.loc.x + move_off.0 + geo.size.w / 2,
@@ -1045,25 +1116,37 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             pointer.frame(state);
         }
 
-        // ── 3-finger swipe = workspace switch ───────────────────────────────
+        // ── touchpad swipes ──────────────────────────────────────────────────
+        // 3 fingers horizontal: workspace switch. 4 fingers vertical: swipe
+        // up opens the launcher, down the actions menu.
         InputEvent::GestureSwipeBegin { event } => {
             use smithay::backend::input::GestureBeginEvent;
-            state.swipe = Some((event.fingers(), 0.0));
+            state.swipe = Some((event.fingers(), 0.0, 0.0));
         }
         InputEvent::GestureSwipeUpdate { event } => {
             use smithay::backend::input::GestureSwipeUpdateEvent as _;
-            if let Some((_, dx)) = state.swipe.as_mut() {
+            if let Some((_, dx, dy)) = state.swipe.as_mut() {
                 *dx += event.delta_x();
+                *dy += event.delta_y();
             }
         }
         InputEvent::GestureSwipeEnd { event } => {
             use smithay::backend::input::GestureEndEvent;
-            let Some((fingers, dx)) = state.swipe.take() else { return };
-            if event.cancelled() || fingers != 3 || dx.abs() < 120.0 { return; }
-            // Swiping left moves the viewport right → next workspace.
-            let forward = dx < 0.0;
-            if let Some(id) = state.workspaces.adjacent_id(forward) {
-                state.switch_workspace(id);
+            let Some((fingers, dx, dy)) = state.swipe.take() else { return };
+            if event.cancelled() { return; }
+            match fingers {
+                3 if dx.abs() >= 120.0 && dx.abs() > dy.abs() => {
+                    // Swiping left moves the viewport right → next workspace.
+                    let forward = dx < 0.0;
+                    if let Some(id) = state.workspaces.adjacent_id(forward) {
+                        state.switch_workspace(id);
+                    }
+                }
+                4 if dy.abs() >= 120.0 && dy.abs() > dx.abs() => {
+                    let cmd = if dy < 0.0 { "vendi-menu" } else { "vendi-menu actions" };
+                    let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+                }
+                _ => {}
             }
         }
 

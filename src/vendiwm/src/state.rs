@@ -32,7 +32,9 @@ use smithay::{
         selection::{
             SelectionHandler,
             data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler},
+            primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
         },
+        viewporter::ViewporterState,
         shell::{
             xdg::{
                 PopupSurface, PositionerState, ToplevelSurface,
@@ -44,6 +46,9 @@ use smithay::{
             },
         },
         shm::{ShmHandler, ShmState},
+        session_lock::{
+            LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
+        },
     },
     backend::allocator::dmabuf::Dmabuf,
     output::Output,
@@ -60,7 +65,19 @@ pub struct State {
     pub dmabuf_state:          DmabufState,
     pub layer_shell_state:     WlrLayerShellState,
     pub output_manager_state:  OutputManagerState,
+    pub session_lock_state:    SessionLockManagerState,
+    pub primary_selection_state: PrimarySelectionState,
+    pub xdg_decoration_state:  smithay::wayland::shell::xdg::decoration::XdgDecorationState,
+    pub viewporter_state:      ViewporterState,
     pub seat:                  Seat<Self>,
+
+    // ext-session-lock: a client (swaylock) asked to lock. We confirm only
+    // after the first locked frame has actually been queued — until then
+    // `lock_pending` holds the unconfirmed locker. While locked the renderer
+    // shows ONLY the lock surface (black if the client hasn't mapped one).
+    pub lock_pending:          Option<SessionLocker>,
+    pub locked:                bool,
+    pub lock_surface:          Option<LockSurface>,
 
     // Unified window manager — handles toplevels, popups, layer-shell rendering,
     // multi-output stacking, focus stack. Tiling layout layers on top of this.
@@ -76,11 +93,16 @@ pub struct State {
     // window-title IPC events only on actual change.
     pub window_titles:         HashMap<u32, String>,
 
+    // Windows (protocol ids) already run through window rules — each window
+    // is classified exactly once, on its first commit that carries an app_id.
+    pub rule_checked:          std::collections::HashSet<u32>,
+
     // Active Super+drag of a floating window (move or resize).
     pub drag:                  Option<Drag>,
 
-    // In-flight 3-finger swipe: (finger count, accumulated dx).
-    pub swipe:                 Option<(u32, f64)>,
+    // In-flight touchpad swipe: (finger count, accumulated dx, dy).
+    // 3 fingers horizontal = workspace switch; 4 fingers vertical = menus.
+    pub swipe:                 Option<(u32, f64, f64)>,
 
     // Last layer-shell non-exclusive zone — relayout only runs when a layer
     // commit actually changes it. Without this, every bar/menu frame would
@@ -91,9 +113,9 @@ pub struct State {
     // scales these in and prunes finished entries.
     pub open_anims:            Vec<(Window, std::time::Instant)>,
 
-    // Workspace-switch animation start: the whole new workspace fades +
-    // settles in.
-    pub ws_anim:               Option<std::time::Instant>,
+    // Workspace-switch animation: (started-at, direction). The new desk
+    // fades in and slides from the side it lives on (+1 = from the right).
+    pub ws_anim:               Option<(std::time::Instant, i32)>,
 
     // Tile-move animations: (window, previous location, started-at). The
     // render loop glides each window from its old slot to the new one.
@@ -204,6 +226,23 @@ impl CompositorHandler for State {
                     let focused = self.focused_window().as_ref() == Some(&window);
                     self.pending_ipc_events.push(crate::ipc::Event::WindowTitle { id, title, focused });
                 }
+
+                // Window rules — classified once, on the first commit that
+                // carries an app_id. `vendi-float` (floating terminals from
+                // the menus: About, Install) opens floating, centered.
+                if !self.rule_checked.contains(&id) {
+                    let app_id = with_states(toplevel.wl_surface(), |states| {
+                        states.data_map.get::<XdgToplevelSurfaceData>()
+                            .and_then(|d| d.lock().ok().and_then(|a| a.app_id.clone()))
+                            .unwrap_or_default()
+                    });
+                    if !app_id.is_empty() {
+                        self.rule_checked.insert(id);
+                        if app_id == "vendi-float" {
+                            self.float_window(&window);
+                        }
+                    }
+                }
             }
         }
 
@@ -291,6 +330,7 @@ impl XdgShellHandler for State {
             self.space.unmap_elem(&window);
         }
         self.window_titles.remove(&id);
+        self.rule_checked.remove(&id);
         self.pending_ipc_events.push(crate::ipc::Event::WindowClosed { id });
         self.relayout();
         self.update_keyboard_focus();
@@ -329,6 +369,42 @@ impl DataDeviceHandler for State {
     }
 }
 impl WaylandDndGrabHandler for State {}
+
+impl PrimarySelectionHandler for State {
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
+    }
+}
+
+// xdg-decoration: vendiwm always draws the chrome (borders/rings) itself, so
+// every toplevel is told ServerSide — clients skip their own titlebars.
+impl smithay::wayland::shell::xdg::decoration::XdgDecorationHandler for State {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        toplevel.with_pending_state(|s| {
+            s.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+    fn request_mode(
+        &mut self,
+        toplevel: ToplevelSurface,
+        _mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
+    ) {
+        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        toplevel.with_pending_state(|s| {
+            s.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_pending_configure();
+    }
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        toplevel.with_pending_state(|s| {
+            s.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_pending_configure();
+    }
+}
 
 impl OutputHandler for State {}
 
@@ -389,11 +465,53 @@ impl WlrLayerShellHandler for State {
     }
 }
 
+impl SessionLockHandler for State {
+    fn lock_state(&mut self) -> &mut SessionLockManagerState {
+        &mut self.session_lock_state
+    }
+    fn lock(&mut self, confirmation: SessionLocker) {
+        tracing::info!("session lock requested");
+        self.lock_pending = Some(confirmation);
+        self.pending_redraw = true;
+    }
+    fn unlock(&mut self) {
+        tracing::info!("session unlocked");
+        self.locked = false;
+        self.lock_pending = None;
+        self.lock_surface = None;
+        self.update_keyboard_focus();
+        self.pending_redraw = true;
+    }
+    fn new_surface(&mut self, surface: LockSurface, output: wl_output::WlOutput) {
+        let size = Output::from_resource(&output)
+            .and_then(|o| self.space.output_geometry(&o))
+            .map(|g| g.size)
+            .unwrap_or_else(|| (1920, 1080).into());
+        surface.with_pending_state(|s| {
+            s.size = Some((size.w as u32, size.h as u32).into());
+        });
+        surface.send_configure();
+        self.lock_surface = Some(surface);
+        self.update_keyboard_focus();
+        self.pending_redraw = true;
+    }
+}
+
 impl State {
+    /// True from the moment a lock is requested until the client unlocks.
+    /// The renderer and input paths must show/route ONLY the lock surface.
+    pub fn is_locked(&self) -> bool {
+        self.locked || self.lock_pending.is_some()
+    }
+
     /// Find the topmost wl_surface under the given point, along with its
     /// absolute logical position. Checks layer surfaces above windows
     /// (Overlay/Top — e.g. the bar), then windows, then lower layers.
     pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
+        // While locked, pointer input may only ever reach the lock surface.
+        if self.is_locked() {
+            return self.lock_surface.as_ref().map(|l| (l.wl_surface().clone(), Point::from((0.0, 0.0))));
+        }
         fn layer_hit(
             map: &smithay::desktop::LayerMap,
             layer: &LayerSurface,
@@ -453,6 +571,15 @@ impl State {
     /// Push keyboard focus + xdg Activated state to whatever the active
     /// workspace says is focused, raise it, and tell the bar.
     pub fn update_keyboard_focus(&mut self) {
+        // A lock surface owns the keyboard unconditionally while locked.
+        if self.is_locked() {
+            let surf = self.lock_surface.as_ref().map(|l| l.wl_surface().clone());
+            if let Some(kb) = self.seat.get_keyboard() {
+                kb.set_focus(self, surf, SERIAL_COUNTER.next_serial());
+            }
+            self.pending_redraw = true;
+            return;
+        }
         if let Some(surf) = self.exclusive_layer_surface() {
             if let Some(kb) = self.seat.get_keyboard() {
                 kb.set_focus(self, Some(surf), SERIAL_COUNTER.next_serial());
@@ -503,9 +630,10 @@ impl State {
     /// Switch the active workspace, hiding the old one's windows.
     pub fn switch_workspace(&mut self, id: u32) {
         if id == self.workspaces.active_id() { return; }
+        let dir = if id > self.workspaces.active_id() { 1 } else { -1 };
         let hidden = self.workspaces.switch_to(id);
         for w in hidden { self.space.unmap_elem(&w); }
-        self.ws_anim = Some(std::time::Instant::now());
+        self.ws_anim = Some((std::time::Instant::now(), dir));
         self.relayout();
         self.update_keyboard_focus();
         self.emit_workspaces();
@@ -527,24 +655,33 @@ impl State {
     /// windows open centered at ~60% of the viewport.
     pub fn toggle_floating(&mut self) {
         let Some(window) = self.focused_window() else { return };
-        let viewport = self.tiling_viewport();
         let ws = self.workspaces.active();
         if let Some(pos) = ws.floating.iter().position(|(w, _)| w == &window) {
             ws.floating.remove(pos);
             ws.focus_floating = None;
             ws.tree.insert(window);
-        } else if ws.tree.contains(&window) {
-            ws.tree.remove(&window);
-            let Some(vp) = viewport else { return };
-            let size: smithay::utils::Size<i32, Logical> =
-                ((vp.size.w * 3 / 5).max(320), (vp.size.h * 3 / 5).max(240)).into();
-            let loc: Point<i32, Logical> = (
-                vp.loc.x + (vp.size.w - size.w) / 2,
-                vp.loc.y + (vp.size.h - size.h) / 2,
-            ).into();
-            ws.floating.push((window.clone(), Rectangle::new(loc, size)));
-            ws.focus_floating = Some(window);
+            self.relayout();
+            self.update_keyboard_focus();
+        } else {
+            self.float_window(&window);
         }
+    }
+
+    /// Pop a tiled window out into the floating layer, centered at ~60% of
+    /// the viewport. Also used by the `vendi-float` window rule.
+    pub fn float_window(&mut self, window: &Window) {
+        let Some(vp) = self.tiling_viewport() else { return };
+        let ws = self.workspaces.active();
+        if !ws.tree.contains(window) { return; }
+        ws.tree.remove(window);
+        let size: smithay::utils::Size<i32, Logical> =
+            ((vp.size.w * 3 / 5).max(320), (vp.size.h * 3 / 5).max(240)).into();
+        let loc: Point<i32, Logical> = (
+            vp.loc.x + (vp.size.w - size.w) / 2,
+            vp.loc.y + (vp.size.h - size.h) / 2,
+        ).into();
+        ws.floating.push((window.clone(), Rectangle::new(loc, size)));
+        ws.focus_floating = Some(window.clone());
         self.relayout();
         self.update_keyboard_focus();
     }

@@ -36,6 +36,8 @@ pub enum Request {
     ListWindows,
     /// Snapshot of all workspaces.
     ListWorkspaces,
+    /// All active keybinds (defaults merged with user overrides).
+    ListBinds,
     /// Switch to a workspace (created on demand).
     Workspace      { id: u32 },
     /// Set the direction of the next split.
@@ -66,6 +68,13 @@ pub enum Response {
     Error     { error: String },
     Windows   { windows: Vec<WindowInfo> },
     Workspaces{ workspaces: Vec<WorkspaceInfo> },
+    Binds     { binds: Vec<BindInfo> },
+}
+
+#[derive(Debug, Serialize)]
+pub struct BindInfo {
+    pub chord:  String,
+    pub action: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -285,6 +294,13 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
             Response::Workspaces {
                 workspaces: list.into_iter()
                     .map(|(id, windows)| WorkspaceInfo { id, focused: id == active, windows })
+                    .collect(),
+            }
+        }
+        Request::ListBinds => {
+            Response::Binds {
+                binds: state.config.keybinds_pretty.iter()
+                    .map(|(chord, action)| BindInfo { chord: chord.clone(), action: action.clone() })
                     .collect(),
             }
         }

@@ -35,7 +35,10 @@ binds {
     // ── window management ──────────────────────────────────────
     bind "super+q"             "close"
     bind "super+j"             "focus-next"
-    bind "super+k"             "focus-prev"
+    bind "super+tab"           "focus-next"
+    bind "super+shift+tab"     "focus-prev"
+    bind "super+k"             "spawn vendi-menu keys"
+    bind "super+escape"        "spawn swaylock -f"
     bind "super+left"          "focus-left"
     bind "super+right"         "focus-right"
     bind "super+up"            "focus-up"
@@ -187,38 +190,57 @@ impl Default for Theme {
 
 pub struct Config {
     pub keybinds: HashMap<Chord, Action>,
+    /// Human-readable bind list in config order, user overrides applied.
+    /// Served over IPC (`list-binds`) for the Super+K keybinds menu.
+    pub keybinds_pretty: Vec<(String, String)>,
     pub theme:    Theme,
 }
 
 impl Config {
-    /// Read user config or fall back to defaults.
+    /// Defaults always load first; a user file overlays them. A config that
+    /// only sets a theme block keeps every default bind, and a user bind on
+    /// an already-bound chord replaces the default action.
     pub fn load() -> Result<Self> {
-        let kdl_text = match read_user_config()? {
+        let default_doc: Document = knus::parse("default.kdl", DEFAULT_CONFIG)
+            .map_err(|e| anyhow::anyhow!("parse built-in config: {e}"))?;
+        let mut user_doc: Option<Document> = match read_user_config()? {
             Some(text) => {
-                tracing::info!("loaded user config");
-                text
+                tracing::info!("overlaying user config");
+                Some(knus::parse("vendiwm.kdl", &text)
+                    .map_err(|e| anyhow::anyhow!("parse vendiwm.kdl: {e}"))?)
             }
-            None => {
-                tracing::info!("using bundled default config");
-                DEFAULT_CONFIG.to_string()
-            }
+            None => None,
         };
-        let doc: Document = knus::parse("vendiwm.kdl", &kdl_text)
-            .map_err(|e| anyhow::anyhow!("parse vendiwm.kdl: {e}"))?;
 
-        let mut keybinds = HashMap::new();
-        if let Some(binds) = doc.binds {
-            for entry in binds.entries {
-                let chord = parse_chord(&entry.chord)
-                    .with_context(|| format!("parse chord {:?}", entry.chord))?;
-                let action = parse_action(&entry.action)
-                    .with_context(|| format!("parse action {:?}", entry.action))?;
-                keybinds.insert(chord, action);
+        // (chord, pretty chord, pretty action, action) in config order. A user
+        // bind on an existing chord replaces that slot so the pretty list
+        // shows the override, not both.
+        let mut entries: Vec<(Chord, String, String, Action)> = Vec::new();
+        let default_binds = default_doc.binds.map(|b| b.entries).unwrap_or_default();
+        let user_binds = user_doc.as_mut()
+            .and_then(|d| d.binds.take())
+            .map(|b| b.entries)
+            .unwrap_or_default();
+        for entry in default_binds.into_iter().chain(user_binds) {
+            let chord = parse_chord(&entry.chord)
+                .with_context(|| format!("parse chord {:?}", entry.chord))?;
+            let action = parse_action(&entry.action)
+                .with_context(|| format!("parse action {:?}", entry.action))?;
+            match entries.iter_mut().find(|(c, ..)| *c == chord) {
+                Some(slot) => *slot = (chord, entry.chord, entry.action, action),
+                None       => entries.push((chord, entry.chord, entry.action, action)),
             }
         }
 
+        let mut keybinds = HashMap::new();
+        let mut keybinds_pretty = Vec::new();
+        for (chord, pretty_chord, pretty_action, action) in entries {
+            keybinds.insert(chord, action);
+            keybinds_pretty.push((pretty_chord, pretty_action));
+        }
+
         let mut theme = Theme::default();
-        if let Some(t) = doc.theme {
+        if let Some(t) = user_doc.and_then(|d| d.theme) {
             if let Some(c) = t.accent.as_deref().and_then(hex_color)     { theme.accent = c; }
             if let Some(c) = t.inactive.as_deref().and_then(hex_color)   { theme.inactive = c; }
             if let Some(c) = t.background.as_deref().and_then(hex_color) { theme.background = c; }
@@ -226,10 +248,10 @@ impl Config {
             if let Some(v) = t.border  { theme.border = v as i32; }
             if let Some(v) = t.gap     { theme.gap = v as i32; }
             if let Some(v) = t.margin  { theme.margin = v as i32; }
-            theme.wallpaper = t.wallpaper;
+            if t.wallpaper.is_some()   { theme.wallpaper = t.wallpaper; }
         }
 
-        Ok(Self { keybinds, theme })
+        Ok(Self { keybinds, keybinds_pretty, theme })
     }
 }
 
