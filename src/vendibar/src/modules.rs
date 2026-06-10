@@ -210,6 +210,7 @@ fn refresh_volume(label: &gtk::Label) {
 }
 
 /// Network state from /sys/class/net — icon only, macOS style.
+/// Hover names the connected network; click summons the wifi TUI.
 pub fn network() -> gtk::Label {
     let label = gtk::Label::new(None);
     label.add_css_class("network");
@@ -221,12 +222,16 @@ pub fn network() -> gtk::Label {
             glib::ControlFlow::Continue
         });
     }
+    let click = gtk::GestureClick::new();
+    click.connect_released(|_, _, _, _| spawn_float(&["vendi", "wifi"]));
+    label.add_controller(click);
     label
 }
 
 fn refresh_network(label: &gtk::Label) {
     let mut icon = "\u{f05aa}";   // 󰖪 offline
     let mut up = false;
+    let mut wifi = false;
     if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -235,18 +240,83 @@ fn refresh_network(label: &gtk::Label) {
                 .unwrap_or_default();
             if operstate.trim() == "up" {
                 up = true;
-                icon = if name.starts_with('w') { "\u{f05a9}" }   // 󰖩 wifi
-                       else { "\u{f0200}" };                       // 󰈀 ethernet
-                if name.starts_with('w') { break; }   // prefer showing wifi
+                wifi = name.starts_with('w');
+                icon = if wifi { "\u{f05a9}" }   // 󰖩 wifi
+                       else { "\u{f0200}" };      // 󰈀 ethernet
+                if wifi { break; }   // prefer showing wifi
             }
         }
     }
+    let tooltip = if !up {
+        "no network — click to connect".to_string()
+    } else if wifi {
+        // "yes:MySSID" line from the active wifi list.
+        read_cmd(&["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"])
+            .and_then(|out| out.lines()
+                .find_map(|l| l.strip_prefix("yes:").map(str::to_string)))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "wifi".into())
+    } else {
+        "wired connection".to_string()
+    };
+    label.set_tooltip_text(Some(&tooltip));
     label.set_text(icon);
     if up { label.remove_css_class("offline"); } else { label.add_css_class("offline"); }
 }
 
+/// Bluetooth — hidden when the machine has no adapter. Hover names the
+/// connected devices; click summons the bluetooth TUI.
+pub fn bluetooth() -> Option<gtk::Label> {
+    std::fs::read_dir("/sys/class/bluetooth").ok()?.flatten().next()?;
+    let label = gtk::Label::new(None);
+    label.add_css_class("bluetooth");
+    refresh_bluetooth(&label);
+    {
+        let label = label.clone();
+        glib::timeout_add_seconds_local(10, move || {
+            refresh_bluetooth(&label);
+            glib::ControlFlow::Continue
+        });
+    }
+    let click = gtk::GestureClick::new();
+    click.connect_released(|_, _, _, _| spawn_float(&["vendi", "bt"]));
+    label.add_controller(click);
+    Some(label)
+}
+
+fn refresh_bluetooth(label: &gtk::Label) {
+    let powered = read_cmd(&["bluetoothctl", "show"])
+        .map(|s| s.contains("Powered: yes"))
+        .unwrap_or(false);
+    // "Device AA:BB:.. Name" per connected device.
+    let connected: Vec<String> = read_cmd(&["bluetoothctl", "devices", "Connected"])
+        .map(|out| out.lines()
+            .filter_map(|l| l.splitn(3, ' ').nth(2).map(str::to_string))
+            .collect())
+        .unwrap_or_default();
+    let (icon, tooltip) = if !powered {
+        ("\u{f00b2}", "bluetooth off — click to manage".to_string())   // 󰂲
+    } else if connected.is_empty() {
+        ("\u{f00af}", "bluetooth on — click to connect".to_string())   // 󰂯
+    } else {
+        ("\u{f00b1}", connected.join(", "))                            // 󰂱
+    };
+    label.set_text(icon);
+    label.set_tooltip_text(Some(&tooltip));
+    if powered { label.remove_css_class("muted"); } else { label.add_css_class("muted"); }
+}
+
+/// Run a vendi TUI in a floating terminal (vendiwm floats app_id vendi-float).
+fn spawn_float(cmd: &[&str]) {
+    let _ = std::process::Command::new("alacritty")
+        .args(["--class", "vendi-float", "-e"])
+        .args(cmd)
+        .spawn();
+}
+
 /// Battery from /sys/class/power_supply. Returns None when there is no
-/// battery (desktops, VMs) so the module disappears entirely.
+/// battery (desktops, VMs) so the module disappears entirely. Icon only —
+/// percentage lives in the hover tooltip; click opens the power profile menu.
 pub fn battery() -> Option<gtk::Label> {
     battery_path()?;
     let label = gtk::Label::new(None);
@@ -259,6 +329,11 @@ pub fn battery() -> Option<gtk::Label> {
             glib::ControlFlow::Continue
         });
     }
+    let click = gtk::GestureClick::new();
+    click.connect_released(|_, _, _, _| {
+        let _ = std::process::Command::new("vendi-menu").arg("power").spawn();
+    });
+    label.add_controller(click);
     Some(label)
 }
 
@@ -288,7 +363,11 @@ fn refresh_battery(label: &gtk::Label) {
             ];
             LEVELS[((pct.min(100).saturating_sub(1)) / 10) as usize]
         };
-    label.set_text(&format!("{icon} {pct}%"));
+    label.set_text(icon);
+    label.set_tooltip_text(Some(&format!(
+        "{pct}%{} — click for power profile",
+        if charging { " · charging" } else { "" }
+    )));
     if pct <= 15 && !charging { label.add_css_class("low"); }
     else { label.remove_css_class("low"); }
 }

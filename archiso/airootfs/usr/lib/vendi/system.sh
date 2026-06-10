@@ -31,8 +31,8 @@ BASE_PKGS=(
     snapper snap-pac
     # CLI toolkit (improves the bare shell experience)
     eza bat ripgrep fd fzf
-    # hardware
-    bluez bluez-utils power-profiles-daemon
+    # hardware (python-gobject: powerprofilesctl is a python-gi script)
+    bluez bluez-utils power-profiles-daemon python-gobject
     # auto-mount removable media
     udisks2 gvfs
     # firewall + time sync
@@ -493,22 +493,25 @@ sys_zsh_config() {
     mkdir -p "$home"
 
     cat > "${home}/.zshrc" << 'ZSHRC'
-# vendiOS zsh — Catppuccin Mocha + Nerd Fonts
+# vendiOS zsh — themed by `vendi theme` + Nerd Fonts
 autoload -Uz compinit && compinit -d ~/.cache/zcompdump
 autoload -Uz colors && colors
 
-# ── Catppuccin Mocha colors ───────────────────────────────────
-_C_MAUVE=$'\e[38;2;203;166;247m'
-_C_LAVENDER=$'\e[38;2;180;190;254m'
-_C_TEXT=$'\e[38;2;205;214;244m'
-_C_OVERLAY0=$'\e[38;2;108;112;134m'
-_C_RED=$'\e[38;2;243;139;168m'
-_C_GREEN=$'\e[38;2;166;227;161m'
-_C_BASE=$'\e[48;2;30;30;46m'
-_C_MANTLE=$'\e[48;2;24;24;37m'
-_C_SEL=$'\e[48;2;49;35;73m'
-_C_R=$'\e[0m'
-_C_B=$'\e[1m'
+# ── palette ───────────────────────────────────────────────────
+# Mocha defaults; `vendi theme` writes ~/.config/vendi/shell-theme.zsh
+# which overrides every slot. RGB triplets for ANSI, hex for fzf/zstyle.
+VENDI_ACCENT='203;166;247'    VENDI_ACCENT_HEX='#cba6f7'
+VENDI_SECOND='180;190;254'
+VENDI_DIM='108;112;134'
+VENDI_ERR='243;139;168'       VENDI_ERR_HEX='#f38ba8'
+VENDI_TEXT='205;214;244'      VENDI_TEXT_HEX='#cdd6f4'
+VENDI_BASE_HEX='#1e1e2e'      VENDI_SURFACE_HEX='#313244'
+VENDI_BLUE='137;180;250'
+VENDI_TEAL='148;226;213'      VENDI_TEAL_HEX='#94e2d5'
+VENDI_GREEN='166;227;161'     VENDI_GREEN_HEX='#a6e3a1'
+VENDI_YELLOW='250;179;135'
+VENDI_PINK_HEX='#f5c2e7'
+[[ -f ~/.config/vendi/shell-theme.zsh ]] && source ~/.config/vendi/shell-theme.zsh
 
 # ── prompt ────────────────────────────────────────────────────
 _vendi_git_branch() {
@@ -521,19 +524,19 @@ _vendi_git_branch() {
 
 _vendi_prompt() {
     local code=$?
-    local arrow_fg; arrow_fg=$( [[ $code -eq 0 ]] && echo '203;166;247' || echo '243;139;168' )
+    local arrow_fg; arrow_fg=$( [[ $code -eq 0 ]] && echo "$VENDI_ACCENT" || echo "$VENDI_ERR" )
     # Pre-expand: PROMPT_SUBST expands $() in PS1 itself, but does NOT
     # re-expand command substitutions emitted from inside a function.
     local branch; branch=$(_vendi_git_branch)
 
     # segment 1: user
-    printf '%b' "%{\e[38;2;203;166;247m%}%B%n%b%f"
+    printf '%b' "%{\e[38;2;${VENDI_ACCENT}m%}%B%n%b%f"
     # separator
-    printf '%b' "%{\e[38;2;108;112;134m%}  %f"    # nf-pl-right_soft_divider
+    printf '%b' "%{\e[38;2;${VENDI_DIM}m%}  %f"    # nf-pl-right_soft_divider
     # segment 2: dir (shortened)
-    printf '%b' "%{\e[38;2;180;190;254m%}%3~%f"
+    printf '%b' "%{\e[38;2;${VENDI_SECOND}m%}%3~%f"
     # git
-    printf '%b' "%{\e[38;2;108;112;134m%}${branch}%f"
+    printf '%b' "%{\e[38;2;${VENDI_DIM}m%}${branch}%f"
     # arrow
     printf '\n'
     printf '%b' "%{\e[38;2;${arrow_fg}m%} %f "    # nf-pl-right_hard_divider
@@ -553,10 +556,10 @@ setopt HIST_IGNORE_ALL_DUPS HIST_IGNORE_SPACE SHARE_HISTORY INC_APPEND_HISTORY
 zstyle ':completion:*' menu select
 zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
 zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}' 'r:|=*' 'l:|=* r:|=*'
-zstyle ':completion:*:descriptions' format '%F{#CBA6F7}── %d ──%f'
+zstyle ':completion:*:descriptions' format "%F{${VENDI_ACCENT_HEX}}── %d ──%f"
 
 # ── ls colors (Catppuccin) ────────────────────────────────────
-export LS_COLORS='di=38;2;137;180;250:ln=38;2;148;226;213:ex=38;2;166;227;161:fi=38;2;205;214;244:*.zip=38;2;250;179;135:*.tar=38;2;250;179;135:*.gz=38;2;250;179;135'
+export LS_COLORS="di=38;2;${VENDI_BLUE}:ln=38;2;${VENDI_TEAL}:ex=38;2;${VENDI_GREEN}:fi=38;2;${VENDI_TEXT}:*.zip=38;2;${VENDI_YELLOW}:*.tar=38;2;${VENDI_YELLOW}:*.gz=38;2;${VENDI_YELLOW}"
 
 # ── aliases ───────────────────────────────────────────────────
 # Modern replacements for classic tools, with classic-name aliases.
@@ -579,7 +582,7 @@ alias cls='clear'
 if [[ -f /usr/share/fzf/key-bindings.zsh ]]; then
     source /usr/share/fzf/key-bindings.zsh
     source /usr/share/fzf/completion.zsh 2>/dev/null
-    export FZF_DEFAULT_OPTS='--color=bg+:#313244,bg:#1e1e2e,fg:#cdd6f4,fg+:#cdd6f4,hl:#f38ba8,hl+:#f38ba8,info:#cba6f7,marker:#a6e3a1,prompt:#cba6f7,pointer:#f5c2e7,spinner:#94e2d5,header:#94e2d5,border:#cba6f7,gutter:#1e1e2e'
+    export FZF_DEFAULT_OPTS="--color=bg+:${VENDI_SURFACE_HEX},bg:${VENDI_BASE_HEX},fg:${VENDI_TEXT_HEX},fg+:${VENDI_TEXT_HEX},hl:${VENDI_ERR_HEX},hl+:${VENDI_ERR_HEX},info:${VENDI_ACCENT_HEX},marker:${VENDI_GREEN_HEX},prompt:${VENDI_ACCENT_HEX},pointer:${VENDI_PINK_HEX},spinner:${VENDI_TEAL_HEX},header:${VENDI_TEAL_HEX},border:${VENDI_ACCENT_HEX},gutter:${VENDI_BASE_HEX}"
 fi
 alias ..='cd ..'
 alias ...='cd ../..'

@@ -411,6 +411,7 @@ fn build_state(
         swipe:                  None,
         overview:               false,
         overview_t:             std::time::Instant::now(),
+        screenshot:             None,
         last_zone:              None,
         open_anims:             Vec::new(),
         ws_anim:                None,
@@ -671,6 +672,8 @@ fn initial_surface_setup(app: &mut UdevApp, node: DrmNode) -> Result<Option<crtc
         mode_size.0 as i32,
         mode_size.1 as i32,
         state.config.theme.wallpaper.as_deref(),
+        state.config.theme.background,
+        state.config.theme.accent,
     );
 
     device.surfaces.insert(crtc, SurfaceState { output, compositor, wallpaper });
@@ -882,6 +885,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     ) {
         elements.push(OutputRenderElements::Memory(elem));
     }
+    // Screenshots skip everything up to here (i.e. the cursor).
+    let after_cursor = elements.len();
 
     // Upper layers (Top/Overlay) → above windows but below the cursor.
     elements.extend(upper_layer_elems.into_iter().map(OutputRenderElements::Layer));
@@ -1215,6 +1220,53 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                     elements.insert(blur_mark + i, OutputRenderElements::Blur(patch));
                 }
             }
+        }
+    }
+
+    // ── screenshot (IPC) ─────────────────────────────────────────────────────
+    // Re-render the element stack (sans cursor) into an offscreen texture,
+    // read it back, write PNG. One-shot; failures only log.
+    if let Some(path) = state.screenshot.take() {
+        use smithay::backend::renderer::{Bind, ExportMem, Frame, Offscreen, Renderer as _};
+        use smithay::backend::renderer::element::Element as _;
+        let out_size = state.space.output_geometry(&surface.output)
+            .map(|g| g.size)
+            .unwrap_or_else(|| (1, 1).into());
+        let shot = (|| -> anyhow::Result<()> {
+            let size_phys = smithay::utils::Size::<i32, smithay::utils::Physical>::from((out_size.w, out_size.h));
+            let full = smithay::utils::Rectangle::from_size(size_phys);
+            let mut tex: smithay::backend::renderer::gles::GlesTexture = renderer
+                .create_buffer(smithay::backend::allocator::Fourcc::Abgr8888, (out_size.w, out_size.h).into())
+                .map_err(|e| anyhow::anyhow!("create_buffer: {e:?}"))?;
+            {
+                let mut fb = renderer.bind(&mut tex)
+                    .map_err(|e| anyhow::anyhow!("bind: {e:?}"))?;
+                let mut frame = renderer.render(&mut fb, size_phys, Transform::Normal)
+                    .map_err(|e| anyhow::anyhow!("render: {e:?}"))?;
+                let bg = Color32F::new(theme.background[0], theme.background[1], theme.background[2], 1.0);
+                frame.clear(bg, &[full]).map_err(|e| anyhow::anyhow!("clear: {e:?}"))?;
+                for elem in elements[after_cursor..].iter().rev() {
+                    let src = elem.src();
+                    let dst = elem.geometry(scale);
+                    let _ = RenderElement::<GlesRenderer>::draw(elem, &mut frame, src, dst, &[full], &[], None);
+                }
+                let _ = frame.finish().map_err(|e| anyhow::anyhow!("finish: {e:?}"))?;
+            }
+            let mapping = renderer.copy_texture(
+                &tex,
+                smithay::utils::Rectangle::from_size((out_size.w, out_size.h).into()),
+                smithay::backend::allocator::Fourcc::Abgr8888,
+            ).map_err(|e| anyhow::anyhow!("copy_texture: {e:?}"))?;
+            let data = renderer.map_texture(&mapping)
+                .map_err(|e| anyhow::anyhow!("map_texture: {e:?}"))?;
+            let img = image::RgbaImage::from_raw(out_size.w as u32, out_size.h as u32, data.to_vec())
+                .ok_or_else(|| anyhow::anyhow!("mapping size mismatch"))?;
+            img.save(&path)?;
+            Ok(())
+        })();
+        match shot {
+            Ok(())  => tracing::info!(%path, "screenshot saved"),
+            Err(e) => tracing::warn!(?e, %path, "screenshot failed"),
         }
     }
 

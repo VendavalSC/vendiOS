@@ -42,6 +42,7 @@ fn main() -> glib::ExitCode {
     let mode = std::env::args().nth(1).unwrap_or_default();
     let (app_id, build): (&str, fn(&gtk::Application)) = match mode.as_str() {
         "actions" => ("os.vendi.menu.actions", actions::build_ui),
+        "power"   => ("os.vendi.menu.power",   actions::build_power_ui),
         "keys"    => ("os.vendi.menu.keys",    keys::build_ui),
         _         => (APP_ID,                  build_ui),
     };
@@ -144,6 +145,14 @@ fn build_ui(app: &gtk::Application) {
             revealer.set_visible(true);
             revealer.set_reveal_child(!hits.is_empty());
             win.remove_css_class("collapsed");
+            // Layer-shell surfaces grow with content but never shrink, so a
+            // narrowing result list left a tall ghost card (and the
+            // compositor frosts the whole stale surface — "square corners").
+            // Re-measure once the slide transition settles.
+            let win = win.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || {
+                win.set_default_size(WIDTH, -1);
+            });
         });
     }
 

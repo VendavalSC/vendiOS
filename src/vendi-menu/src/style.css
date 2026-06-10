@@ -18,7 +18,6 @@ window {
   background: rgba(24, 24, 37, 0.72);          /* Mantle — compositor frosts behind */
   border: 1px solid rgba(203, 166, 247, 0.35); /* faint mauve rim */
   border-radius: 16px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.40);
   animation: menu-pop 170ms cubic-bezier(0.2, 0.8, 0.3, 1.0);
 }
 

@@ -86,11 +86,14 @@ fn build_ui(app: &gtk::Application) {
     // ── center: clock ────────────────────────────────────────────────────────
     let clock = modules::clock();
 
-    // ── right: music · volume · network · battery ──────────────────────────
+    // ── right: music · volume · bluetooth · network · battery ──────────────
     let right = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     right.add_css_class("status");
     right.append(&modules::music());
     right.append(&modules::volume());
+    if let Some(bluetooth) = modules::bluetooth() {
+        right.append(&bluetooth);
+    }
     right.append(&modules::network());
     if let Some(battery) = modules::battery() {
         right.append(&battery);
@@ -168,6 +171,13 @@ fn vendi_logo() -> gtk::DrawingArea {
         cr.line_to(b.0, b.1);
         let _ = cr.stroke();
     });
+    // The mark is the system button: click summons the actions menu.
+    area.set_tooltip_text(Some("vendiOS menu"));
+    let click = gtk::GestureClick::new();
+    click.connect_released(|_, _, _, _| {
+        let _ = std::process::Command::new("vendi-menu").arg("actions").spawn();
+    });
+    area.add_controller(click);
     area
 }
 

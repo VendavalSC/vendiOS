@@ -111,6 +111,10 @@ pub struct State {
     pub overview:              bool,
     pub overview_t:            std::time::Instant,
 
+    // One-shot screenshot request from IPC: render the next frame to this
+    // PNG path (the backend services and clears it).
+    pub screenshot:            Option<String>,
+
     // Last layer-shell non-exclusive zone — relayout only runs when a layer
     // commit actually changes it. Without this, every bar/menu frame would
     // trigger a configure storm to every toplevel.

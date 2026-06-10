@@ -18,6 +18,21 @@ BOLD=$'\e[1m'
 DIM=$'\e[2m'
 R=$'\e[0m'
 
+# `vendi theme` writes a palette file; let the CLI's own UI follow it.
+# (Mocha defaults above stay for root / fresh installs.)
+if [[ -f "${HOME}/.config/vendi/shell-theme.zsh" ]]; then
+    source "${HOME}/.config/vendi/shell-theme.zsh" 2>/dev/null || true
+    MAUVE=$'\e[38;2;'"${VENDI_ACCENT:-203;166;247}"$'m'
+    LAVENDER=$'\e[38;2;'"${VENDI_SECOND:-180;190;254}"$'m'
+    BLUE=$'\e[38;2;'"${VENDI_BLUE:-137;180;250}"$'m'
+    TEXT=$'\e[38;2;'"${VENDI_TEXT:-205;214;244}"$'m'
+    OVERLAY=$'\e[38;2;'"${VENDI_DIM:-108;112;134}"$'m'
+    GREEN=$'\e[38;2;'"${VENDI_GREEN:-166;227;161}"$'m'
+    RED=$'\e[38;2;'"${VENDI_ERR:-243;139;168}"$'m'
+    YELLOW=$'\e[38;2;'"${VENDI_YELLOW:-249;226;175}"$'m'
+    TEAL=$'\e[38;2;'"${VENDI_TEAL:-148;226;213}"$'m'
+fi
+
 LOGO_FILE=/usr/share/vendios/logo.txt
 
 _logo() {
@@ -170,41 +185,58 @@ cmd_info() {
 }
 
 # ── theme engine ──────────────────────────────────────────────────────────────
-# `vendi theme <flavor> [accent]` recolors the whole desktop: vendiwm (borders,
+# `vendi theme <name>` recolors the whole desktop: vendiwm (borders,
 # background), vendibar, vendi-menu, alacritty (live-reloads), swaylock.
-# Flavors are the four Catppuccin palettes; accent is any named accent color.
+# Themes are big, opinionated, and self-contained — one name, full look.
+# Every theme fills the same semantic slots (base/mantle/crust, text tiers,
+# surfaces, ANSI-ish colors) plus A, the single accent everything keys off.
 
 declare -A P
+A=
+
+THEMES="mocha latte gruvbox mono think"
 
 _palette() {
     case "$1" in
-    mocha) P=(
+    # Catppuccin Mocha — the signature vendiOS dark look.
+    mocha) A=cba6f7; P=(
         [base]=1e1e2e [mantle]=181825 [crust]=11111b
         [text]=cdd6f4 [subtext1]=bac2de [subtext0]=a6adc8
         [overlay1]=7f849c [surface2]=585b70 [surface1]=45475a [surface0]=313244
-        [mauve]=cba6f7 [blue]=89b4fa [lavender]=b4befe [teal]=94e2d5
-        [green]=a6e3a1 [yellow]=f9e2af [peach]=fab387 [red]=f38ba8 [pink]=f5c2e7
+        [blue]=89b4fa [teal]=94e2d5 [green]=a6e3a1 [yellow]=f9e2af
+        [red]=f38ba8 [pink]=f5c2e7
     ) ;;
-    macchiato) P=(
-        [base]=24273a [mantle]=1e2030 [crust]=181926
-        [text]=cad3f5 [subtext1]=b8c0e0 [subtext0]=a5adcb
-        [overlay1]=8087a2 [surface2]=5b6078 [surface1]=494d64 [surface0]=363a4f
-        [mauve]=c6a0f6 [blue]=8aadf4 [lavender]=b7bdf8 [teal]=8bd5ca
-        [green]=a6da95 [yellow]=eed49f [peach]=f5a97f [red]=ed8796 [pink]=f5bde6
-    ) ;;
-    frappe) P=(
-        [base]=303446 [mantle]=292c3c [crust]=232634
-        [text]=c6d0f5 [subtext1]=b5bfe2 [subtext0]=a5adce
-        [overlay1]=838ba7 [surface2]=626880 [surface1]=51576d [surface0]=414559
-        [mauve]=ca9ee6 [blue]=8caaee [lavender]=babbf1 [teal]=81c8be
-        [green]=a6d189 [yellow]=e5c890 [peach]=ef9f76 [red]=e78284 [pink]=f4b8e4
-    ) ;;
-    latte) P=(
+    # Catppuccin Latte — the light one.
+    latte) A=8839ef; P=(
         [base]=eff1f5 [mantle]=e6e9ef [crust]=dce0e8
         [text]=4c4f69 [subtext1]=5c5f77 [subtext0]=6c6f85
         [overlay1]=8c8fa1 [surface2]=acb0be [surface1]=bcc0cc [surface0]=ccd0da
-        [mauve]=8839ef [blue]=1e66f5 [lavender]=7287fd [teal]=179299
-        [green]=40a02b [yellow]=df8e1d [peach]=fe640b [red]=d20f39 [pink]=ea76cb
+        [blue]=1e66f5 [teal]=179299 [green]=40a02b [yellow]=df8e1d
+        [red]=d20f39 [pink]=ea76cb
+    ) ;;
+    # Gruvbox dark — warm retro, orange accent.
+    gruvbox) A=fe8019; P=(
+        [base]=282828 [mantle]=1d2021 [crust]=141617
+        [text]=ebdbb2 [subtext1]=d5c4a1 [subtext0]=bdae93
+        [overlay1]=928374 [surface2]=665c54 [surface1]=504945 [surface0]=3c3836
+        [blue]=83a598 [teal]=8ec07c [green]=b8bb26 [yellow]=fabd2f
+        [red]=fb4934 [pink]=d3869b
+    ) ;;
+    # Monochrome — pure black and white, no color anywhere.
+    mono) A=ffffff; P=(
+        [base]=0a0a0a [mantle]=060606 [crust]=000000
+        [text]=f2f2f2 [subtext1]=d9d9d9 [subtext0]=b3b3b3
+        [overlay1]=808080 [surface2]=595959 [surface1]=404040 [surface0]=262626
+        [blue]=cccccc [teal]=c2c2c2 [green]=bfbfbf [yellow]=e6e6e6
+        [red]=d9d9d9 [pink]=cccccc
+    ) ;;
+    # Think — ThinkPad colors: matte black, TrackPoint red accent.
+    think) A=e2231a; P=(
+        [base]=0d0d0d [mantle]=080808 [crust]=000000
+        [text]=e8e8e8 [subtext1]=c8c8c8 [subtext0]=a8a8a8
+        [overlay1]=7a7a7a [surface2]=4a4a4a [surface1]=333333 [surface0]=1f1f1f
+        [blue]=5f87af [teal]=5fafaf [green]=53a653 [yellow]=d7a65f
+        [red]=e2231a [pink]=c46a8c
     ) ;;
     *) return 1 ;;
     esac
@@ -212,6 +244,8 @@ _palette() {
 
 # "cba6f7" → "203, 166, 247" (for CSS rgba()).
 _rgb() { printf "%d, %d, %d" $((16#${1:0:2})) $((16#${1:2:2})) $((16#${1:4:2})); }
+# "cba6f7" → "203;166;247" (for ANSI truecolor escapes).
+_rgbsemi() { printf "%d;%d;%d" $((16#${1:0:2})) $((16#${1:2:2})) $((16#${1:4:2})); }
 
 # Set one key inside the theme { } block of vendiwm.kdl, preserving the rest
 # of the file (binds, wallpaper, …).
@@ -247,10 +281,9 @@ _kdl_theme_set() {
 }
 
 _theme_apply() {
-    local flavor=$1 accent=$2
-    _palette "$flavor" || { _err "unknown flavor: ${flavor}"; return 1; }
-    [[ -n "${P[$accent]:-}" ]] || { _err "unknown accent: ${accent}"; return 1; }
-    local a=${P[$accent]}
+    local name=$1
+    _palette "$name" || { _err "unknown theme: ${name} (have: ${THEMES})"; return 1; }
+    local a=$A
 
     mkdir -p "$HOME/.config/vendi" "$HOME/.config/alacritty" "$HOME/.config/swaylock"
 
@@ -262,7 +295,7 @@ _theme_apply() {
 
     # ── vendibar ───────────────────────────────────────────────
     cat > "$HOME/.config/vendi/vendibar.css" << EOF
-/* generated by: vendi theme ${flavor} ${accent} */
+/* generated by: vendi theme ${name} */
 window { background: transparent; }
 .bar {
   padding: 0 14px;
@@ -295,7 +328,7 @@ EOF
 
     # ── vendi-menu ─────────────────────────────────────────────
     cat > "$HOME/.config/vendi/vendi-menu.css" << EOF
-/* generated by: vendi theme ${flavor} ${accent} */
+/* generated by: vendi theme ${name} */
 window { background: transparent; }
 @keyframes menu-pop {
   from { opacity: 0; margin-top: -10px; }
@@ -305,7 +338,6 @@ window { background: transparent; }
   background: rgba($(_rgb "${P[mantle]}"), 0.72);
   border: 1px solid rgba($(_rgb "$a"), 0.35);
   border-radius: 16px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.40);
   animation: menu-pop 170ms cubic-bezier(0.2, 0.8, 0.3, 1.0);
 }
 .search {
@@ -363,7 +395,7 @@ EOF
 
     # ── alacritty (live-reloads colors in open terminals) ──────
     cat > "$HOME/.config/alacritty/theme.toml" << EOF
-# generated by: vendi theme ${flavor} ${accent}
+# generated by: vendi theme ${name}
 [colors.primary]
 background = "#${P[base]}"
 foreground = "#${P[text]}"
@@ -442,43 +474,259 @@ font=JetBrainsMono Nerd Font
 EOF
     _ok "swaylock theme written"
 
+    # ── shell prompt (zshrc sources this; vars drive prompt/fzf/ls) ──
+    cat > "$HOME/.config/vendi/shell-theme.zsh" << EOF
+# generated by: vendi theme ${name}
+VENDI_ACCENT='$(_rgbsemi "$a")'    VENDI_ACCENT_HEX='#${a}'
+VENDI_SECOND='$(_rgbsemi "${P[blue]}")'
+VENDI_DIM='$(_rgbsemi "${P[overlay1]}")'
+VENDI_ERR='$(_rgbsemi "${P[red]}")'    VENDI_ERR_HEX='#${P[red]}'
+VENDI_TEXT='$(_rgbsemi "${P[text]}")'    VENDI_TEXT_HEX='#${P[text]}'
+VENDI_BASE_HEX='#${P[base]}'    VENDI_SURFACE_HEX='#${P[surface0]}'
+VENDI_BLUE='$(_rgbsemi "${P[blue]}")'
+VENDI_TEAL='$(_rgbsemi "${P[teal]}")'    VENDI_TEAL_HEX='#${P[teal]}'
+VENDI_GREEN='$(_rgbsemi "${P[green]}")'    VENDI_GREEN_HEX='#${P[green]}'
+VENDI_YELLOW='$(_rgbsemi "${P[yellow]}")'
+VENDI_PINK_HEX='#${P[pink]}'
+EOF
+    _ok "shell prompt theme written (new terminals pick it up)"
+
+    # ── shard logo (recolor its two faces to the accent) ───────
+    local shard_src=/usr/share/vendios/shard.txt shard="$HOME/.config/vendi/shard.txt"
+    if [[ -f "$shard_src" ]]; then
+        local lt dk
+        lt=$(_rgbsemi "$a")
+        dk=$(printf "%d;%d;%d" $((16#${a:0:2}*55/100)) $((16#${a:2:2}*55/100)) $((16#${a:4:2}*55/100)))
+        sed -e "s/38;2;205;167;250/38;2;${lt}/g" -e "s/38;2;124;77;191/38;2;${dk}/g" "$shard_src" > "$shard"
+    else
+        shard=$shard_src
+    fi
+
+    # ── fastfetch ──────────────────────────────────────────────
+    mkdir -p "$HOME/.config/fastfetch"
+    cat > "$HOME/.config/fastfetch/config.jsonc" << EOF
+// generated by: vendi theme ${name}
+{
+  "\$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    "source": "${shard}",
+    "padding": { "top": 1, "right": 4 }
+  },
+  "display": {
+    "separator": "  ",
+    "color": {
+      "keys":   "38;2;$(_rgbsemi "$a")",
+      "title":  "38;2;$(_rgbsemi "$a")",
+      "output": "38;2;$(_rgbsemi "${P[text]}")"
+    },
+    "key": { "width": 12 }
+  },
+  "modules": [
+    { "type": "title",    "keyColor": "38;2;$(_rgbsemi "$a")" },
+    { "type": "separator", "string": "─" },
+    { "type": "os",       "key": "  os",       "keyColor": "38;2;$(_rgbsemi "$a")" },
+    { "type": "kernel",   "key": "  kernel",   "keyColor": "38;2;$(_rgbsemi "${P[blue]}")" },
+    { "type": "uptime",   "key": "󰔟  uptime",   "keyColor": "38;2;$(_rgbsemi "${P[teal]}")" },
+    { "type": "packages", "key": "  packages", "keyColor": "38;2;$(_rgbsemi "${P[green]}")" },
+    { "type": "shell",    "key": "  shell",    "keyColor": "38;2;$(_rgbsemi "${P[yellow]}")" },
+    { "type": "terminal", "key": "  terminal", "keyColor": "38;2;$(_rgbsemi "${P[pink]}")" },
+    { "type": "cpu",      "key": "  cpu",      "keyColor": "38;2;$(_rgbsemi "${P[red]}")" },
+    { "type": "gpu",      "key": "󰍛  gpu",      "keyColor": "38;2;$(_rgbsemi "${P[pink]}")" },
+    { "type": "memory",   "key": "  memory",   "keyColor": "38;2;$(_rgbsemi "${P[blue]}")" },
+    { "type": "disk",     "key": "󰋊  disk",     "keyColor": "38;2;$(_rgbsemi "${P[overlay1]}")" },
+    { "type": "separator", "string": "─" },
+    { "type": "colors", "paddingLeft": 2, "symbol": "circle" }
+  ]
+}
+EOF
+    _ok "fastfetch theme written"
+
     # ── remember + bar accent for cairo widgets ────────────────
     cat > "$HOME/.config/vendi/theme-state" << EOF
-FLAVOR=${flavor}
-ACCENT=${accent}
+THEME=${name}
 ACCENT_HEX=${a}
 EOF
-    _ok "theme: ${flavor} / ${accent}"
+    _ok "theme: ${name}"
     _info "relaunch the session (super+alt+space → Settings → Reload) to apply WM + bar colors"
+}
+
+_theme_desc() {
+    case "$1" in
+        mocha)   echo "catppuccin mocha — the signature dark look" ;;
+        latte)   echo "catppuccin latte — light and clean" ;;
+        gruvbox) echo "gruvbox dark — warm retro, orange accent" ;;
+        mono)    echo "monochrome — pure black and white" ;;
+        think)   echo "ThinkPad — matte black, TrackPoint red" ;;
+    esac
 }
 
 cmd_theme() {
     local state_file="$HOME/.config/vendi/theme-state"
-    local FLAVOR=mocha ACCENT=mauve ACCENT_HEX=
+    local THEME=mocha ACCENT_HEX=
     [[ -f "$state_file" ]] && source "$state_file"
 
     local sub=${1:-}
     case "$sub" in
         "")
             _header "theme"
-            _kv "flavor" "$FLAVOR"
-            _kv "accent" "$ACCENT"
+            _kv "current" "$THEME"
             echo
-            _info "vendi theme <mocha|macchiato|frappe|latte> [accent]"
-            _info "vendi theme accent <mauve|blue|lavender|teal|green|yellow|peach|red|pink>"
+            local t
+            for t in $THEMES; do
+                if [[ "$t" == "$THEME" ]]; then
+                    printf "  ${GREEN}${BOLD}● %-9s${R}${SUBTEXT}%s${R}\n" "$t" "$(_theme_desc "$t")"
+                else
+                    printf "  ${OVERLAY}○ ${R}${TEXT}%-9s${R}${OVERLAY}%s${R}\n" "$t" "$(_theme_desc "$t")"
+                fi
+            done
+            echo
+            _info "vendi theme <name> to switch"
             ;;
-        accent)
-            [[ -n "${2:-}" ]] || { _err "usage: vendi theme accent <name>"; return 1; }
-            _theme_apply "$FLAVOR" "$2"
-            ;;
-        mocha|macchiato|frappe|latte)
-            _theme_apply "$sub" "${2:-$ACCENT}"
+        list)
+            # Machine-readable, for vendi-menu.
+            local t
+            for t in $THEMES; do echo "$t"; done
             ;;
         *)
-            _err "unknown flavor: ${sub}"
-            return 1
+            _theme_apply "$sub"
             ;;
     esac
+}
+
+# ── connectivity TUIs ─────────────────────────────────────────────────────────
+# Small fzf-driven pickers in the same visual language as the package
+# installer. The bar's wifi/bluetooth/battery icons summon these in a
+# floating terminal.
+
+# fzf with the vendi look — accent comes from the active theme.
+_fzf() {
+    local prompt=$1; shift
+    local accent="#cba6f7"
+    [[ -f "$HOME/.config/vendi/theme-state" ]] && {
+        local ACCENT_HEX=; source "$HOME/.config/vendi/theme-state" 2>/dev/null
+        [[ -n "$ACCENT_HEX" ]] && accent="#${ACCENT_HEX}"
+    }
+    fzf --reverse --height=80% --border=rounded --prompt="$prompt" \
+        --color="pointer:${accent},prompt:${accent},border:${accent},hl:${accent},hl+:${accent},bg+:-1,fg+:regular:bold,header:dim" \
+        "$@"
+}
+
+cmd_wifi() {
+    command -v nmcli >/dev/null || { _err "NetworkManager not available"; return 1; }
+    _header "wifi"
+    local cur
+    cur=$(nmcli -t -f active,ssid dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}')
+    [[ -n "$cur" ]] && _kv "connected" "$cur"
+    _step "scanning…"
+    nmcli dev wifi rescan 2>/dev/null || true
+    sleep 2
+    # TSV: SIGNAL · SECURITY · SSID (SSID last — it may contain spaces).
+    local list
+    list=$(nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null \
+        | awk -F: 'length($2) && !seen[$2]++ {
+            mark = ($1=="*") ? "●" : " ";
+            sec  = length($4) ? $4 : "open";
+            printf "%s %3s%%\t%s\t%s\n", mark, $3, sec, $2
+          }')
+    [[ -n "$list" ]] || { _warn "no networks found"; return 0; }
+    local choice
+    choice=$(printf '%s\n' "$list" | _fzf "wifi> " --delimiter='\t' \
+        --header="enter connect · esc cancel") || return 0
+    local ssid sec
+    ssid=$(printf '%s' "$choice" | cut -f3)
+    sec=$(printf '%s' "$choice" | cut -f2)
+    [[ -n "$ssid" ]] || return 0
+
+    # Known connection → just bring it up. New network → ask for a key.
+    if nmcli -t -f NAME connection show 2>/dev/null | grep -qxF "$ssid"; then
+        _step "connecting to ${ssid}…"
+        nmcli connection up "$ssid" && _ok "connected: ${ssid}" || _err "failed to connect"
+    elif [[ "$sec" == "open" ]]; then
+        _step "connecting to ${ssid} (open)…"
+        nmcli dev wifi connect "$ssid" && _ok "connected: ${ssid}" || _err "failed to connect"
+    else
+        printf "  ${MAUVE}${BOLD}passphrase for %s: ${R}" "$ssid"
+        local pw; read -rs pw; echo
+        _step "connecting to ${ssid}…"
+        nmcli dev wifi connect "$ssid" password "$pw" \
+            && _ok "connected: ${ssid}" || _err "failed to connect"
+    fi
+    sleep 1
+}
+
+cmd_bt() {
+    command -v bluetoothctl >/dev/null || { _err "bluez not available"; return 1; }
+    _header "bluetooth"
+    bluetoothctl power on >/dev/null 2>&1 || true
+    _step "scanning (8s)…"
+    bluetoothctl --timeout 8 scan on >/dev/null 2>&1 || true
+    local connected paired all
+    connected=$(bluetoothctl devices Connected 2>/dev/null | awk '{print $2}')
+    # "MAC<TAB>● Name" lines; connected devices marked.
+    all=$(bluetoothctl devices 2>/dev/null | while read -r _ mac name; do
+        local mark=" "
+        grep -qxF "$mac" <<< "$connected" && mark="●"
+        printf '%s\t%s %s\n' "$mac" "$mark" "$name"
+    done)
+    [[ -n "$all" ]] || { _warn "no devices found — put the device in pairing mode and retry"; return 0; }
+    local choice
+    choice=$(printf '%s\n' "$all" | _fzf "bluetooth> " --delimiter='\t' --with-nth=2 \
+        --header="enter connect/disconnect · esc cancel") || return 0
+    local mac; mac=$(printf '%s' "$choice" | cut -f1)
+    [[ -n "$mac" ]] || return 0
+    if grep -qxF "$mac" <<< "$connected"; then
+        _step "disconnecting ${mac}…"
+        bluetoothctl disconnect "$mac" >/dev/null && _ok "disconnected" || _err "disconnect failed"
+    else
+        _step "pairing + connecting ${mac}…"
+        bluetoothctl pair "$mac"    >/dev/null 2>&1 || true
+        bluetoothctl trust "$mac"   >/dev/null 2>&1 || true
+        bluetoothctl connect "$mac" >/dev/null && _ok "connected" || _err "connect failed"
+    fi
+    sleep 1
+}
+
+cmd_audio() {
+    command -v wpctl >/dev/null || { _err "wireplumber not available"; return 1; }
+    _header "audio"
+    local vol; vol=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null)
+    [[ -n "$vol" ]] && _kv "volume" "$vol"
+    # Sink list from wpctl status: lines like "│  *   58. Built-in Audio [vol: 0.80]".
+    local sinks
+    sinks=$(wpctl status 2>/dev/null | sed -n '/Sinks:/,/Sources:/p' \
+        | grep -E '[0-9]+\.' \
+        | sed -E 's/[│├└─]*//g; s/^ +//; s/ \[vol:.*//' \
+        | awk '{ star=($1=="*")?"●":" "; if ($1=="*") { $1="" }; id=$1; sub(/\./,"",id); $1=""; sub(/^ +/,""); printf "%s\t%s %s\n", id, star, $0 }')
+    local actions="+\t▲ volume up 5%
+-\t▼ volume down 5%
+m\t⊘ toggle mute"
+    local choice
+    choice=$(printf '%s\n%s\n' "$actions" "$sinks" | _fzf "audio> " --delimiter='\t' --with-nth=2 \
+        --header="enter apply · esc done") || return 0
+    local id; id=$(printf '%s' "$choice" | cut -f1)
+    case "$id" in
+        +) wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+ ;;
+        -) wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- ;;
+        m) wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle ;;
+        *) [[ -n "$id" ]] && { wpctl set-default "$id" && _ok "default sink set"; } ;;
+    esac
+    cmd_audio   # loop until esc
+}
+
+cmd_power() {
+    command -v powerprofilesctl >/dev/null || { _err "power-profiles-daemon not available"; return 1; }
+    _header "power profile"
+    local cur; cur=$(powerprofilesctl get 2>/dev/null)
+    _kv "current" "$cur"
+    local choice
+    choice=$(powerprofilesctl list 2>/dev/null | grep -oE '^[* ]+[a-z-]+:' \
+        | tr -d ' *:' \
+        | awk -v cur="$cur" '{ mark=($0==cur)?"●":" "; printf "%s\t%s %s\n", $0, mark, $0 }' \
+        | _fzf "power> " --delimiter='\t' --with-nth=2 --header="enter apply · esc cancel") || return 0
+    local profile; profile=$(printf '%s' "$choice" | cut -f1)
+    [[ -n "$profile" ]] && { powerprofilesctl set "$profile" && _ok "profile: ${profile}"; }
+    sleep 1
 }
 
 cmd_help() {
@@ -495,7 +743,11 @@ cmd_help() {
     _cmd "clean"    "remove cached packages and vacuum journal"
     _cmd "snapshot" "create / manage btrfs snapshots"
     _cmd "rollback" "roll back to a previous snapshot"
-    _cmd "theme"    "recolor the whole desktop (catppuccin flavors)"
+    _cmd "theme"    "recolor the whole desktop (mocha latte gruvbox mono think)"
+    _cmd "wifi"     "scan and connect to wireless networks"
+    _cmd "bt"       "pair and connect bluetooth devices"
+    _cmd "audio"    "pick output sink, volume, mute"
+    _cmd "power"    "switch power profile"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"
     _cmd "help"     "show this message"
@@ -510,6 +762,10 @@ case "${1:-help}" in
     snapshot) cmd_snapshot ;;
     rollback) shift; cmd_rollback "$@" ;;
     theme)    shift; cmd_theme "$@" ;;
+    wifi)     cmd_wifi  ;;
+    bt|bluetooth) cmd_bt ;;
+    audio)    cmd_audio ;;
+    power)    cmd_power ;;
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;
     help|--help|-h) cmd_help ;;

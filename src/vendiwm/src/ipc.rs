@@ -46,6 +46,8 @@ pub enum Request {
     Move          { window: u32, to_workspace: u32 },
     /// Subscribe to event push. Connection stays open after this.
     Subscribe     { events: Vec<EventKind> },
+    /// Capture the next composed frame to a PNG (default /tmp/vendiwm-shot.png).
+    Screenshot    { path: Option<String> },
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,6 +320,11 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
         }
         Request::Subscribe { events } => {
             clients[client_idx].subs = events;
+            Response::Ok { ok: true }
+        }
+        Request::Screenshot { path } => {
+            state.screenshot = Some(path.unwrap_or_else(|| "/tmp/vendiwm-shot.png".into()));
+            state.pending_redraw = true;
             Response::Ok { ok: true }
         }
     };

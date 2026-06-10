@@ -67,6 +67,17 @@ fn root_menu() -> Rc<MenuDef> {
         ],
     };
 
+    // The vendi TUIs are fzf loops that exit on Escape — no hold needed.
+    let connect = MenuDef {
+        title: "Connect",
+        items: vec![
+            sh("\u{f05a9}", "Wi-Fi",         format!("{FLOAT_TERM} vendi wifi")),
+            sh("\u{f00af}", "Bluetooth",     format!("{FLOAT_TERM} vendi bt")),
+            sh("\u{f057e}", "Audio output",  format!("{FLOAT_TERM} vendi audio")),
+            sh("\u{f0210}", "Power profile", format!("{FLOAT_TERM} vendi power")),
+        ],
+    };
+
     let install = MenuDef {
         title: "Install",
         items: vec![
@@ -96,6 +107,7 @@ fn root_menu() -> Rc<MenuDef> {
             submenu("\u{f03d8}", "Theme",     theme_menu()),
             submenu("\u{f0e09}", "Wallpaper", wallpaper_menu()),
             submenu("\u{f0493}", "Settings",  settings),
+            submenu("\u{f05a9}", "Connect",   connect),
             submenu("\u{f0419}", "Install",   install),
             sh("\u{f02fd}", "About", term("vendi fetch")),
             submenu("\u{f0425}", "Power", power),
@@ -108,35 +120,19 @@ fn root_menu() -> Rc<MenuDef> {
 // Theme switching delegates to `vendi theme`, which recolors EVERYTHING
 // (vendiwm, bar, menu, alacritty, swaylock), then relaunches the session.
 fn theme_menu() -> MenuDef {
-    const FLAVORS: &[(&str, &str)] = &[
-        ("Mocha (dark)",     "mocha"),
-        ("Macchiato",        "macchiato"),
-        ("Frappé",           "frappe"),
-        ("Latte (light)",    "latte"),
+    // Big global themes — one pick, full look. Matches `vendi theme list`.
+    const THEMES: &[(&str, &str, &str)] = &[
+        ("\u{f0405}", "Mocha — signature dark",       "mocha"),
+        ("\u{f0599}", "Latte — light",                "latte"),
+        ("\u{f1b35}", "Gruvbox — warm retro",         "gruvbox"),
+        ("\u{f0765}", "Mono — black & white",         "mono"),
+        ("\u{f08c7}", "Think — ThinkPad black & red", "think"),
     ];
-    const ACCENTS: &[&str] = &[
-        "mauve", "blue", "lavender", "teal", "green", "yellow", "peach", "red", "pink",
-    ];
-    let flavors = MenuDef {
-        title: "Flavor",
-        items: FLAVORS.iter().map(|&(label, id)| {
-            sh("\u{f040a}", label, format!("sh -c 'vendi theme {id} >/dev/null; pkill -x vendiwm'"))
-        }).collect(),
-    };
-    let accents = MenuDef {
-        title: "Accent",
-        items: ACCENTS.iter().map(|&name| {
-            let mut label = name.to_string();
-            if let Some(c) = label.get_mut(0..1) { c.make_ascii_uppercase(); }
-            sh("\u{f0e0c}", &label, format!("sh -c 'vendi theme accent {name} >/dev/null; pkill -x vendiwm'"))
-        }).collect(),
-    };
     MenuDef {
         title: "Theme",
-        items: vec![
-            submenu("\u{f040a}", "Flavor", flavors),
-            submenu("\u{f0e0c}", "Accent", accents),
-        ],
+        items: THEMES.iter().map(|&(glyph, label, id)| {
+            sh(glyph, label, format!("sh -c 'vendi theme {id} >/dev/null; pkill -x vendiwm'"))
+        }).collect(),
     }
 }
 
@@ -241,11 +237,50 @@ fn relaunch() {
     let _ = std::process::Command::new("pkill").args(["-x", "vendiwm"]).spawn();
 }
 
+// ── power profile menu (`vendi-menu power`, the bar battery click) ──────────
+
+/// One-level menu listing powerprofilesctl profiles; the active one is marked.
+fn power_profile_menu() -> Rc<MenuDef> {
+    let out = std::process::Command::new("powerprofilesctl").arg("list").output();
+    let text = out.ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    // Lines like "* balanced:" / "  power-saver:" head each profile block.
+    let mut items: Vec<ItemDef> = text.lines()
+        .filter_map(|l| {
+            let active = l.starts_with("* ");
+            let name = l.trim_start_matches("* ").trim();
+            let name = name.strip_suffix(':')?;
+            if name.contains(' ') { return None; }
+            let glyph = match name {
+                "performance" => "\u{f04c5}",   // 󰓅
+                "power-saver" => "\u{f032a}",   // 󰌪
+                _             => "\u{f0f85}",   // 󰾅 balanced
+            };
+            let label = if active { format!("{name} — active") } else { name.to_string() };
+            Some(sh(glyph, &label, format!("powerprofilesctl set {name}")))
+        })
+        .collect();
+    if items.is_empty() {
+        items.push(sh("\u{f0210}", "power profiles unavailable", "true"));
+    }
+    Rc::new(MenuDef { title: "Power profile", items })
+}
+
+pub fn build_power_ui(app: &gtk::Application) {
+    build_menu_ui(app, power_profile_menu());
+}
+
 // ── UI ────────────────────────────────────────────────────────────────────────
 
 type Pages = Rc<RefCell<HashMap<String, (Rc<MenuDef>, gtk::ListBox)>>>;
 
 pub fn build_ui(app: &gtk::Application) {
+    build_menu_ui(app, root_menu());
+}
+
+fn build_menu_ui(app: &gtk::Application, menu: Rc<MenuDef>) {
     // Re-running while open toggles the menu closed.
     if let Some(window) = app.active_window() {
         window.close();
@@ -274,7 +309,6 @@ pub fn build_ui(app: &gtk::Application) {
     let pages: Pages = Rc::new(RefCell::new(HashMap::new()));
     let nav: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec!["root".into()]));
 
-    let menu = root_menu();
     build_page(app, &stack, &pages, &nav, &window, &menu, "root");
     stack.set_visible_child_name("root");
 

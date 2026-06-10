@@ -151,16 +151,22 @@ void main() {
 
 /// Build the output-sized wallpaper buffer. A user image (from the theme's
 /// `wallpaper` path, cover-scaled) wins; otherwise a procedural obsidian
-/// gradient: deep Mocha vertical fade, a soft mauve glow up top, and a faint
-/// shard watermark in the lower right.
-pub fn wallpaper_buffer(w: i32, h: i32, path: Option<&str>) -> MemoryRenderBuffer {
+/// gradient derived from the theme: vertical fade of the background color, a
+/// soft accent glow up top, and a faint shard watermark in the lower right.
+pub fn wallpaper_buffer(
+    w: i32,
+    h: i32,
+    path: Option<&str>,
+    background: [f32; 4],
+    accent: [f32; 4],
+) -> MemoryRenderBuffer {
     if let Some(path) = path {
         match load_wallpaper(path, w, h) {
             Ok(buf) => return buf,
             Err(e) => tracing::warn!(?e, %path, "wallpaper load failed; using gradient"),
         }
     }
-    procedural_wallpaper(w, h)
+    procedural_wallpaper(w, h, background, accent)
 }
 
 fn load_wallpaper(path: &str, w: i32, h: i32) -> anyhow::Result<MemoryRenderBuffer> {
@@ -178,9 +184,15 @@ fn load_wallpaper(path: &str, w: i32, h: i32) -> anyhow::Result<MemoryRenderBuff
     ))
 }
 
-fn procedural_wallpaper(w: i32, h: i32) -> MemoryRenderBuffer {
+fn procedural_wallpaper(w: i32, h: i32, background: [f32; 4], accent: [f32; 4]) -> MemoryRenderBuffer {
     let (wf, hf) = (w as f32, h as f32);
     let mut data = vec![0u8; (w * h * 4) as usize];
+
+    // Theme colors in 0-255 space. The fade bottom is the background pulled
+    // ~42% toward black — the same base→crust feel Mocha had.
+    let top = (background[0] * 255.0, background[1] * 255.0, background[2] * 255.0);
+    let bot = (top.0 * 0.58, top.1 * 0.58, top.2 * 0.58);
+    let (mr, mg, mb) = (accent[0] * 255.0, accent[1] * 255.0, accent[2] * 255.0);
 
     // Shard watermark geometry (mirrors the vendibar logo), anchored in the
     // lower-right quadrant at ~55% of screen height.
@@ -202,11 +214,11 @@ fn procedural_wallpaper(w: i32, h: i32) -> MemoryRenderBuffer {
 
     for y in 0..h {
         let ty = y as f32 / hf;
-        // Vertical fade: Base #1E1E2E → Crust-ish #11111B.
+        // Vertical fade: theme background → its darkened crust.
         let bg = (
-            0x1e as f32 + (0x11 as f32 - 0x1e as f32) * ty,
-            0x1e as f32 + (0x11 as f32 - 0x1e as f32) * ty,
-            0x2e as f32 + (0x1b as f32 - 0x2e as f32) * ty,
+            top.0 + (bot.0 - top.0) * ty,
+            top.1 + (bot.1 - top.1) * ty,
+            top.2 + (bot.2 - top.2) * ty,
         );
         for x in 0..w {
             let tx = x as f32 / wf;
@@ -223,7 +235,6 @@ fn procedural_wallpaper(w: i32, h: i32) -> MemoryRenderBuffer {
                 else { 0.0 };
 
             let mix = glow + shard;
-            let (mr, mg, mb) = (0xcb as f32, 0xa6 as f32, 0xf7 as f32);
             let rr = (bg.0 + (mr - bg.0) * mix).round() as u8;
             let gg = (bg.1 + (mg - bg.1) * mix).round() as u8;
             let bb = (bg.2 + (mb - bg.2) * mix).round() as u8;

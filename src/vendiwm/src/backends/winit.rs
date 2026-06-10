@@ -138,6 +138,7 @@ pub fn run() -> Result<()> {
         swipe: None,
         overview: false,
         overview_t: std::time::Instant::now(),
+        screenshot: None,
         last_zone: None,
         open_anims: Vec::new(),
         ws_anim: None,
