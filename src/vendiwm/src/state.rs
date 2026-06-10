@@ -167,6 +167,15 @@ pub struct State {
     pub quit_requested:         bool,
 }
 
+/// Computed overview geometry: workspace panels + per-window cells.
+#[derive(Default)]
+pub struct OverviewLayout {
+    /// (workspace id, panel rect, is-active)
+    pub panels: Vec<(u32, smithay::utils::Rectangle<i32, smithay::utils::Logical>, bool)>,
+    /// (window, cell rect, owning workspace id)
+    pub cells: Vec<(Window, smithay::utils::Rectangle<i32, smithay::utils::Logical>, u32)>,
+}
+
 /// State of an in-progress Super+drag on a floating window.
 #[derive(Clone)]
 pub struct Drag {
@@ -1021,7 +1030,7 @@ impl State {
         let now = std::time::Instant::now();
         tracing::info!(entering = !self.overview, "overview toggled");
         if !self.overview {
-            if self.space.elements().next().is_none() { return; }
+            if self.workspaces.all_windows().is_empty() { return; }
             let cells = self.overview_cells();
             self.overview = true;
             self.overview_t = now;
@@ -1044,16 +1053,24 @@ impl State {
         self.pending_redraw = true;
     }
 
-    /// Grid cells for the overview: every mapped window of the active
-    /// workspace, aspect-fit (never upscaled) into a near-square grid that
-    /// is centered in the output with room left for the bar. Deterministic
-    /// across frames — both the renderer and click hit-testing rely on it.
-    pub fn overview_cells(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
-        let Some(output) = self.space.outputs().next() else { return Vec::new() };
-        let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
-        let windows: Vec<Window> = self.space.elements().cloned().collect();
-        let n = windows.len() as i32;
-        if n == 0 { return Vec::new(); }
+    /// Overview layout: one panel per workspace (non-empty ones plus the
+    /// active one), aspect-matched miniatures of the output in a centered
+    /// grid. Active-workspace windows keep their real spatial layout scaled
+    /// into their panel (so the morph reads as one zoom); hidden workspaces
+    /// get a small grid of thumbnails. Deterministic across frames — the
+    /// renderer and click hit-testing both rely on it.
+    pub fn overview_layout(&self) -> OverviewLayout {
+        let mut out = OverviewLayout::default();
+        let Some(output) = self.space.outputs().next() else { return out };
+        let Some(geo) = self.space.output_geometry(output) else { return out };
+        let active = self.workspaces.active_id();
+
+        let panels: Vec<u32> = self.workspaces.iter()
+            .filter(|ws| !ws.is_empty() || ws.id == active)
+            .map(|ws| ws.id)
+            .collect();
+        let k = panels.len() as i32;
+        if k == 0 { return out; }
 
         let margin_x = geo.size.w / 14;
         let top      = geo.size.h / 9;
@@ -1062,32 +1079,77 @@ impl State {
             (geo.loc.x + margin_x, geo.loc.y + top).into(),
             (geo.size.w - margin_x * 2, geo.size.h - top - bottom).into(),
         );
-        let cols = (n as f64).sqrt().ceil() as i32;
-        let rows = (n + cols - 1) / cols;
-        let gap  = 28;
-        let cw = ((area.size.w - gap * (cols - 1)) / cols).max(1);
-        let ch = ((area.size.h - gap * (rows - 1)) / rows).max(1);
+        let cols = (k as f64).sqrt().ceil() as i32;
+        let rows = (k + cols - 1) / cols;
+        let gap  = 36;
+        let slot_w = ((area.size.w - gap * (cols - 1)) / cols).max(1);
+        let slot_h = ((area.size.h - gap * (rows - 1)) / rows).max(1);
+        // Panels mirror the output's aspect so their content scales uniformly.
+        let s = (slot_w as f64 / geo.size.w as f64).min(slot_h as f64 / geo.size.h as f64);
+        let (pw, ph) = (((geo.size.w as f64 * s) as i32).max(1), ((geo.size.h as f64 * s) as i32).max(1));
 
-        let mut cells = Vec::with_capacity(windows.len());
-        for (i, window) in windows.into_iter().enumerate() {
-            let Some(wgeo) = self.space.element_geometry(&window) else { continue };
+        for (i, ws_id) in panels.iter().copied().enumerate() {
             let (row, col) = (i as i32 / cols, i as i32 % cols);
             // Center a short last row instead of leaving it ragged-left.
-            let in_row = if row == rows - 1 { n - row * cols } else { cols };
-            let row_w  = in_row * cw + (in_row - 1) * gap;
-            let cx = area.loc.x + (area.size.w - row_w) / 2 + col * (cw + gap);
-            let cy = area.loc.y + row * (ch + gap);
-            let s = (cw as f64 / wgeo.size.w.max(1) as f64)
-                .min(ch as f64 / wgeo.size.h.max(1) as f64)
-                .min(1.0);
-            let tw = ((wgeo.size.w as f64 * s) as i32).max(1);
-            let th = ((wgeo.size.h as f64 * s) as i32).max(1);
-            cells.push((window, Rectangle::new(
-                (cx + (cw - tw) / 2, cy + (ch - th) / 2).into(),
-                (tw, th).into(),
-            )));
+            let in_row = if row == rows - 1 { k - row * cols } else { cols };
+            let row_w  = in_row * pw + (in_row - 1) * gap;
+            let px = area.loc.x + (area.size.w - row_w) / 2 + col * (pw + gap);
+            let py = area.loc.y + row * (slot_h + gap) + (slot_h - ph) / 2;
+            let panel = Rectangle::<i32, Logical>::new((px, py).into(), (pw, ph).into());
+            out.panels.push((ws_id, panel, ws_id == active));
+
+            let Some(ws) = self.workspaces.iter().find(|w| w.id == ws_id) else { continue };
+            if ws_id == active {
+                // Mapped windows: scale their real geometry into the panel.
+                for window in self.space.elements() {
+                    let Some(wgeo) = self.space.element_geometry(window) else { continue };
+                    let cell = Rectangle::<i32, Logical>::new(
+                        (panel.loc.x + ((wgeo.loc.x - geo.loc.x) as f64 * s) as i32,
+                         panel.loc.y + ((wgeo.loc.y - geo.loc.y) as f64 * s) as i32).into(),
+                        (((wgeo.size.w as f64 * s) as i32).max(1),
+                         ((wgeo.size.h as f64 * s) as i32).max(1)).into(),
+                    );
+                    out.cells.push((window.clone(), cell, ws_id));
+                }
+            } else {
+                // Hidden windows have no live geometry — thumbnail grid.
+                let windows = ws.windows();
+                let n = windows.len() as i32;
+                if n == 0 { continue; }
+                let inset = (ph / 12).max(8);
+                let inner = Rectangle::<i32, Logical>::new(
+                    (panel.loc.x + inset, panel.loc.y + inset).into(),
+                    ((pw - inset * 2).max(1), (ph - inset * 2).max(1)).into(),
+                );
+                let gcols = (n as f64).sqrt().ceil() as i32;
+                let grows = (n + gcols - 1) / gcols;
+                let ggap = 10;
+                let cw = ((inner.size.w - ggap * (gcols - 1)) / gcols).max(1);
+                let ch = ((inner.size.h - ggap * (grows - 1)) / grows).max(1);
+                for (j, window) in windows.into_iter().enumerate() {
+                    let size = window.geometry().size;
+                    if size.w <= 0 || size.h <= 0 { continue; }
+                    let (grow, gcol) = (j as i32 / gcols, j as i32 % gcols);
+                    let in_row = if grow == grows - 1 { n - grow * gcols } else { gcols };
+                    let row_w  = in_row * cw + (in_row - 1) * ggap;
+                    let cx = inner.loc.x + (inner.size.w - row_w) / 2 + gcol * (cw + ggap);
+                    let cy = inner.loc.y + grow * (ch + ggap);
+                    let fs = (cw as f64 / size.w as f64).min(ch as f64 / size.h as f64).min(1.0);
+                    let tw = ((size.w as f64 * fs) as i32).max(1);
+                    let th = ((size.h as f64 * fs) as i32).max(1);
+                    out.cells.push((window, Rectangle::new(
+                        (cx + (cw - tw) / 2, cy + (ch - th) / 2).into(),
+                        (tw, th).into(),
+                    ), ws_id));
+                }
+            }
         }
-        cells
+        out
+    }
+
+    /// Flat (window, cell) list — the morph and hit-test view of the layout.
+    pub fn overview_cells(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.overview_layout().cells.into_iter().map(|(w, r, _)| (w, r)).collect()
     }
 
     /// Focus + raise a specific window (overview click).

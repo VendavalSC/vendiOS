@@ -809,7 +809,23 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // geometry; the wallpaper dims underneath. The dim eases over the same
     // span as the geo morphs so enter/exit feel like one motion.
     const OVERVIEW_MS: f32 = 220.0;
-    let overview_cells = if state.overview { state.overview_cells() } else { Vec::new() };
+    // The exit animation still needs the layout (hidden thumbnails fade out
+    // at their cells), so keep it around for one morph span after closing.
+    let ov_exit = !state.overview
+        && (now.duration_since(state.overview_t).as_secs_f32() * 1000.0) < OVERVIEW_MS;
+    let ov_layout = if state.overview || ov_exit {
+        Some(state.overview_layout())
+    } else {
+        None
+    };
+    let overview_cells: Vec<(smithay::desktop::Window, smithay::utils::Rectangle<i32, smithay::utils::Logical>)> =
+        if state.overview {
+            ov_layout.as_ref().map(|l| {
+                l.cells.iter().map(|(w, r, _)| (w.clone(), *r)).collect()
+            }).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     let ov_e = ease_out(
         (now.duration_since(state.overview_t).as_secs_f32() * 1000.0 / OVERVIEW_MS).min(1.0),
     );
@@ -1071,6 +1087,60 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // Drop stashed textures for windows that no longer exist (their close
     // ghosts, if any, were taken out of the stash above).
     tex_stash.retain(|id, _| live_ids.contains(id));
+
+    // Overview extras: thumbnails of windows on hidden workspaces (they're
+    // unmapped, so the loop above never sees them) and a ring around every
+    // workspace panel. Both fade with the overview.
+    if let Some(layout) = &ov_layout {
+        let a_ov = if state.overview { ov_e } else { 1.0 - ov_e };
+        let active_id = state.workspaces.active_id();
+        for (window, cell, ws) in &layout.cells {
+            if *ws == active_id { continue; }
+            if !smithay::utils::IsAlive::alive(window) { continue; }
+            let committed = window.geometry().size;
+            if committed.w <= 0 || committed.h <= 0 { continue; }
+
+            let render_loc = (cell.loc - window.geometry().loc).to_physical_precise_round(scale);
+            let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                window.render_elements(renderer, render_loc, scale, a_ov);
+            let morph_scale = smithay::utils::Scale {
+                x: cell.size.w as f64 / committed.w.max(1) as f64,
+                y: cell.size.h as f64 / committed.h.max(1) as f64,
+            };
+            let anchor: smithay::utils::Point<i32, smithay::utils::Physical> =
+                cell.loc.to_physical_precise_round(scale);
+            for elem in surfaces {
+                let rounded = crate::render::RoundedElement::new(elem, rounded_prog.clone(), theme.radius);
+                let morphed = RescaleRenderElement::from_element(rounded, anchor, morph_scale);
+                let rescaled = RescaleRenderElement::from_element(morphed, anchor, 1.0);
+                elements.push(OutputRenderElements::Window(
+                    RelocateRenderElement::from_element(rescaled, (0, 0), Relocate::Relative),
+                ));
+            }
+        }
+        for (_, rect, is_active) in &layout.panels {
+            let c = if *is_active { theme.accent } else { theme.inactive };
+            let area = smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
+                (rect.loc.x - 6, rect.loc.y - 6).into(),
+                (rect.size.w + 12, rect.size.h + 12).into(),
+            );
+            let ring = PixelShaderElement::new(
+                border_prog.clone(),
+                area,
+                None,
+                0.85 * a_ov,
+                vec![
+                    Uniform::new("color", c),
+                    Uniform::new("radius", 14.0),
+                    Uniform::new("thickness", 2.0),
+                ],
+                Kind::Unspecified,
+            );
+            elements.push(OutputRenderElements::Pixel(
+                RescaleRenderElement::from_element(ring, (0, 0).into(), 1.0),
+            ));
+        }
+    }
 
     // Lower layers (Bottom/Background) → below windows and borders.
     elements.extend(lower_layer_elems.into_iter().map(OutputRenderElements::Layer));
@@ -1447,13 +1517,31 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                 // see this press — the windows aren't really there.
                 if state.overview {
                     let pos = state.pointer_location;
-                    let hit = state.overview_cells().into_iter()
-                        .find(|(_, cell)| cell.to_f64().contains(pos));
-                    if let Some((window, _)) = hit {
+                    let layout = state.overview_layout();
+                    let active = state.workspaces.active_id();
+                    if let Some((window, _, ws)) = layout.cells.into_iter()
+                        .find(|(_, cell, _)| cell.to_f64().contains(pos))
+                    {
+                        if ws != active {
+                            // Cross-workspace pick: switching closes the
+                            // overview itself and maps the window.
+                            state.switch_workspace(ws);
+                        } else {
+                            state.toggle_overview();
+                        }
                         state.focus_window(&window);
                         state.space.raise_element(&window, true);
+                    } else if let Some((ws, _, _)) = layout.panels.into_iter()
+                        .find(|(_, panel, _)| panel.to_f64().contains(pos))
+                    {
+                        if ws != active {
+                            state.switch_workspace(ws);
+                        } else {
+                            state.toggle_overview();
+                        }
+                    } else {
+                        state.toggle_overview();
                     }
-                    state.toggle_overview();
                     return;
                 }
                 // Super+LeftDrag = move (a tiled window detaches in place and

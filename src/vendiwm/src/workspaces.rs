@@ -176,6 +176,11 @@ impl Workspaces {
     pub fn all_windows(&self) -> Vec<Window> {
         self.list.iter().flat_map(|w| w.windows()).collect()
     }
+
+    /// All workspaces, sorted by id.
+    pub fn iter(&self) -> impl Iterator<Item = &Workspace> {
+        self.list.iter()
+    }
 }
 
 impl Default for Workspaces {
