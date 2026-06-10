@@ -10,6 +10,8 @@
 
 mod actions;
 mod apps;
+mod ipc;
+mod keys;
 
 use gtk4 as gtk;
 use gtk::{gdk, glib, prelude::*};
@@ -34,18 +36,18 @@ fn main() -> glib::ExitCode {
         )
         .init();
 
-    // `vendi-menu actions` = the system-verbs menu (no search bar). It gets
-    // its own application id so the two menus toggle independently.
-    let actions_mode = std::env::args().nth(1).as_deref() == Some("actions");
-    let app = gtk::Application::builder()
-        .application_id(if actions_mode { "os.vendi.menu.actions" } else { APP_ID })
-        .build();
+    // `vendi-menu actions` = the nested system menu (no search bar);
+    // `vendi-menu keys` = the keybind cheatsheet. Each mode gets its own
+    // application id so the menus toggle independently.
+    let mode = std::env::args().nth(1).unwrap_or_default();
+    let (app_id, build): (&str, fn(&gtk::Application)) = match mode.as_str() {
+        "actions" => ("os.vendi.menu.actions", actions::build_ui),
+        "keys"    => ("os.vendi.menu.keys",    keys::build_ui),
+        _         => (APP_ID,                  build_ui),
+    };
+    let app = gtk::Application::builder().application_id(app_id).build();
     app.connect_startup(|_| load_css());
-    if actions_mode {
-        app.connect_activate(actions::build_ui);
-    } else {
-        app.connect_activate(build_ui);
-    }
+    app.connect_activate(build);
     app.run_with_args::<&str>(&[])
 }
 

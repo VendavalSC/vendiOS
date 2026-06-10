@@ -86,3 +86,39 @@ window {
   color: #585b70;
   margin-left: 12px;
 }
+
+/* ── submenu pages ───────────────────────────────────────────────────── */
+.page-title {
+  padding: 12px 18px 4px 18px;
+}
+.page-back {
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 13px;
+  color: #585b70;
+}
+.page-name {
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 12px;
+  font-weight: bold;
+  color: #7f849c;
+}
+
+/* ── keys mode ───────────────────────────────────────────────────────── */
+scrolledwindow {
+  background: transparent;
+}
+scrolledwindow undershoot.top,
+scrolledwindow undershoot.bottom {
+  background: none;
+}
+.key-chord {
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 13px;
+  font-weight: bold;
+  color: #cba6f7;
+}
+.key-action {
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 13px;
+  color: #a6adc8;
+}
