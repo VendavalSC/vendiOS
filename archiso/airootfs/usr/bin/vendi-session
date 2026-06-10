@@ -1,28 +1,59 @@
 #!/usr/bin/env bash
-# vendi-session — picks the session compositor and launches it.
-#
-# Reads /etc/vendi/session.conf if present. Set VENDI_SESSION to one of:
-#   hyprland   (current stable default)
-#   vendiwm    (experimental; requires udev rendering — may show black screen
-#              if not yet implemented on this build)
-#
-# greetd's initial_session points at this script so users can switch by
-# editing the config file instead of /etc/greetd/config.toml.
-
+# vendi-session — picks and launches the user's compositor, then brings up
+# the desktop services (bar, notification daemon, etc.) once the Wayland
+# socket is ready.
 set -e
 
 VENDI_SESSION=vendiwm
 [[ -f /etc/vendi/session.conf ]] && source /etc/vendi/session.conf
 
-# Release the Plymouth splash so the compositor can take over the DRM master.
-# Non-fatal: plymouth may not be running (e.g. invoked outside greetd).
+# Stream the compositor's stderr to a flat log file — easier to inspect
+# off-disk than chasing it through greetd's journal.
+mkdir -p "${HOME}/logs"
+LOG="${HOME}/logs/vendi-session.log"
+
+# Release Plymouth's hold on the framebuffer so the compositor takes over.
 plymouth quit --retain-splash 2>/dev/null || true
+
+# Best-effort: wait for the compositor's wayland socket to appear, then bring
+# up waybar and friends as siblings inside the same session. Backgrounded so
+# the compositor exec below stays in the foreground for greetd.
+spawn_desktop() {
+    local sock_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    for _ in $(seq 1 60); do
+        if compgen -G "${sock_dir}/wayland-*" >/dev/null; then
+            break
+        fi
+        sleep 0.25
+    done
+    # Pick the first wayland-N that appeared.
+    local sock
+    sock=$(ls -1 "${sock_dir}"/wayland-* 2>/dev/null | grep -vE '\.lock$' | head -1)
+    [[ -n "$sock" ]] || return 0
+    export WAYLAND_DISPLAY="$(basename "$sock")"
+    # vendiwm binds its IPC socket adjacent to the wayland socket.
+    export VENDIWM_SOCK="${sock_dir}/${WAYLAND_DISPLAY}.ipc.sock"
+    # vendibar — GTK4 layer-shell status bar. Cairo renderer: the bar is a
+    # 34px strip, software rendering is free and dodges EGL landmines in VMs.
+    # Retry loop: a stale wayland socket file from a previous session can
+    # make the wait above return before the compositor actually listens.
+    (
+        for _ in $(seq 1 15); do
+            GSK_RENDERER=cairo vendibar >>"$LOG" 2>&1 && break
+            sleep 1
+        done
+    ) &
+    # Mako: lightweight notification daemon, matches the bar's palette.
+    mako    >>"$LOG" 2>&1 &
+}
+
+(spawn_desktop) &
 
 case "${VENDI_SESSION:-vendiwm}" in
     hyprland)
-        exec Hyprland
+        exec Hyprland >> "$LOG" 2>&1
         ;;
     vendiwm|*)
-        exec vendiwm
+        exec vendiwm  >> "$LOG" 2>&1
         ;;
 esac

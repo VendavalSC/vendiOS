@@ -1,0 +1,106 @@
+// vendiOS bar — vendi-native waybar config.
+//
+// vendiwm only speaks xdg-shell + wlr-layer-shell. The wlr/workspaces and
+// wlr/taskbar modules need protocols we don't implement yet, so they're
+// replaced (or dropped) here. Custom title is fed by `vendi-ctl bar title`
+// over vendiwm's own IPC.
+//
+// User overrides: ~/.config/waybar/config.jsonc + style.css. This file is the
+// system fallback shipped in the airootfs.
+{
+  "layer":        "top",
+  "position":     "top",
+  "height":       36,
+  "spacing":      4,
+  "margin-top":   6,
+  "margin-left":  8,
+  "margin-right": 8,
+
+  "modules-left":   ["custom/logo", "custom/divider", "custom/title"],
+  "modules-center": ["clock"],
+  "modules-right":  ["tray", "pulseaudio", "network", "battery", "custom/power"],
+
+  "custom/logo": {
+    "format":  "  ",
+    "tooltip": false
+  },
+
+  "custom/divider": {
+    "format":  "│",
+    "tooltip": false
+  },
+
+  // Streams JSON lines from vendiwm IPC. waybar treats this as a long-running
+  // module: each line {"text":..., "tooltip":..., "class":...} updates state.
+  "custom/title": {
+    "exec":        "vendi-ctl bar title",
+    "return-type": "json",
+    "max-length":  80,
+    "escape":      true
+  },
+
+  "tray": {
+    "icon-size":   18,
+    "spacing":     6
+  },
+
+  "pulseaudio": {
+    "format":            "{icon} {volume}%",
+    "format-bluetooth":  " {volume}%",
+    "format-muted":      " ",
+    "format-icons": {
+      "headphone":  "",
+      "hands-free": "",
+      "headset":    "",
+      "phone":      "",
+      "portable":   "",
+      "car":        "",
+      "default":    ["", "", ""]
+    },
+    "scroll-step": 5,
+    "on-click":    "pavucontrol",
+    "tooltip":     true
+  },
+
+  "network": {
+    "format-wifi":         "  {essid}",
+    "format-ethernet":     "  {ifname}",
+    "format-disconnected": "󰖪 offline",
+    "tooltip-format":      "{ipaddr} via {gwaddr}",
+    "on-click":            "nm-connection-editor"
+  },
+
+  "battery": {
+    "states": { "warning": 30, "critical": 15 },
+    "format":          "{icon} {capacity}%",
+    "format-charging": " {capacity}%",
+    "format-plugged":  " {capacity}%",
+    "format-icons":    ["", "", "", "", ""],
+    "tooltip-format":  "{time} remaining"
+  },
+
+  "clock": {
+    "format":          " {:%H:%M}",
+    "format-alt":      " {:%a, %d %b %Y}",
+    "tooltip-format":  "<tt><big>{calendar}</big></tt>",
+    "calendar": {
+      "mode":            "year",
+      "mode-mon-col":    3,
+      "weeks-pos":       "right",
+      "on-scroll":       1,
+      "format": {
+        "months":     "<span color='#cba6f7'><b>{}</b></span>",
+        "days":       "<span color='#cdd6f4'>{}</span>",
+        "weeks":      "<span color='#89b4fa'><b>W{}</b></span>",
+        "weekdays":   "<span color='#f9e2af'><b>{}</b></span>",
+        "today":      "<span color='#f38ba8'><b><u>{}</u></b></span>"
+      }
+    }
+  },
+
+  "custom/power": {
+    "format":   "",
+    "tooltip":  false,
+    "on-click": "wlogout || systemctl poweroff"
+  }
+}

@@ -30,10 +30,12 @@ file_permissions=(
   ["/usr/bin/vendiwm"]="0:0:755"
   ["/usr/bin/vendi-ctl"]="0:0:755"
   ["/usr/bin/vendi-demo"]="0:0:755"
+  ["/usr/bin/vendibar"]="0:0:755"
+  ["/usr/bin/vendi-menu"]="0:0:755"
   ["/usr/lib/vendi/ui.sh"]="0:0:644"
   ["/usr/lib/vendi/disk.sh"]="0:0:644"
   ["/usr/lib/vendi/system.sh"]="0:0:644"
   ["/root/.bash_profile"]="0:0:644"
   ["/root/.config/hypr/hyprland.conf"]="0:0:644"
-  ["/root/.config/foot/foot.ini"]="0:0:644"
+  ["/root/.config/alacritty/alacritty.toml"]="0:0:644"
 )

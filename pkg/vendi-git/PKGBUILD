@@ -26,6 +26,9 @@ depends=(
     'mesa'
     'seatd'
     'wayland'
+    # vendibar runtime dependencies
+    'gtk4'
+    'gtk4-layer-shell'
 )
 makedepends=(
     'git'
@@ -39,6 +42,9 @@ makedepends=(
     'seatd'
     'wayland'
     'systemd'           # for libudev
+    # vendibar build dependencies
+    'gtk4'
+    'gtk4-layer-shell'
 )
 provides=("${_pkgname}")
 conflicts=("${_pkgname}")
@@ -52,11 +58,13 @@ pkgver() {
 
 build() {
     cd "${_pkgname}/src"
-    # Build vendiwm + vendi-ctl + vendi-demo. vendi-menu is currently a stub.
+    # Build the full vendi desktop: compositor, control plane, bar, launcher.
     cargo build --release --locked \
         -p vendiwm \
         -p vendi-ctl \
-        -p vendi-demo
+        -p vendi-demo \
+        -p vendibar \
+        -p vendi-menu
 }
 
 package() {
@@ -69,10 +77,12 @@ package() {
     install -Dm755 archiso/airootfs/usr/bin/vendi-welcome  "${pkgdir}/usr/bin/vendi-welcome"
     install -Dm755 archiso/airootfs/usr/bin/vendi-session  "${pkgdir}/usr/bin/vendi-session"
 
-    # Rust binaries (compositor + control plane)
+    # Rust binaries (compositor + control plane + bar)
     install -Dm755 src/target/release/vendiwm     "${pkgdir}/usr/bin/vendiwm"
     install -Dm755 src/target/release/vendi-ctl   "${pkgdir}/usr/bin/vendi-ctl"
     install -Dm755 src/target/release/vendi-demo  "${pkgdir}/usr/bin/vendi-demo"
+    install -Dm755 src/target/release/vendibar    "${pkgdir}/usr/bin/vendibar"
+    install -Dm755 src/target/release/vendi-menu  "${pkgdir}/usr/bin/vendi-menu"
 
     # Bash libraries
     install -Dm644 archiso/airootfs/usr/lib/vendi/ui.sh     "${pkgdir}/usr/lib/vendi/ui.sh"
@@ -82,4 +92,6 @@ package() {
     # branding
     install -Dm644 archiso/airootfs/usr/share/vendios/logo.txt \
         "${pkgdir}/usr/share/vendios/logo.txt"
+    install -Dm644 archiso/airootfs/usr/share/vendios/shard.txt \
+        "${pkgdir}/usr/share/vendios/shard.txt"
 }

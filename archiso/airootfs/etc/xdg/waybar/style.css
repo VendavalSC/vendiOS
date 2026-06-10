@@ -1,0 +1,192 @@
+/* vendiOS bar — Catppuccin Mocha + Mauve accent.
+ *
+ * Aims:
+ *  - Translucent capsule bar with a subtle Mauve glow.
+ *  - Each module sits in its own pill with hover lift.
+ *  - Workspaces animate the active pill grow/shrink.
+ *  - Smooth fades on every state transition.
+ */
+
+@define-color base     #1e1e2e;
+@define-color mantle   #181825;
+@define-color crust    #11111b;
+@define-color surface0 #313244;
+@define-color surface1 #45475a;
+@define-color text     #cdd6f4;
+@define-color subtext  #a6adc8;
+@define-color mauve    #cba6f7;
+@define-color blue     #89b4fa;
+@define-color green    #a6e3a1;
+@define-color yellow   #f9e2af;
+@define-color red      #f38ba8;
+@define-color peach    #fab387;
+
+* {
+    font-family: "JetBrainsMonoNL Nerd Font Mono", "Symbols Nerd Font", sans-serif;
+    font-size:   14px;
+    font-weight: 600;
+    min-height:  0;
+    transition:  background-color 180ms ease, color 180ms ease, padding 180ms ease;
+}
+
+window#waybar {
+    background: rgba(30, 30, 46, 0.85);
+    color:      @text;
+    border:     1px solid alpha(@mauve, 0.35);
+    border-radius: 14px;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45),
+                inset 0 0 0 1px alpha(@mauve, 0.05);
+}
+
+/* ── Module wrappers ─────────────────────────────────────────────── */
+.modules-left,
+.modules-center,
+.modules-right {
+    padding: 0 4px;
+}
+
+#custom-logo,
+#workspaces,
+#custom-divider,
+#taskbar,
+#custom-title,
+#tray,
+#pulseaudio,
+#network,
+#bluetooth,
+#battery,
+#clock,
+#custom-power {
+    margin: 4px 2px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    background: alpha(@surface0, 0.55);
+}
+
+/* ── Logo (Mauve circle) ─────────────────────────────────────────── */
+#custom-logo {
+    color:       @mauve;
+    background:  alpha(@mauve, 0.18);
+    font-size:   16px;
+    padding:     0 12px;
+}
+
+/* ── Workspaces (active pill grows, gets Mauve fill) ─────────────── */
+#workspaces {
+    background: alpha(@surface0, 0.40);
+    padding:    2px 4px;
+}
+#workspaces button {
+    color:       @subtext;
+    padding:     2px 8px;
+    margin:      2px 1px;
+    border-radius: 8px;
+    background:  transparent;
+    transition:  background 180ms ease, color 180ms ease, padding 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+#workspaces button:hover {
+    background:  alpha(@mauve, 0.18);
+    color:       @text;
+}
+#workspaces button.active {
+    background:  alpha(@mauve, 0.85);
+    color:       @base;
+    padding:     2px 14px;
+    box-shadow:  0 0 12px alpha(@mauve, 0.65);
+}
+#workspaces button.urgent {
+    background:  alpha(@red, 0.85);
+    color:       @base;
+}
+
+#custom-divider {
+    color:       alpha(@surface1, 0.6);
+    background:  transparent;
+    padding:     0 2px;
+    margin:      0;
+}
+
+/* ── Taskbar (focused window icon) ───────────────────────────────── */
+#taskbar button {
+    border-radius: 8px;
+    padding: 2px 6px;
+    margin: 2px 2px;
+    background: transparent;
+    color: @text;
+}
+#taskbar button:hover {
+    background: alpha(@mauve, 0.18);
+}
+#taskbar button.active {
+    background: alpha(@mauve, 0.30);
+}
+
+/* ── Centre title ────────────────────────────────────────────────── */
+#custom-title {
+    color:       @text;
+    background:  transparent;
+    font-weight: 500;
+}
+
+/* ── Tray ────────────────────────────────────────────────────────── */
+#tray { background: transparent; padding: 0; }
+#tray > .passive  { -gtk-icon-effect: dim; }
+#tray > .active   { -gtk-icon-effect: highlight; }
+#tray > .needs-attention {
+    background: alpha(@red, 0.18);
+    border-radius: 8px;
+}
+
+/* ── Audio ───────────────────────────────────────────────────────── */
+#pulseaudio        { color: @green;  background: alpha(@green, 0.15); }
+#pulseaudio.muted  { color: @subtext; background: alpha(@surface0, 0.55); }
+
+/* ── Network ─────────────────────────────────────────────────────── */
+#network              { color: @blue;  background: alpha(@blue, 0.15); }
+#network.disconnected { color: @red;   background: alpha(@red, 0.18); }
+
+/* ── Bluetooth ───────────────────────────────────────────────────── */
+#bluetooth             { color: @blue;  background: alpha(@blue, 0.15); }
+#bluetooth.disabled    { color: @subtext; background: alpha(@surface0, 0.55); }
+#bluetooth.connected   { color: @mauve; background: alpha(@mauve, 0.20); }
+
+/* ── Battery ─────────────────────────────────────────────────────── */
+#battery               { color: @green;  background: alpha(@green, 0.15); }
+#battery.warning       { color: @yellow; background: alpha(@yellow, 0.18); }
+#battery.critical      {
+    color:      @red;
+    background: alpha(@red, 0.20);
+    animation:  pulse 1.2s ease-in-out infinite;
+}
+#battery.charging      { color: @peach;  background: alpha(@peach, 0.18); }
+@keyframes pulse {
+    0%, 100% { box-shadow: 0 0 6px  alpha(@red, 0.6); }
+    50%      { box-shadow: 0 0 14px alpha(@red, 0.9); }
+}
+
+/* ── Clock ───────────────────────────────────────────────────────── */
+#clock {
+    color:      @mauve;
+    background: alpha(@mauve, 0.18);
+    padding:    2px 14px;
+}
+
+/* ── Power button ────────────────────────────────────────────────── */
+#custom-power {
+    color:       @red;
+    background:  alpha(@red, 0.18);
+    padding:     0 12px;
+    font-size:   15px;
+}
+#custom-power:hover {
+    background:  @red;
+    color:       @base;
+}
+
+/* ── Tooltips ────────────────────────────────────────────────────── */
+tooltip {
+    background: @mantle;
+    border:     1px solid alpha(@mauve, 0.45);
+    border-radius: 10px;
+}
+tooltip label { color: @text; padding: 4px 8px; }

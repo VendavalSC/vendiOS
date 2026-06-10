@@ -52,12 +52,12 @@ BUILD_USER="${SUDO_USER:-$(whoami)}"
 echo "  Building Rust workspace as user '${BUILD_USER}'..."
 if [[ "$BUILD_USER" != "root" ]]; then
     sudo -u "$BUILD_USER" -H bash -lc \
-        "cd '${RUST_SRC}' && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo"
+        "cd '${RUST_SRC}' && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu"
 else
-    (cd "$RUST_SRC" && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo)
+    (cd "$RUST_SRC" && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu)
 fi
 
-for bin in vendiwm vendi-ctl vendi-demo; do
+for bin in vendiwm vendi-ctl vendi-demo vendibar vendi-menu; do
     src="${RUST_SRC}/target/release/${bin}"
     if [[ ! -x "$src" ]]; then
         echo "error: built binary missing: ${src}"

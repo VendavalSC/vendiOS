@@ -1,0 +1,97 @@
+# vendiOS — Alacritty config.
+# Catppuccin Mocha + Mauve accent, JetBrains Mono Nerd Font, slight transparency.
+
+[window]
+opacity = 0.92
+padding = { x = 14, y = 12 }
+dynamic_padding = true
+decorations = "None"
+title = "vendi"
+dynamic_title = true
+
+[font]
+size = 12.5
+normal = { family = "JetBrainsMonoNL Nerd Font Mono", style = "Regular" }
+bold   = { family = "JetBrainsMonoNL Nerd Font Mono", style = "Bold" }
+italic = { family = "JetBrainsMonoNL Nerd Font Mono", style = "Italic" }
+bold_italic = { family = "JetBrainsMonoNL Nerd Font Mono", style = "Bold Italic" }
+
+[cursor]
+style = { shape = "Beam", blinking = "On" }
+blink_interval = 600
+unfocused_hollow = true
+
+[scrolling]
+history = 10000
+
+[selection]
+save_to_clipboard = true
+
+# ── Catppuccin Mocha ───────────────────────────────────────────────────────
+[colors.primary]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+dim_foreground = "#cdd6f4"
+bright_foreground = "#cdd6f4"
+
+[colors.cursor]
+text   = "#1e1e2e"
+cursor = "#cba6f7"
+
+[colors.vi_mode_cursor]
+text   = "#1e1e2e"
+cursor = "#b4befe"
+
+[colors.search.matches]
+foreground = "#1e1e2e"
+background = "#a6adc8"
+
+[colors.search.focused_match]
+foreground = "#1e1e2e"
+background = "#a6e3a1"
+
+[colors.footer_bar]
+foreground = "#1e1e2e"
+background = "#a6adc8"
+
+[colors.hints.start]
+foreground = "#1e1e2e"
+background = "#f9e2af"
+
+[colors.hints.end]
+foreground = "#1e1e2e"
+background = "#a6adc8"
+
+[colors.selection]
+text       = "#1e1e2e"
+background = "#f5e0dc"
+
+[colors.normal]
+black   = "#45475a"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#bac2de"
+
+[colors.bright]
+black   = "#585b70"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#a6adc8"
+
+[colors.dim]
+black   = "#45475a"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#bac2de"

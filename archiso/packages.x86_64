@@ -94,6 +94,7 @@ waybar
 wofi
 mako
 foot
+alacritty
 brightnessctl
 playerctl
 grim
@@ -104,6 +105,7 @@ qt5-wayland
 qt6-wayland
 gtk3
 gtk4
+gtk4-layer-shell
 nwg-look
 
 # ── archiso internals ────────────────────────────────────────

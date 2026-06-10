@@ -17,10 +17,10 @@ BASE_PKGS=(
     openssh reflector
     pipewire pipewire-audio pipewire-alsa pipewire-pulse wireplumber
     hyprland xdg-desktop-portal-hyprland xdg-desktop-portal-gtk
-    waybar wofi mako foot
+    waybar wofi mako foot alacritty
     brightnessctl playerctl grim slurp wl-clipboard
     polkit-kde-agent qt5-wayland qt6-wayland
-    gtk3 gtk4
+    gtk3 gtk4 gtk4-layer-shell
     # default browser
     firefox
     # silent boot + LUKS + invisible login manager
@@ -341,10 +341,12 @@ VENDIOS_DEFAULT_SHELL=zsh
 VENDIOS_ACCENT_COLOR="203;166;247"
 VENDIOS_SNAPSHOT_MAX=10
 EOF
-    # copy the fastfetch logo
+    # copy the branding art (wordmark + shard logo)
     mkdir -p /mnt/usr/share/vendios
-    [[ -f /usr/share/vendios/logo.txt ]] && \
-        cp /usr/share/vendios/logo.txt /mnt/usr/share/vendios/
+    for art in logo.txt shard.txt; do
+        [[ -f /usr/share/vendios/$art ]] && \
+            cp "/usr/share/vendios/$art" /mnt/usr/share/vendios/
+    done
 }
 
 sys_install_vendi_cli() {
@@ -355,7 +357,7 @@ sys_install_vendi_cli() {
     # vendi-ctl IPC, vendi-demo test client). All shipped from the live ISO's
     # /usr/bin since the airootfs is built with them in place.
     for bin in vendi vendi-install vendi-boot vendi-welcome vendi-session \
-               vendiwm vendi-ctl vendi-demo; do
+               vendiwm vendi-ctl vendi-demo vendibar vendi-menu; do
         [[ -f /usr/bin/$bin ]] && install -m 755 /usr/bin/$bin /mnt/usr/bin/$bin
     done
     for lib in ui.sh disk.sh system.sh; do
@@ -409,7 +411,7 @@ sys_fastfetch_config() {
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
   "logo": {
     "type": "file",
-    "source": "/usr/share/vendios/logo.txt",
+    "source": "/usr/share/vendios/shard.txt",
     "padding": { "top": 1, "right": 4 }
   },
   "display": {
