@@ -18,3 +18,5 @@ tracing-subscriber = { workspace = true }
 anyhow             = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
+gtk4 = { version = "0.11", features = ["v4_12"] }
+gtk4-layer-shell = "0.8.0"

@@ -1,0 +1,88 @@
+/* vendi-menu — Spotlight-style launcher, Catppuccin Mocha.
+ *
+ * A floating rounded pill that grows a results card beneath it. The window
+ * itself is transparent; everything visible is .menu-root.
+ */
+
+window {
+  background: transparent;
+}
+
+.menu-root {
+  background: rgba(24, 24, 37, 0.94);          /* Mantle, near-opaque */
+  border: 1px solid rgba(203, 166, 247, 0.35); /* faint mauve rim */
+  border-radius: 16px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.40);
+}
+
+.search {
+  all: unset;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  margin: 6px 10px;
+  padding: 10px 14px;
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 17px;
+  color: #cdd6f4;
+  caret-color: #cba6f7;
+}
+.search image {
+  color: #cba6f7;
+  margin-right: 8px;
+}
+.search placeholder {
+  color: #585b70;
+}
+
+.results {
+  background: transparent;
+  border-top: 1px solid rgba(88, 91, 112, 0.45);
+  padding: 6px;
+}
+
+.hit {
+  border-radius: 10px;
+  padding: 9px 12px;
+  transition: background 120ms ease;
+}
+.hit:hover {
+  background: rgba(69, 71, 90, 0.45);
+}
+.hit:selected {
+  background: rgba(203, 166, 247, 0.22);
+}
+.hit:selected .hit-name {
+  color: #cba6f7;
+}
+
+.hit-name {
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 14px;
+  color: #cdd6f4;
+}
+
+/* ── actions mode ─────────────────────────────────────────────────────── */
+.actions-root .results {
+  border-top: none;
+  padding: 8px;
+}
+.action-glyph {
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 16px;
+  color: #cba6f7;
+}
+.action-index {
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 11px;
+  color: #45475a;
+}
+.hit:selected .action-index { color: #7f849c; }
+
+.hit-comment {
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 11px;
+  color: #585b70;
+  margin-left: 12px;
+}
