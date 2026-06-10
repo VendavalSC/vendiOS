@@ -175,11 +175,11 @@ pub fn run() -> Result<()> {
     // 7. Try to bring up the first connected connector. If this fails we
     //    keep going (still useful for VT switch / inputs / log), but you
     //    won't see anything until a working connector shows up.
-    let first_crtc = match initial_surface_setup(&mut app, primary_gpu_node) {
+    let first_crtcs = match initial_surface_setup(&mut app, primary_gpu_node) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(?e, "no usable connector at startup; running headless");
-            None
+            Vec::new()
         }
     };
 
@@ -283,8 +283,8 @@ pub fn run() -> Result<()> {
         },
     ).map_err(|e| anyhow::anyhow!("insert display source: {e:?}"))?;
 
-    // 10. Kick off the first frame so VBlank-driven rendering can begin.
-    if let Some(crtc) = first_crtc {
+    // 10. Kick off the first frames so VBlank-driven rendering can begin.
+    for crtc in first_crtcs {
         loop_handle.insert_idle(move |app| {
             if let Err(e) = render_surface(app, primary_gpu_node, crtc) {
                 tracing::warn!(?e, "initial render_surface");
@@ -474,6 +474,13 @@ pub struct SurfaceState {
     pub compositor: GbmDrmCompositor,
     /// Output-sized wallpaper (user image or the built-in gradient).
     pub wallpaper:  MemoryRenderBuffer,
+    /// Which connector drives this surface (hotplug bookkeeping).
+    pub connector:  connector::Handle,
+    /// The mode we set — a different preferred mode on rescan means the
+    /// monitor changed resolution and the surface must be rebuilt.
+    pub mode:       smithay::reexports::drm::control::Mode,
+    /// The wl_output global, removed when the connector goes away.
+    pub global:     smithay::reexports::wayland_server::backend::GlobalId,
 }
 
 impl UdevData {
@@ -560,47 +567,76 @@ impl UdevData {
 
 // ── surface setup ─────────────────────────────────────────────────────────────
 
-/// Bring up the first connected connector on the given device: pick a mode,
-/// find a usable CRTC, create a DrmSurface + DrmCompositor + a smithay Output,
-/// and wire the Output into the Space at (0,0). Returns the CRTC handle so
-/// the caller can kick the initial frame.
-fn initial_surface_setup(app: &mut UdevApp, node: DrmNode) -> Result<Option<crtc::Handle>> {
+/// Preferred mode if flagged, else the first listed one.
+fn pick_mode(connector: &connector::Info) -> Option<smithay::reexports::drm::control::Mode> {
+    let idx = connector.modes().iter()
+        .position(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+        .unwrap_or(0);
+    connector.modes().get(idx).copied()
+}
+
+/// Bring up every connected connector at startup. Returns the CRTCs so the
+/// caller can kick their first frames.
+fn initial_surface_setup(app: &mut UdevApp, node: DrmNode) -> Result<Vec<crtc::Handle>> {
+    let connected: Vec<connector::Info> = app.udev.drm_devices.get(&node)
+        .ok_or_else(|| anyhow::anyhow!("device not found: {node:?}"))?
+        .connectors.iter()
+        .filter(|c| c.state() == connector::State::Connected)
+        .cloned()
+        .collect();
+    if connected.is_empty() {
+        tracing::warn!("no connected connector");
+        return Ok(Vec::new());
+    }
+    let mut crtcs = Vec::new();
+    for info in connected {
+        match connect_connector(app, node, &info) {
+            Ok(crtc) => crtcs.push(crtc),
+            Err(e) => tracing::warn!(?e, connector = ?info.interface(), "connector bringup failed"),
+        }
+    }
+    // Start the pointer at the centre of the first screen so the cursor is
+    // visible before the user has nudged the mouse.
+    if let Some(geo) = app.state.space.outputs().next()
+        .and_then(|o| app.state.space.output_geometry(o))
+    {
+        app.state.pointer_location =
+            (geo.loc.x as f64 + geo.size.w as f64 / 2.0,
+             geo.loc.y as f64 + geo.size.h as f64 / 2.0).into();
+    }
+    app.state.relayout();
+    Ok(crtcs)
+}
+
+/// Bring up one connector: pick a mode, find a free CRTC, create a
+/// DrmSurface + DrmCompositor + a smithay Output, and map the Output into
+/// the Space to the right of everything already there.
+fn connect_connector(
+    app: &mut UdevApp,
+    node: DrmNode,
+    connector: &connector::Info,
+) -> Result<crtc::Handle> {
     let UdevApp { state, udev, display_handle } = app;
     let device = udev.drm_devices.get_mut(&node)
         .ok_or_else(|| anyhow::anyhow!("device not found: {node:?}"))?;
 
-    // Pick the first connector that's actually plugged in.
-    let connector = device.connectors.iter()
-        .find(|c| c.state() == connector::State::Connected)
-        .cloned();
-    let Some(connector) = connector else {
-        tracing::warn!("no connected connector");
-        return Ok(None);
-    };
-
-    // Preferred mode if any, else the first one.
-    let mode_idx = connector.modes().iter()
-        .position(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
-        .unwrap_or(0);
-    let drm_mode = *connector.modes().get(mode_idx)
+    let drm_mode = pick_mode(connector)
         .ok_or_else(|| anyhow::anyhow!("connector has no modes"))?;
 
-    // Find a CRTC reachable by one of this connector's encoders.
+    // Find a CRTC reachable by one of this connector's encoders that isn't
+    // already driving another surface.
     let resources = device.drm.resource_handles()
         .map_err(|e| anyhow::anyhow!("resource_handles: {e:?}"))?;
     let mut chosen_crtc: Option<crtc::Handle> = None;
     'outer: for enc_handle in connector.encoders() {
         let Ok(enc) = device.drm.get_encoder(*enc_handle) else { continue };
         for crtc in resources.filter_crtcs(enc.possible_crtcs()) {
-            // First match wins — we only drive one output for now.
+            if device.surfaces.contains_key(&crtc) { continue; }
             chosen_crtc = Some(crtc);
             break 'outer;
         }
     }
-    let Some(crtc) = chosen_crtc else {
-        tracing::warn!("no usable CRTC for connector");
-        return Ok(None);
-    };
+    let crtc = chosen_crtc.ok_or_else(|| anyhow::anyhow!("no usable CRTC for connector"))?;
 
     let planes = device.drm.planes(&crtc)
         .map_err(|e| anyhow::anyhow!("planes: {e:?}"))?;
@@ -623,21 +659,22 @@ fn initial_surface_setup(app: &mut UdevApp, node: DrmNode) -> Result<Option<crtc
             serial_number: "0".into(),
         },
     );
+    // New outputs land to the right of everything already mapped.
+    let next_x = state.space.outputs()
+        .filter_map(|o| state.space.output_geometry(o))
+        .map(|g| g.loc.x + g.size.w)
+        .max()
+        .unwrap_or(0);
     let wl_mode = WlMode::from(drm_mode);
     output.change_current_state(
         Some(wl_mode),
         Some(Transform::Normal),
         Some(Scale::Integer(1)),
-        Some((0, 0).into()),
+        Some((next_x, 0).into()),
     );
     output.set_preferred(wl_mode);
-    let _global = output.create_global::<State>(display_handle);
-    state.space.map_output(&output, (0, 0));
-
-    // Start the pointer at the centre of the screen so the cursor is visible
-    // before the user has nudged the mouse.
-    let mode_size = drm_mode.size();
-    state.pointer_location = (mode_size.0 as f64 / 2.0, mode_size.1 as f64 / 2.0).into();
+    let global = output.create_global::<State>(display_handle);
+    state.space.map_output(&output, (next_x, 0));
 
     // DrmCompositor wires the renderer to scanout. Cursor size 64×64 is the
     // standard everyone supports.
@@ -661,10 +698,12 @@ fn initial_surface_setup(app: &mut UdevApp, node: DrmNode) -> Result<Option<crtc
         Some(device.gbm.clone()),
     ).map_err(|e| anyhow::anyhow!("DrmCompositor::new: {e:?}"))?;
 
+    let mode_size = drm_mode.size();
     tracing::info!(
         crtc = ?crtc,
         connector = %output_name,
-        mode = ?(drm_mode.size(), drm_mode.vrefresh()),
+        mode = ?(mode_size, drm_mode.vrefresh()),
+        at = next_x,
         "DRM output up",
     );
 
@@ -676,9 +715,115 @@ fn initial_surface_setup(app: &mut UdevApp, node: DrmNode) -> Result<Option<crtc
         state.config.theme.accent,
     );
 
-    device.surfaces.insert(crtc, SurfaceState { output, compositor, wallpaper });
-    state.relayout();
-    Ok(Some(crtc))
+    device.surfaces.insert(crtc, SurfaceState {
+        output,
+        compositor,
+        wallpaper,
+        connector: connector.handle(),
+        mode: drm_mode,
+        global,
+    });
+    Ok(crtc)
+}
+
+/// React to a udev "changed" event: re-probe connectors, tear down surfaces
+/// whose monitor vanished or switched resolution, bring up new ones, then
+/// re-pack the remaining outputs left-to-right and keep the pointer inside.
+fn rescan_connectors(app: &mut UdevApp, node: DrmNode) {
+    // 1. Re-probe.
+    let (stale, fresh): (Vec<crtc::Handle>, Vec<connector::Info>) = {
+        let Some(device) = app.udev.drm_devices.get_mut(&node) else { return };
+        let Ok(resources) = device.drm.resource_handles() else { return };
+        let mut connectors = Vec::new();
+        for c in resources.connectors() {
+            // No force-probe: the kernel re-probed before emitting the udev
+            // change event, and a forced probe would override manual sysfs
+            // status (used by tests and `video=` overrides).
+            if let Ok(info) = device.drm.get_connector(*c, false) {
+                connectors.push(info);
+            }
+        }
+        device.connectors = connectors.clone();
+
+        // 2. Surfaces to drop: connector gone, unplugged, or new mode.
+        let stale = device.surfaces.iter()
+            .filter_map(|(crtc, s)| {
+                let info = connectors.iter().find(|c| c.handle() == s.connector);
+                let connected = matches!(info.map(|c| c.state()), Some(connector::State::Connected));
+                let same_mode = info.and_then(pick_mode) == Some(s.mode);
+                (!connected || !same_mode).then_some(*crtc)
+            })
+            .collect();
+
+        // 3. Connected connectors that have no surface yet.
+        let have: Vec<connector::Handle> = device.surfaces.values().map(|s| s.connector).collect();
+        let fresh = connectors.into_iter()
+            .filter(|c| c.state() == connector::State::Connected && !have.contains(&c.handle()))
+            .collect();
+        (stale, fresh)
+    };
+
+    for crtc in stale {
+        let Some(device) = app.udev.drm_devices.get_mut(&node) else { return };
+        if let Some(s) = device.surfaces.remove(&crtc) {
+            tracing::info!(output = %s.output.name(), "DRM output down");
+            app.state.space.unmap_output(&s.output);
+            app.display_handle.remove_global::<State>(s.global);
+        }
+    }
+
+    let mut new_crtcs = Vec::new();
+    for info in fresh {
+        match connect_connector(app, node, &info) {
+            Ok(crtc) => new_crtcs.push(crtc),
+            Err(e) => tracing::warn!(?e, "connector bringup failed"),
+        }
+    }
+
+    // 4. Re-pack outputs left-to-right in stable connector order so removals
+    //    don't leave gaps the pointer could fall into.
+    {
+        let Some(device) = app.udev.drm_devices.get_mut(&node) else { return };
+        let mut surfaces: Vec<&SurfaceState> = device.surfaces.values().collect();
+        surfaces.sort_by_key(|s| s.output.name());
+        let mut x = 0;
+        for s in surfaces {
+            let size = s.output.current_mode().map(|m| m.size).unwrap_or_default();
+            s.output.change_current_state(None, None, None, Some((x, 0).into()));
+            app.state.space.map_output(&s.output, (x, 0));
+            x += size.w;
+        }
+    }
+
+    clamp_pointer(&mut app.state);
+    app.state.relayout();
+    app.state.pending_redraw = true;
+
+    // Kick the first frame of any new surface so its VBlank loop starts.
+    for crtc in new_crtcs {
+        if let Err(e) = render_surface(app, node, crtc) {
+            tracing::warn!(?e, "post-hotplug render_surface");
+        }
+    }
+}
+
+/// Keep the pointer inside the union of output rectangles (snap to the
+/// nearest point of the nearest output when it ends up in a dead zone).
+fn clamp_pointer(state: &mut State) {
+    let rects: Vec<smithay::utils::Rectangle<i32, smithay::utils::Logical>> = state.space.outputs()
+        .filter_map(|o| state.space.output_geometry(o))
+        .collect();
+    if rects.is_empty() { return; }
+    let p = state.pointer_location;
+    if rects.iter().any(|r| r.to_f64().contains(p)) { return; }
+    let mut best = (f64::MAX, p);
+    for r in rects {
+        let cx = p.x.clamp(r.loc.x as f64, (r.loc.x + r.size.w) as f64 - 1.0);
+        let cy = p.y.clamp(r.loc.y as f64, (r.loc.y + r.size.h) as f64 - 1.0);
+        let d = (cx - p.x).powi(2) + (cy - p.y).powi(2);
+        if d < best.0 { best = (d, (cx, cy).into()); }
+    }
+    state.pointer_location = best.1;
 }
 
 /// Render one frame for `crtc` on `node`. Gathers elements from the space,
@@ -701,6 +846,12 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let closing_anims = &mut device.closing_anims;
     let surface  = device.surfaces.get_mut(&crtc)
         .ok_or_else(|| anyhow::anyhow!("surface not found"))?;
+
+    // This output's place in the global layout: every element position below
+    // is global-logical and must be shifted into output-local space.
+    let out_loc = state.space.output_geometry(&surface.output)
+        .map(|g| g.loc)
+        .unwrap_or_default();
 
     let scale = smithay::utils::Scale::from(1.0_f64);
 
@@ -887,8 +1038,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // Cursor first — render_frame treats `elements` as front-to-back, so
     // index 0 is drawn on top of everything else.
     let pointer_phys = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
-        state.pointer_location.x - cursor.hotspot.0 as f64,
-        state.pointer_location.y - cursor.hotspot.1 as f64,
+        state.pointer_location.x - out_loc.x as f64 - cursor.hotspot.0 as f64,
+        state.pointer_location.y - out_loc.y as f64 - cursor.hotspot.1 as f64,
     ));
     if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
         renderer,
@@ -922,8 +1073,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             ((geo.size.h as f64 * shrink) as i32).max(1),
         ));
         let loc = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
-            geo.loc.x as f64 + (geo.size.w - size.w) as f64 / 2.0,
-            geo.loc.y as f64 + (geo.size.h - size.h) as f64 / 2.0,
+            (geo.loc.x - out_loc.x) as f64 + (geo.size.w - size.w) as f64 / 2.0,
+            (geo.loc.y - out_loc.y) as f64 + (geo.size.h - size.h) as f64 / 2.0,
         ));
         let ghost = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
             eid.clone(),
@@ -1022,6 +1173,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                 dest.size,
             ));
 
+        // Shift the rect pair into this output's local space (multi-monitor:
+        // a window at global x=2000 is at x=80 on a second 1920-wide output).
+        let target = { let mut t = target; t.loc -= out_loc; t };
+        let geo = { let mut g = geo; g.loc -= out_loc; g };
+
         let is_fullscreen = fullscreen.as_ref() == Some(window);
         let radius = if is_fullscreen { 0.0 } else { theme.radius };
 
@@ -1100,6 +1256,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             let committed = window.geometry().size;
             if committed.w <= 0 || committed.h <= 0 { continue; }
 
+            let cell = { let mut c = *cell; c.loc -= out_loc; c };
             let render_loc = (cell.loc - window.geometry().loc).to_physical_precise_round(scale);
             let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 window.render_elements(renderer, render_loc, scale, a_ov);
@@ -1121,7 +1278,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         for (_, rect, is_active) in &layout.panels {
             let c = if *is_active { theme.accent } else { theme.inactive };
             let area = smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
-                (rect.loc.x - 6, rect.loc.y - 6).into(),
+                (rect.loc.x - out_loc.x - 6, rect.loc.y - out_loc.y - 6).into(),
                 (rect.size.w + 12, rect.size.h + 12).into(),
             );
             let ring = PixelShaderElement::new(
@@ -1456,14 +1613,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             let delta_x = event.delta_x();
             let delta_y = event.delta_y();
             state.pointer_location += (delta_x, delta_y).into();
-            if let Some(output) = state.space.outputs().next().cloned() {
-                if let Some(geo) = state.space.output_geometry(&output) {
-                    let max_x = (geo.loc.x + geo.size.w) as f64;
-                    let max_y = (geo.loc.y + geo.size.h) as f64;
-                    state.pointer_location.x = state.pointer_location.x.clamp(geo.loc.x as f64, max_x);
-                    state.pointer_location.y = state.pointer_location.y.clamp(geo.loc.y as f64, max_y);
-                }
-            }
+            clamp_pointer(state);
             // Super+drag in progress: route motion into the drag, not the client.
             if state.drag.is_some() {
                 state.drag_update();
@@ -1671,10 +1821,23 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
     }
 }
 
-fn on_udev_event(event: UdevEvent, _app: &mut UdevApp) {
+fn on_udev_event(event: UdevEvent, app: &mut UdevApp) {
     match event {
         UdevEvent::Added   { device_id, path } => tracing::info!(?device_id, ?path, "udev: device added"),
-        UdevEvent::Changed { device_id }       => tracing::info!(?device_id,        "udev: device changed"),
+        // Monitor plugged/unplugged or changed resolution on a GPU we drive.
+        UdevEvent::Changed { device_id } => {
+            tracing::info!(?device_id, "udev: device changed — rescanning connectors");
+            if let Ok(node) = DrmNode::from_dev_id(device_id) {
+                // Events come for the card node; our device map is keyed by
+                // the render node.
+                let node = node.node_with_type(NodeType::Render)
+                    .and_then(Result::ok)
+                    .unwrap_or(node);
+                if app.udev.drm_devices.contains_key(&node) {
+                    rescan_connectors(app, node);
+                }
+            }
+        }
         UdevEvent::Removed { device_id }       => tracing::info!(?device_id,        "udev: device removed"),
     }
 }
