@@ -61,6 +61,7 @@ fn root_menu() -> Rc<MenuDef> {
     let settings = MenuDef {
         title: "Settings",
         items: vec![
+            sh("\u{f1064}", "Controls",   "vendi-menu settings"),
             sh("\u{f0493}", "WM config",  format!("{FLOAT_TERM} sh -c 'mkdir -p ~/.config/vendi && ${{EDITOR:-vim}} ~/.config/vendi/vendiwm.kdl'")),
             sh("\u{f035b}", "Bar style",  format!("{FLOAT_TERM} sh -c 'mkdir -p ~/.config/vendi && ${{EDITOR:-vim}} ~/.config/vendi/vendibar.css'")),
             sh("\u{f0450}", "Reload session", "pkill -x vendiwm"),
@@ -178,7 +179,7 @@ fn wallpaper_menu() -> MenuDef {
     MenuDef { title: "Wallpaper", items }
 }
 
-fn config_path() -> PathBuf {
+pub(crate) fn config_path() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -190,7 +191,7 @@ fn config_path() -> PathBuf {
 /// Set (or remove, value=None) one key in the `theme { }` block of
 /// vendiwm.kdl, preserving everything else in the file. The compositor merges
 /// user config over its defaults, so a theme-only file keeps all binds.
-fn set_theme_key(key: &str, value: Option<&str>) {
+pub(crate) fn set_theme_key(key: &str, value: Option<&str>) {
     let path = config_path();
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
@@ -233,7 +234,7 @@ fn set_theme_key(key: &str, value: Option<&str>) {
     }
 }
 
-fn relaunch() {
+pub(crate) fn relaunch() {
     let _ = std::process::Command::new("pkill").args(["-x", "vendiwm"]).spawn();
 }
 

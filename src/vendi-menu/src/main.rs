@@ -9,6 +9,7 @@
 // verbs land here later — the design reserves the space.)
 
 mod actions;
+mod settings;
 mod apps;
 mod ipc;
 mod keys;
@@ -43,6 +44,7 @@ fn main() -> glib::ExitCode {
     let (app_id, build): (&str, fn(&gtk::Application)) = match mode.as_str() {
         "actions" => ("os.vendi.menu.actions", actions::build_ui),
         "power"   => ("os.vendi.menu.power",   actions::build_power_ui),
+        "settings" => ("os.vendi.menu.settings", settings::build_ui),
         "keys"    => ("os.vendi.menu.keys",    keys::build_ui),
         _         => (APP_ID,                  build_ui),
     };
