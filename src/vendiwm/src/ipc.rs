@@ -34,8 +34,10 @@ pub enum Request {
     Close         { window: Option<u32> },
     /// Snapshot of all windows in the layout tree.
     ListWindows,
-    /// Snapshot of all workspaces. (Workspaces are stubbed in v0.1.)
+    /// Snapshot of all workspaces.
     ListWorkspaces,
+    /// Switch to a workspace (created on demand).
+    Workspace      { id: u32 },
     /// Set the direction of the next split.
     Split         { dir: SplitDir },
     /// Move window to a workspace. (Stubbed.)
@@ -68,23 +70,30 @@ pub enum Response {
 
 #[derive(Debug, Serialize)]
 pub struct WindowInfo {
-    pub id:      u32,
-    pub title:   String,
-    pub focused: bool,
+    pub id:        u32,
+    pub title:     String,
+    pub focused:   bool,
+    pub workspace: u32,
+    pub floating:  bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct WorkspaceInfo {
     pub id:      u32,
     pub focused: bool,
+    /// Number of windows living on this workspace.
+    pub windows: usize,
 }
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {
-    WindowOpened   { id: u32, title: String },
-    WindowClosed   { id: u32 },
-    WindowFocused  { id: u32 },
+    WindowOpened      { id: u32, title: String },
+    WindowClosed      { id: u32 },
+    /// id 0 = nothing focused.
+    WindowFocused     { id: u32, title: String },
+    WindowTitle       { id: u32, title: String, focused: bool },
+    WorkspacesChanged { active: u32, workspaces: Vec<WorkspaceInfo> },
 }
 
 // ── server ────────────────────────────────────────────────────────────────────
@@ -180,7 +189,9 @@ impl Server {
                     let kind = match ev {
                         Event::WindowOpened { .. }
                         | Event::WindowClosed { .. }
-                        | Event::WindowFocused { .. } => EventKind::Window,
+                        | Event::WindowFocused { .. }
+                        | Event::WindowTitle { .. } => EventKind::Window,
+                        Event::WorkspacesChanged { .. } => EventKind::Workspace,
                     };
                     if !subs.contains(&kind) { continue; }
                     let mut bytes = serde_json::to_vec(ev).unwrap_or_default();
@@ -219,16 +230,27 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
                 Err(e) => Response::Error { error: e.to_string() },
             }
         }
-        Request::Focus { window: _ } => {
-            // Window IDs not wired yet — needs the per-window ID map.
-            Response::Error { error: "focus by id: not implemented in v0.1".into() }
+        Request::Focus { window } => {
+            if state.focus_window_by_id(window) {
+                Response::Ok { ok: true }
+            } else {
+                Response::Error { error: format!("no window with id {window}") }
+            }
         }
         Request::Close { window } => {
-            if window.is_some() {
-                Response::Error { error: "close by id: not implemented in v0.1".into() }
-            } else {
-                let _ = state.run_action(crate::input::Action::Close);
-                Response::Ok { ok: true }
+            let target = match window {
+                None => state.focused_window(),
+                Some(id) => {
+                    use smithay::reexports::wayland_server::Resource;
+                    use smithay::wayland::seat::WaylandFocus;
+                    state.workspaces.all_windows().into_iter().find(|w| {
+                        w.wl_surface().map(|s| s.id().protocol_id() == id).unwrap_or(false)
+                    })
+                }
+            };
+            match target.and_then(|w| w.toplevel().cloned()) {
+                Some(t) => { t.send_close(); Response::Ok { ok: true } }
+                None    => Response::Error { error: "no such window".into() },
             }
         }
         Request::ListWindows => {
@@ -237,8 +259,8 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
             use smithay::wayland::seat::WaylandFocus;
             use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
             let mut out = Vec::new();
-            let focused_surf = state.seat.get_keyboard().and_then(|k| k.current_focus());
-            for w in state.space.elements() {
+            let focused_win = state.focused_window();
+            for w in state.workspaces.all_windows() {
                 let surf  = w.wl_surface();
                 let id    = surf.as_ref().map(|s| s.id().protocol_id()).unwrap_or(0);
                 let title = if let Some(t) = w.toplevel() {
@@ -248,20 +270,35 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
                             .unwrap_or_default()
                     })
                 } else { String::new() };
-                let focused = matches!((&focused_surf, &surf), (Some(f), Some(s)) if **s == *f);
-                out.push(WindowInfo { id, title, focused });
+                let workspace = state.workspaces.find_workspace(&w).unwrap_or(0);
+                let floating  = state.workspaces.find_workspace(&w)
+                    .map(|_| !state.workspaces.active_ref().tree.contains(&w)
+                          && state.workspaces.active_ref().floating.iter().any(|(fw, _)| fw == &w))
+                    .unwrap_or(false);
+                let focused = focused_win.as_ref() == Some(&w);
+                out.push(WindowInfo { id, title, focused, workspace, floating });
             }
             Response::Windows { windows: out }
         }
         Request::ListWorkspaces => {
-            Response::Workspaces { workspaces: vec![WorkspaceInfo { id: 1, focused: true }] }
+            let (active, list) = state.workspaces.snapshot();
+            Response::Workspaces {
+                workspaces: list.into_iter()
+                    .map(|(id, windows)| WorkspaceInfo { id, focused: id == active, windows })
+                    .collect(),
+            }
         }
-        Request::Split { dir } => {
-            state.layout.next_split_override = Some(dir.into());
+        Request::Workspace { id } => {
+            state.switch_workspace(id);
             Response::Ok { ok: true }
         }
-        Request::Move { .. } => {
-            Response::Error { error: "move-to-workspace: workspaces stub until v0.2".into() }
+        Request::Split { dir } => {
+            state.workspaces.active().tree.next_split_override = Some(dir.into());
+            Response::Ok { ok: true }
+        }
+        Request::Move { window: _, to_workspace } => {
+            state.move_focused_to_workspace(to_workspace);
+            Response::Ok { ok: true }
         }
         Request::Subscribe { events } => {
             clients[client_idx].subs = events;

@@ -1,0 +1,277 @@
+// Premium render pieces: rounded window corners + SDF rounded borders.
+//
+// Corners: client textures are drawn through a custom fragment shader that
+// masks pixels outside a rounded-rect SDF (antialiased, 1px feather). The
+// shader is applied per element via `GlesFrame::override_default_tex_program`
+// inside a wrapper element (`RoundedElement`) — the same pattern niri uses.
+//
+// Borders: a `PixelShaderElement` draws an antialiased rounded ring directly
+// on the GPU, replacing the old square `SolidColorRenderElement` frames.
+
+use smithay::{
+    backend::{
+        allocator::Fourcc,
+        renderer::{
+            element::{
+                Element, Id, Kind, RenderElement, UnderlyingStorage,
+                memory::MemoryRenderBuffer,
+                surface::WaylandSurfaceRenderElement,
+            },
+            gles::{GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform},
+            utils::{CommitCounter, DamageSet, OpaqueRegions},
+        },
+    },
+    utils::{Buffer as BufferCoords, Physical, Point, Rectangle, Scale, Transform},
+};
+
+/// Corner radius of window content, logical px.
+pub const RADIUS: f32 = 12.0;
+
+/// Rounded-corner texture shader. Masks the sampled color against a
+/// rounded-box SDF over the element's own quad.
+pub const ROUNDED_TEX_FRAG: &str = r#"#version 100
+//_DEFINES
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision mediump float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+uniform vec2 size;
+uniform float radius;
+
+float rounded_box(vec2 p, vec2 half_size, float r) {
+    vec2 q = abs(p) - half_size + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+void main() {
+    vec4 color = texture2D(tex, v_coords);
+#if defined(NO_ALPHA_MULTIPLIER)
+    color.a = 1.0;
+#endif
+    vec2 p = (v_coords - vec2(0.5)) * size;
+    float d = rounded_box(p, size * 0.5, radius);
+    float mask = 1.0 - smoothstep(-1.0, 1.0, d);
+    color *= alpha * mask;
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        color = vec4(0.0, 0.3, 0.0, 0.2) + color * 0.8;
+#endif
+    gl_FragColor = color;
+}
+"#;
+
+/// Rounded border ring (pixel shader): premultiplied color masked to the
+/// band between the outer rounded rect and the same rect inset by
+/// `thickness`.
+// NOTE: unlike texture shaders, smithay prepends `#version 100` (and the
+// DEBUG_FLAGS define in the debug variant) to pixel shader sources itself —
+// no version line or //_DEFINES marker here.
+pub const BORDER_FRAG: &str = r#"precision mediump float;
+uniform float alpha;
+uniform vec2 size;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+uniform vec4 color;
+uniform float radius;
+uniform float thickness;
+
+float rounded_box(vec2 p, vec2 half_size, float r) {
+    vec2 q = abs(p) - half_size + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+void main() {
+    vec2 p = (v_coords - vec2(0.5)) * size;
+    float d = rounded_box(p, size * 0.5, radius);
+    float outer = 1.0 - smoothstep(-1.0, 0.5, d);
+    float inner = smoothstep(-thickness - 0.5, -thickness + 1.0, d);
+    float a = color.a * outer * inner * alpha;
+    gl_FragColor = vec4(color.rgb * a, a);
+}
+"#;
+
+// ── wallpaper ─────────────────────────────────────────────────────────────────
+
+/// Build the output-sized wallpaper buffer. A user image (from the theme's
+/// `wallpaper` path, cover-scaled) wins; otherwise a procedural obsidian
+/// gradient: deep Mocha vertical fade, a soft mauve glow up top, and a faint
+/// shard watermark in the lower right.
+pub fn wallpaper_buffer(w: i32, h: i32, path: Option<&str>) -> MemoryRenderBuffer {
+    if let Some(path) = path {
+        match load_wallpaper(path, w, h) {
+            Ok(buf) => return buf,
+            Err(e) => tracing::warn!(?e, %path, "wallpaper load failed; using gradient"),
+        }
+    }
+    procedural_wallpaper(w, h)
+}
+
+fn load_wallpaper(path: &str, w: i32, h: i32) -> anyhow::Result<MemoryRenderBuffer> {
+    let img = image::open(path)?;
+    // Cover-scale: fill the output, cropping overflow.
+    let img = img.resize_to_fill(w as u32, h as u32, image::imageops::FilterType::Triangle);
+    let rgba = img.to_rgba8();
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for px in rgba.pixels() {
+        // Argb8888 little-endian byte order: B G R A. Wallpaper is opaque.
+        data.extend_from_slice(&[px[2], px[1], px[0], 255]);
+    }
+    Ok(MemoryRenderBuffer::from_slice(
+        &data, Fourcc::Argb8888, (w, h), 1, Transform::Normal, None,
+    ))
+}
+
+fn procedural_wallpaper(w: i32, h: i32) -> MemoryRenderBuffer {
+    let (wf, hf) = (w as f32, h as f32);
+    let mut data = vec![0u8; (w * h * 4) as usize];
+
+    // Shard watermark geometry (mirrors the vendibar logo), anchored in the
+    // lower-right quadrant at ~55% of screen height.
+    let s = hf * 0.55;
+    let (ox, oy) = (wf * 0.80 - s * 0.5, hf * 0.62 - s * 0.5);
+    let t = (ox + s * 0.42, oy + s * 0.04);
+    let r = (ox + s * 0.92, oy + s * 0.30);
+    let b = (ox + s * 0.60, oy + s * 0.97);
+    let l = (ox + s * 0.10, oy + s * 0.46);
+    fn in_tri(p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> bool {
+        let sign = |p1: (f32, f32), p2: (f32, f32), p3: (f32, f32)| {
+            (p1.0 - p3.0) * (p2.1 - p3.1) - (p2.0 - p3.0) * (p1.1 - p3.1)
+        };
+        let (d1, d2, d3) = (sign(p, a, b), sign(p, b, c), sign(p, c, a));
+        let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+        !(has_neg && has_pos)
+    }
+
+    for y in 0..h {
+        let ty = y as f32 / hf;
+        // Vertical fade: Base #1E1E2E → Crust-ish #11111B.
+        let bg = (
+            0x1e as f32 + (0x11 as f32 - 0x1e as f32) * ty,
+            0x1e as f32 + (0x11 as f32 - 0x1e as f32) * ty,
+            0x2e as f32 + (0x1b as f32 - 0x2e as f32) * ty,
+        );
+        for x in 0..w {
+            let tx = x as f32 / wf;
+            let p = (x as f32, y as f32);
+
+            // Soft mauve glow near the top center.
+            let (gx, gy) = (tx - 0.5, ty - 0.10);
+            let glow = (1.0 - (gx * gx * 3.2 + gy * gy * 5.0).sqrt()).clamp(0.0, 1.0);
+            let glow = glow * glow * 0.10;
+
+            // Shard watermark: two faces at slightly different strengths.
+            let shard = if in_tri(p, t, b, l) { 0.050 }
+                else if in_tri(p, t, r, b)    { 0.085 }
+                else { 0.0 };
+
+            let mix = glow + shard;
+            let (mr, mg, mb) = (0xcb as f32, 0xa6 as f32, 0xf7 as f32);
+            let rr = (bg.0 + (mr - bg.0) * mix).round() as u8;
+            let gg = (bg.1 + (mg - bg.1) * mix).round() as u8;
+            let bb = (bg.2 + (mb - bg.2) * mix).round() as u8;
+
+            let i = ((y * w + x) * 4) as usize;
+            data[i]     = bb;   // B
+            data[i + 1] = gg;   // G
+            data[i + 2] = rr;   // R
+            data[i + 3] = 255;  // A
+        }
+    }
+
+    MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (w, h), 1, Transform::Normal, None)
+}
+
+/// Wraps a window's `WaylandSurfaceRenderElement` and draws it through the
+/// rounded-corner shader. Everything else delegates to the inner element.
+pub struct RoundedElement {
+    inner:   WaylandSurfaceRenderElement<GlesRenderer>,
+    program: GlesTexProgram,
+    radius:  f32,
+}
+
+impl RoundedElement {
+    pub fn new(
+        inner: WaylandSurfaceRenderElement<GlesRenderer>,
+        program: GlesTexProgram,
+        radius: f32,
+    ) -> Self {
+        Self { inner, program, radius }
+    }
+}
+
+impl Element for RoundedElement {
+    fn id(&self) -> &Id { self.inner.id() }
+    fn current_commit(&self) -> CommitCounter { self.inner.current_commit() }
+    fn location(&self, scale: Scale<f64>) -> Point<i32, Physical> { self.inner.location(scale) }
+    fn src(&self) -> Rectangle<f64, BufferCoords> { self.inner.src() }
+    fn transform(&self) -> Transform { self.inner.transform() }
+    fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> { self.inner.geometry(scale) }
+    fn damage_since(&self, scale: Scale<f64>, commit: Option<CommitCounter>) -> DamageSet<i32, Physical> {
+        self.inner.damage_since(scale, commit)
+    }
+    fn opaque_regions(&self, scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        if self.radius <= 0.0 {
+            return self.inner.opaque_regions(scale);
+        }
+        // The corners are punched transparent by the shader, so the element
+        // can't advertise opaque regions — keep it simple and claim none.
+        OpaqueRegions::default()
+    }
+    fn alpha(&self) -> f32 { self.inner.alpha() }
+    fn kind(&self) -> Kind { self.inner.kind() }
+}
+
+impl RenderElement<GlesRenderer> for RoundedElement {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        src: Rectangle<f64, BufferCoords>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        cache: Option<&smithay::utils::user_data::UserDataMap>,
+    ) -> Result<(), GlesError> {
+        if self.radius <= 0.0 {
+            return RenderElement::<GlesRenderer>::draw(
+                &self.inner, frame, src, dst, damage, opaque_regions, cache,
+            );
+        }
+        frame.override_default_tex_program(
+            self.program.clone(),
+            vec![
+                Uniform::new("size", (dst.size.w as f32, dst.size.h as f32)),
+                Uniform::new("radius", self.radius),
+            ],
+        );
+        let res = RenderElement::<GlesRenderer>::draw(
+            &self.inner, frame, src, dst, damage, opaque_regions, cache,
+        );
+        frame.clear_tex_program_override();
+        res
+    }
+
+    fn underlying_storage(&self, _renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
+        // Refuse direct scanout: the corners only exist when the shader runs.
+        None
+    }
+}

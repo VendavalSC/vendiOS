@@ -17,23 +17,62 @@ use crate::layout::Direction;
 
 /// Bundled defaults — used when no user config is present. Targets the
 /// packages that vendiOS ships in BASE_PKGS so every binding works out of
-/// the box on a fresh install (foot, firefox, wofi, grim, slurp, wl-copy,
+/// the box on a fresh install (alacritty, firefox, wofi, grim, slurp, wl-copy,
 /// playerctl, brightnessctl, pipewire/wpctl).
 const DEFAULT_CONFIG: &str = r#"
 binds {
     // ── apps ───────────────────────────────────────────────────
-    bind "super+return"        "spawn foot"
+    // Alacritty is the preferred terminal; fall back to foot on systems that
+    // shipped before the alacritty package was added.
+    bind "super+return"        "spawn sh -c 'alacritty || foot'"
     bind "super+b"             "spawn firefox"
-    bind "super+d"             "spawn wofi --show drun --allow-images --prompt \"\""
-    bind "super+space"         "spawn wofi --show drun --allow-images --prompt \"\""
+    // vendi-menu — Spotlight-style launcher (GApplication: re-running it
+    // while open toggles it closed).
+    bind "super+d"             "spawn vendi-menu"
+    bind "super+space"         "spawn vendi-menu"
+    bind "super+alt+space"     "spawn vendi-menu actions"
 
     // ── window management ──────────────────────────────────────
     bind "super+q"             "close"
     bind "super+j"             "focus-next"
     bind "super+k"             "focus-prev"
+    bind "super+left"          "focus-left"
+    bind "super+right"         "focus-right"
+    bind "super+up"            "focus-up"
+    bind "super+down"          "focus-down"
+    bind "super+shift+left"    "move-left"
+    bind "super+shift+right"   "move-right"
+    bind "super+shift+up"      "move-up"
+    bind "super+shift+down"    "move-down"
+    bind "super+ctrl+left"     "resize-left"
+    bind "super+ctrl+right"    "resize-right"
+    bind "super+ctrl+up"       "resize-up"
+    bind "super+ctrl+down"     "resize-down"
     bind "super+h"             "split-horizontal"
     bind "super+v"             "split-vertical"
+    bind "super+f"             "fullscreen"
+    bind "super+shift+space"   "toggle-floating"
     bind "super+shift+escape"  "quit"
+
+    // ── workspaces (dynamic — created on demand) ───────────────
+    bind "super+1"             "workspace 1"
+    bind "super+2"             "workspace 2"
+    bind "super+3"             "workspace 3"
+    bind "super+4"             "workspace 4"
+    bind "super+5"             "workspace 5"
+    bind "super+6"             "workspace 6"
+    bind "super+7"             "workspace 7"
+    bind "super+8"             "workspace 8"
+    bind "super+9"             "workspace 9"
+    bind "super+shift+1"       "move-to-workspace 1"
+    bind "super+shift+2"       "move-to-workspace 2"
+    bind "super+shift+3"       "move-to-workspace 3"
+    bind "super+shift+4"       "move-to-workspace 4"
+    bind "super+shift+5"       "move-to-workspace 5"
+    bind "super+shift+6"       "move-to-workspace 6"
+    bind "super+shift+7"       "move-to-workspace 7"
+    bind "super+shift+8"       "move-to-workspace 8"
+    bind "super+shift+9"       "move-to-workspace 9"
 
     // ── screenshots ────────────────────────────────────────────
     bind "print"               "spawn sh -c 'mkdir -p ~/Pictures && grim ~/Pictures/screenshot-$(date +%s).png'"
@@ -60,6 +99,36 @@ binds {
 pub struct Document {
     #[knus(child)]
     pub binds: Option<BindsBlock>,
+    #[knus(child)]
+    pub theme: Option<ThemeBlock>,
+}
+
+#[derive(knus::Decode, Debug)]
+pub struct ThemeBlock {
+    /// Border color of the focused window, "#rrggbb".
+    #[knus(child, unwrap(argument))]
+    pub accent:     Option<String>,
+    /// Border color of unfocused windows.
+    #[knus(child, unwrap(argument))]
+    pub inactive:   Option<String>,
+    /// Desktop clear color (visible until the wallpaper covers it).
+    #[knus(child, unwrap(argument))]
+    pub background: Option<String>,
+    /// Window corner radius, logical px.
+    #[knus(child, unwrap(argument))]
+    pub radius:     Option<i64>,
+    /// Border thickness, logical px.
+    #[knus(child, unwrap(argument))]
+    pub border:     Option<i64>,
+    /// Gap between tiles, logical px.
+    #[knus(child, unwrap(argument))]
+    pub gap:        Option<i64>,
+    /// Gap at the screen edges, logical px.
+    #[knus(child, unwrap(argument))]
+    pub margin:     Option<i64>,
+    /// Wallpaper image path (png/jpg). Falls back to the built-in gradient.
+    #[knus(child, unwrap(argument))]
+    pub wallpaper:  Option<String>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -88,8 +157,37 @@ pub struct Chord {
     pub key:   u32,   // xkb keysym
 }
 
+/// Resolved theme values used by the renderer + layout.
+#[derive(Debug, Clone)]
+pub struct Theme {
+    pub accent:     [f32; 4],
+    pub inactive:   [f32; 4],
+    pub background: [f32; 4],
+    pub radius:     f32,
+    pub border:     i32,
+    pub gap:        i32,
+    pub margin:     i32,
+    pub wallpaper:  Option<String>,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            accent:     hex_color("#cba6f7").unwrap(),   // Mauve
+            inactive:   hex_color("#45475a").unwrap(),   // Surface1
+            background: hex_color("#1e1e2e").unwrap(),   // Base
+            radius:     12.0,
+            border:     2,
+            gap:        10,
+            margin:     14,
+            wallpaper:  None,
+        }
+    }
+}
+
 pub struct Config {
     pub keybinds: HashMap<Chord, Action>,
+    pub theme:    Theme,
 }
 
 impl Config {
@@ -118,8 +216,29 @@ impl Config {
                 keybinds.insert(chord, action);
             }
         }
-        Ok(Self { keybinds })
+
+        let mut theme = Theme::default();
+        if let Some(t) = doc.theme {
+            if let Some(c) = t.accent.as_deref().and_then(hex_color)     { theme.accent = c; }
+            if let Some(c) = t.inactive.as_deref().and_then(hex_color)   { theme.inactive = c; }
+            if let Some(c) = t.background.as_deref().and_then(hex_color) { theme.background = c; }
+            if let Some(v) = t.radius  { theme.radius = v as f32; }
+            if let Some(v) = t.border  { theme.border = v as i32; }
+            if let Some(v) = t.gap     { theme.gap = v as i32; }
+            if let Some(v) = t.margin  { theme.margin = v as i32; }
+            theme.wallpaper = t.wallpaper;
+        }
+
+        Ok(Self { keybinds, theme })
     }
+}
+
+/// "#rrggbb" or "#rrggbbaa" → premultiplied-friendly [r, g, b, a] floats.
+fn hex_color(s: &str) -> Option<[f32; 4]> {
+    let hex = s.trim().strip_prefix('#')?;
+    if hex.len() != 6 && hex.len() != 8 { return None; }
+    let p = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok().map(|v| v as f32 / 255.0);
+    Some([p(0)?, p(2)?, p(4)?, if hex.len() == 8 { p(6)? } else { 1.0 }])
 }
 
 fn read_user_config() -> Result<Option<String>> {
@@ -171,13 +290,30 @@ fn parse_action(s: &str) -> Result<Action> {
     let mut parts = s.splitn(2, char::is_whitespace);
     let verb = parts.next().unwrap_or("").trim();
     let rest = parts.next().map(str::trim).unwrap_or("");
+    use crate::input::Dir;
     Ok(match verb {
         "spawn"             => Action::Spawn(rest.to_string()),
         "close"             => Action::Close,
         "focus-next"        => Action::FocusNext,
         "focus-prev"        => Action::FocusPrev,
+        "focus-left"        => Action::FocusDir(Dir::Left),
+        "focus-right"       => Action::FocusDir(Dir::Right),
+        "focus-up"          => Action::FocusDir(Dir::Up),
+        "focus-down"        => Action::FocusDir(Dir::Down),
+        "move-left"         => Action::MoveDir(Dir::Left),
+        "move-right"        => Action::MoveDir(Dir::Right),
+        "move-up"           => Action::MoveDir(Dir::Up),
+        "move-down"         => Action::MoveDir(Dir::Down),
+        "resize-left"       => Action::ResizeDir(Dir::Left),
+        "resize-right"      => Action::ResizeDir(Dir::Right),
+        "resize-up"         => Action::ResizeDir(Dir::Up),
+        "resize-down"       => Action::ResizeDir(Dir::Down),
         "split-horizontal"  => Action::SetNextSplit(Direction::Horizontal),
         "split-vertical"    => Action::SetNextSplit(Direction::Vertical),
+        "workspace"         => Action::Workspace(rest.parse().context("workspace number")?),
+        "move-to-workspace" => Action::MoveToWorkspace(rest.parse().context("workspace number")?),
+        "toggle-floating"   => Action::ToggleFloating,
+        "fullscreen"        => Action::ToggleFullscreen,
         "quit"              => Action::Quit,
         other => anyhow::bail!("unknown action verb {other:?}"),
     })

@@ -1,5 +1,5 @@
 [workspace]
-members = ["vendiwm", "vendi-menu", "vendi-ctl", "vendi-demo"]
+members = ["vendiwm", "vendi-menu", "vendi-ctl", "vendi-demo", "vendibar"]
 resolver = "2"
 
 [workspace.package]

@@ -15,7 +15,10 @@
 
 pub mod backends;
 pub mod config;
+pub mod cursor;
 pub mod input;
 pub mod ipc;
 pub mod layout;
+pub mod render;
 pub mod state;
+pub mod workspaces;

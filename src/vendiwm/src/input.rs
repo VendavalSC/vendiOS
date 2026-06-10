@@ -12,6 +12,20 @@ use smithay::backend::input::KeyState;
 use crate::config::{Config, chord_from};
 use crate::layout::Direction;
 
+/// Screen-space direction for focus / move / resize actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir { Left, Right, Up, Down }
+
+impl Dir {
+    /// The split axis this direction operates on.
+    pub fn axis(self) -> Direction {
+        match self {
+            Dir::Left | Dir::Right => Direction::Horizontal,
+            Dir::Up   | Dir::Down  => Direction::Vertical,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Action {
     /// Spawn a child process from a command string.
@@ -22,8 +36,22 @@ pub enum Action {
     FocusNext,
     /// Cycle focus to the previous leaf.
     FocusPrev,
+    /// Focus the nearest window in a screen direction.
+    FocusDir(Dir),
+    /// Swap the focused window with its neighbor in a screen direction.
+    MoveDir(Dir),
+    /// Grow/shrink the focused window's split toward a direction.
+    ResizeDir(Dir),
     /// Set the direction for the NEXT window insert (consumed on use).
     SetNextSplit(Direction),
+    /// Switch to workspace N (created on demand).
+    Workspace(u32),
+    /// Send the focused window to workspace N.
+    MoveToWorkspace(u32),
+    /// Toggle the focused window between tiled and floating.
+    ToggleFloating,
+    /// Toggle fullscreen on the focused window.
+    ToggleFullscreen,
     /// Quit the compositor.
     Quit,
 }

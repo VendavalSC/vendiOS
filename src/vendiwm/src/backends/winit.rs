@@ -105,7 +105,7 @@ pub fn run() -> Result<()> {
     let config = crate::config::Config::load()
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "config load failed; using empty keybinds");
-            crate::config::Config { keybinds: Default::default() }
+            crate::config::Config { keybinds: Default::default(), theme: Default::default() }
         });
 
     let mut state = State {
@@ -120,7 +120,14 @@ pub fn run() -> Result<()> {
         seat,
         space,
         popups: PopupManager::default(),
-        layout: crate::layout::Tree::new(),
+        workspaces: crate::workspaces::Workspaces::new(),
+        window_titles: Default::default(),
+        drag: None,
+        swipe: None,
+        last_zone: None,
+        open_anims: Vec::new(),
+        ws_anim: None,
+        move_anims: Vec::new(),
         config,
         pointer_location: (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
@@ -167,21 +174,15 @@ pub fn run() -> Result<()> {
                         0.into(), 0,
                         |data, mods, handle| {
                             let sym = handle.modified_sym();
-                            match crate::input::handle(&data.config, sym.raw(), key_state, mods) {
-                                Some(a) => FilterResult::Intercept(Some(a)),
-                                None    => FilterResult::Forward,
-                            }
+                            crate::input::handle(&data.config, sym.raw(), key_state, mods)
+                                .or_else(|| handle.raw_syms().iter().find_map(|s| {
+                                    crate::input::handle(&data.config, s.raw(), key_state, mods)
+                                }))
+                                .map_or(FilterResult::Forward, |a| FilterResult::Intercept(Some(a)))
                         },
                     );
                     if let Some(Some(act)) = action {
-                        let layout_changed = matches!(
-                            &act,
-                            crate::input::Action::Close
-                            | crate::input::Action::FocusNext
-                            | crate::input::Action::FocusPrev,
-                        );
                         if state.run_action(act) { quit_requested = true; }
-                        if layout_changed { state.relayout(); }
                     }
                 }
                 InputEvent::PointerMotionAbsolute { event } => {

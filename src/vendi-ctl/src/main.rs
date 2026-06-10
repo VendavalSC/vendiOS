@@ -34,6 +34,7 @@ fn main() -> Result<()> {
         "split"            => split_cmd(&args[1..]),
         "move"             => move_cmd(&args[1..]),
         "subscribe"        => subscribe_cmd(&args[1..]),
+        "bar"              => bar_cmd(&args[1..]),
         cmd => { eprintln!("unknown command: {cmd}\n"); print_usage(); std::process::exit(2); }
     }
 }
@@ -50,6 +51,7 @@ Usage:
   vendi-ctl split horizontal|vertical   set next-split direction
   vendi-ctl move <window-id> <ws-id>    move window to a workspace
   vendi-ctl subscribe <event>           stream events (window, workspace)
+  vendi-ctl bar title                   stream focused-title JSON (waybar exec)
 
 Reads $VENDIWM_SOCK or falls back to $XDG_RUNTIME_DIR/vendiwm-1.ipc.sock."#);
 }
@@ -145,6 +147,64 @@ fn move_cmd(args: &[String]) -> Result<()> {
     let win: u32 = args[0].parse().context("window id")?;
     let ws:  u32 = args[1].parse().context("workspace id")?;
     ipc_call(json!({"cmd": "move", "window": win, "to_workspace": ws}))
+}
+
+// ── waybar exec adapters ─────────────────────────────────────────────────────
+//
+// waybar's `exec` with no `interval` runs the command once and reads JSON lines
+// from stdout for the lifetime of the bar. Each line becomes the module state.
+// We emit one line on startup (snapshot) then one more after every event push.
+
+fn bar_cmd(args: &[String]) -> Result<()> {
+    let what = args.first().map(String::as_str).unwrap_or("");
+    match what {
+        "title" => bar_title_stream(),
+        _ => { eprintln!("bar: unknown sub-mode '{what}' (expected: title)"); std::process::exit(2); }
+    }
+}
+
+fn bar_title_stream() -> Result<()> {
+    // 1. Emit the current focused title as the first line so the bar isn't blank.
+    emit_focused_title()?;
+    // 2. Open a long-lived subscribe connection; re-emit on every window event.
+    let mut stream = connect()?;
+    let mut wire = serde_json::to_vec(&json!({"cmd": "subscribe", "events": ["window"]}))?;
+    wire.push(b'\n');
+    stream.write_all(&wire)?;
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        let _ = line.context("read event")?;
+        emit_focused_title()?;
+    }
+    Ok(())
+}
+
+fn emit_focused_title() -> Result<()> {
+    let mut stream = connect()?;
+    let mut wire = serde_json::to_vec(&json!({"cmd": "list-windows"}))?;
+    wire.push(b'\n');
+    stream.write_all(&wire)?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 { break; }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.contains(&b'\n') { break; }
+    }
+    let line = buf.split(|&b| b == b'\n').next().unwrap_or(&[]);
+    let resp: Value = serde_json::from_slice(line).unwrap_or(Value::Null);
+    let title = resp.get("windows")
+        .and_then(|v| v.as_array())
+        .and_then(|ws| ws.iter().find(|w| w.get("focused").and_then(|f| f.as_bool()).unwrap_or(false)))
+        .and_then(|w| w.get("title").and_then(|t| t.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let out = json!({ "text": title, "tooltip": title, "class": if title.is_empty() { "idle" } else { "active" } });
+    println!("{}", out);
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    Ok(())
 }
 
 /// Subscribe: send the request, then stream events line-by-line forever.

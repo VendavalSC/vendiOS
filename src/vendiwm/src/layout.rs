@@ -178,6 +178,77 @@ impl Tree {
         }
         out
     }
+
+    /// All windows in DFS (visual) order.
+    pub fn windows(&self) -> Vec<Window> {
+        let mut out = Vec::new();
+        if let Some(root) = self.root.as_ref() {
+            collect_windows(root, &mut out);
+        }
+        out
+    }
+
+    pub fn contains(&self, window: &Window) -> bool {
+        self.windows().iter().any(|w| w == window)
+    }
+
+    /// Point focus at the leaf holding `window`. Returns false if absent.
+    pub fn focus_window(&mut self, window: &Window) -> bool {
+        let Some(root) = self.root.as_ref() else { return false };
+        let mut leaves: Vec<(Vec<usize>, Window)> = Vec::new();
+        collect_leaves(root, Vec::new(), &mut leaves);
+        if let Some((path, _)) = leaves.into_iter().find(|(_, w)| w == window) {
+            self.focus_path = path;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Swap the tree positions of two windows (used for Super+Shift+arrow
+    /// "move window" — geometry stays a clean tiling, only occupants move).
+    pub fn swap_windows(&mut self, a: &Window, b: &Window) {
+        if let Some(root) = self.root.as_mut() {
+            swap_in_node(root, a, b);
+        }
+    }
+
+    /// Grow (+delta) or shrink (-delta) the focused window along `axis` by
+    /// adjusting the ratio split of the nearest ancestor running that axis.
+    pub fn resize_focused(&mut self, axis: Direction, delta: f32) {
+        // Find the deepest ancestor split along the focus path whose
+        // direction matches `axis` — that's the split the user perceives
+        // as "my window's edge in that direction".
+        let Some(root) = self.root.as_ref() else { return };
+        let mut depth_match: Option<usize> = None;
+        let mut node = root;
+        for (depth, &idx) in self.focus_path.iter().enumerate() {
+            if let Node::Split { dir, children, .. } = node {
+                if *dir == axis { depth_match = Some(depth); }
+                node = &children[idx];
+            } else {
+                break;
+            }
+        }
+        let Some(depth) = depth_match else { return };
+
+        // Re-walk mutably and apply the ratio change at that depth.
+        let mut node = self.root.as_mut().unwrap();
+        for &idx in &self.focus_path[..depth] {
+            if let Node::Split { children, .. } = node { node = &mut children[idx]; }
+            else { return; }
+        }
+        if let Node::Split { ratios, .. } = node {
+            let i = self.focus_path[depth];
+            // Trade ratio with the next sibling (or previous if we're last).
+            let j = if i + 1 < ratios.len() { i + 1 } else { i.wrapping_sub(1) };
+            if j >= ratios.len() || i == j { return; }
+            const MIN: f32 = 0.10;
+            let d = delta.clamp(MIN - ratios[i], ratios[j] - MIN);
+            ratios[i] += d;
+            ratios[j] -= d;
+        }
+    }
 }
 
 impl Default for Tree {
@@ -232,6 +303,38 @@ fn layout_node(node: &Node, rect: Rectangle<i32, Logical>, out: &mut Vec<(Window
                 layout_node(child, sub, out);
                 cursor += span;
             }
+        }
+    }
+}
+
+fn collect_windows(node: &Node, out: &mut Vec<Window>) {
+    match node {
+        Node::Leaf(w) => out.push(w.clone()),
+        Node::Split { children, .. } => for c in children { collect_windows(c, out); },
+    }
+}
+
+fn collect_leaves(node: &Node, path: Vec<usize>, out: &mut Vec<(Vec<usize>, Window)>) {
+    match node {
+        Node::Leaf(w) => out.push((path, w.clone())),
+        Node::Split { children, .. } => {
+            for (i, c) in children.iter().enumerate() {
+                let mut p = path.clone();
+                p.push(i);
+                collect_leaves(c, p, out);
+            }
+        }
+    }
+}
+
+fn swap_in_node(node: &mut Node, a: &Window, b: &Window) {
+    match node {
+        Node::Leaf(w) => {
+            if w == a { *w = b.clone(); }
+            else if w == b { *w = a.clone(); }
+        }
+        Node::Split { children, .. } => {
+            for c in children { swap_in_node(c, a, b); }
         }
     }
 }
