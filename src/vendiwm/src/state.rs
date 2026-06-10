@@ -104,6 +104,13 @@ pub struct State {
     // 3 fingers horizontal = workspace switch; 4 fingers vertical = menus.
     pub swipe:                 Option<(u32, f64, f64)>,
 
+    // Overview (exposé): all windows of the active workspace laid out in a
+    // centered grid over a dimmed wallpaper. Render-only — the space keeps
+    // the real geometry; the backend draws windows at their grid cells.
+    // `overview_t` is the last toggle instant (drives the dim transition).
+    pub overview:              bool,
+    pub overview_t:            std::time::Instant,
+
     // Last layer-shell non-exclusive zone — relayout only runs when a layer
     // commit actually changes it. Without this, every bar/menu frame would
     // trigger a configure storm to every toplevel.
@@ -123,6 +130,11 @@ pub struct State {
     // render loop interpolates location AND size, so tile moves, split
     // resizes, and fullscreen toggles all glide instead of snapping.
     pub geo_anims:             Vec<(Window, Rectangle<i32, Logical>, std::time::Instant)>,
+
+    // Windows that just closed: (protocol id, last on-screen geometry). The
+    // backend pairs these with its per-frame texture stash and plays a
+    // fade-and-shrink. The surface is gone by now — only the texture lives.
+    pub closing:               Vec<(u32, Rectangle<i32, Logical>)>,
 
     // Compiled keybinds + future settings, loaded at startup from KDL.
     pub config:                Config,
@@ -154,12 +166,15 @@ pub struct State {
 /// State of an in-progress Super+drag on a floating window.
 #[derive(Clone)]
 pub struct Drag {
-    pub window:     Window,
-    pub resize:     bool,
-    pub start_ptr:  Point<f64, Logical>,
-    pub start_rect: Rectangle<i32, Logical>,
+    pub window:      Window,
+    pub resize:      bool,
+    // Right-drag on a TILED window: motion adjusts the split ratios instead
+    // of a floating rect. `start_ptr` is re-anchored every update.
+    pub tile_resize: bool,
+    pub start_ptr:   Point<f64, Logical>,
+    pub start_rect:  Rectangle<i32, Logical>,
     // When the grab began — the renderer eases in a slight pick-up scale.
-    pub started:    std::time::Instant,
+    pub started:     std::time::Instant,
 }
 
 // ── per-client data ──────────────────────────────────────────────────────────
@@ -331,6 +346,11 @@ impl XdgShellHandler for State {
         let window = self.workspaces.all_windows().into_iter()
             .find(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false));
         if let Some(window) = window {
+            // Last on-screen rect, captured before unmap — the close
+            // animation plays a fading ghost there.
+            if let Some(geo) = self.space.element_geometry(&window) {
+                self.closing.push((id, geo));
+            }
             self.workspaces.remove_window(&window);
             self.space.unmap_elem(&window);
         }
@@ -635,6 +655,12 @@ impl State {
     /// Switch the active workspace, hiding the old one's windows.
     pub fn switch_workspace(&mut self, id: u32) {
         if id == self.workspaces.active_id() { return; }
+        // Overview doesn't survive a desk change — the slide animation owns
+        // the transition from here.
+        if self.overview {
+            self.overview = false;
+            self.overview_t = std::time::Instant::now();
+        }
         let dir = if id > self.workspaces.active_id() { 1 } else { -1 };
         let hidden = self.workspaces.switch_to(id);
         for w in hidden { self.space.unmap_elem(&w); }
@@ -676,16 +702,23 @@ impl State {
     /// the viewport. Also used by the `vendi-float` window rule.
     pub fn float_window(&mut self, window: &Window) {
         let Some(vp) = self.tiling_viewport() else { return };
-        let ws = self.workspaces.active();
-        if !ws.tree.contains(window) { return; }
-        ws.tree.remove(window);
         let size: smithay::utils::Size<i32, Logical> =
             ((vp.size.w * 3 / 5).max(320), (vp.size.h * 3 / 5).max(240)).into();
         let loc: Point<i32, Logical> = (
             vp.loc.x + (vp.size.w - size.w) / 2,
             vp.loc.y + (vp.size.h - size.h) / 2,
         ).into();
-        ws.floating.push((window.clone(), Rectangle::new(loc, size)));
+        self.float_window_at(window, Rectangle::new(loc, size));
+    }
+
+    /// Pop a tiled window out into the floating layer at a specific rect —
+    /// Super+LeftDrag uses the window's current geometry so it detaches in
+    /// place and follows the cursor.
+    pub fn float_window_at(&mut self, window: &Window, rect: Rectangle<i32, Logical>) {
+        let ws = self.workspaces.active();
+        if !ws.tree.contains(window) { return; }
+        ws.tree.remove(window);
+        ws.floating.push((window.clone(), rect));
         ws.focus_floating = Some(window.clone());
         self.relayout();
         self.update_keyboard_focus();
@@ -773,9 +806,28 @@ impl State {
         self.relayout();
     }
 
-    /// Update the dragged floating window from the current pointer position.
+    /// Update the dragged window from the current pointer position.
     pub fn drag_update(&mut self) {
         let Some(drag) = self.drag.clone() else { return };
+
+        // Tiled right-drag: trade split ratios with the neighbors, KDE-style.
+        if drag.tile_resize {
+            let Some(vp) = self.tiling_viewport() else { return };
+            let dx = self.pointer_location.x - drag.start_ptr.x;
+            let dy = self.pointer_location.y - drag.start_ptr.y;
+            if let Some(d) = self.drag.as_mut() { d.start_ptr = self.pointer_location; }
+            let tree = &mut self.workspaces.active().tree;
+            tree.focus_window(&drag.window);
+            if dx.abs() >= 1.0 {
+                tree.resize_focused(crate::layout::Direction::Horizontal, (dx / vp.size.w as f64) as f32);
+            }
+            if dy.abs() >= 1.0 {
+                tree.resize_focused(crate::layout::Direction::Vertical, (dy / vp.size.h as f64) as f32);
+            }
+            self.relayout();
+            return;
+        }
+
         let dx = (self.pointer_location.x - drag.start_ptr.x).round() as i32;
         let dy = (self.pointer_location.y - drag.start_ptr.y).round() as i32;
         let ws = self.workspaces.active();
@@ -871,6 +923,7 @@ impl State {
             MoveToWorkspace(n)  => self.move_focused_to_workspace(n),
             ToggleFloating      => self.toggle_floating(),
             ToggleFullscreen    => self.toggle_fullscreen(),
+            ToggleOverview      => self.toggle_overview(),
             Quit => { self.quit_requested = true; return true; }
         }
         false
@@ -957,11 +1010,101 @@ impl State {
         self.pending_redraw = true;
     }
 
+    /// Toggle the overview grid. Entering queues a morph from every window's
+    /// real geometry toward its grid cell; leaving morphs back. The grid is
+    /// recomputed each frame from the same inputs, so both ends agree.
+    pub fn toggle_overview(&mut self) {
+        let now = std::time::Instant::now();
+        tracing::info!(entering = !self.overview, "overview toggled");
+        if !self.overview {
+            if self.space.elements().next().is_none() { return; }
+            let cells = self.overview_cells();
+            self.overview = true;
+            self.overview_t = now;
+            self.drag = None;
+            for (window, _) in cells {
+                if let Some(geo) = self.space.element_geometry(&window) {
+                    self.geo_anims.retain(|(w, _, _)| w != &window);
+                    self.geo_anims.push((window, geo, now));
+                }
+            }
+        } else {
+            let cells = self.overview_cells();
+            self.overview = false;
+            self.overview_t = now;
+            for (window, cell) in cells {
+                self.geo_anims.retain(|(w, _, _)| w != &window);
+                self.geo_anims.push((window, cell, now));
+            }
+        }
+        self.pending_redraw = true;
+    }
+
+    /// Grid cells for the overview: every mapped window of the active
+    /// workspace, aspect-fit (never upscaled) into a near-square grid that
+    /// is centered in the output with room left for the bar. Deterministic
+    /// across frames — both the renderer and click hit-testing rely on it.
+    pub fn overview_cells(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        let Some(output) = self.space.outputs().next() else { return Vec::new() };
+        let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
+        let windows: Vec<Window> = self.space.elements().cloned().collect();
+        let n = windows.len() as i32;
+        if n == 0 { return Vec::new(); }
+
+        let margin_x = geo.size.w / 14;
+        let top      = geo.size.h / 9;
+        let bottom   = geo.size.h / 14;
+        let area = Rectangle::<i32, Logical>::new(
+            (geo.loc.x + margin_x, geo.loc.y + top).into(),
+            (geo.size.w - margin_x * 2, geo.size.h - top - bottom).into(),
+        );
+        let cols = (n as f64).sqrt().ceil() as i32;
+        let rows = (n + cols - 1) / cols;
+        let gap  = 28;
+        let cw = ((area.size.w - gap * (cols - 1)) / cols).max(1);
+        let ch = ((area.size.h - gap * (rows - 1)) / rows).max(1);
+
+        let mut cells = Vec::with_capacity(windows.len());
+        for (i, window) in windows.into_iter().enumerate() {
+            let Some(wgeo) = self.space.element_geometry(&window) else { continue };
+            let (row, col) = (i as i32 / cols, i as i32 % cols);
+            // Center a short last row instead of leaving it ragged-left.
+            let in_row = if row == rows - 1 { n - row * cols } else { cols };
+            let row_w  = in_row * cw + (in_row - 1) * gap;
+            let cx = area.loc.x + (area.size.w - row_w) / 2 + col * (cw + gap);
+            let cy = area.loc.y + row * (ch + gap);
+            let s = (cw as f64 / wgeo.size.w.max(1) as f64)
+                .min(ch as f64 / wgeo.size.h.max(1) as f64)
+                .min(1.0);
+            let tw = ((wgeo.size.w as f64 * s) as i32).max(1);
+            let th = ((wgeo.size.h as f64 * s) as i32).max(1);
+            cells.push((window, Rectangle::new(
+                (cx + (cw - tw) / 2, cy + (ch - th) / 2).into(),
+                (tw, th).into(),
+            )));
+        }
+        cells
+    }
+
+    /// Focus + raise a specific window (overview click).
+    pub fn focus_window(&mut self, window: &Window) {
+        let ws = self.workspaces.active();
+        if ws.floating.iter().any(|(w, _)| w == window) {
+            ws.focus_floating = Some(window.clone());
+        } else if ws.tree.contains(window) {
+            ws.focus_floating = None;
+            ws.tree.focus_window(window);
+        }
+        self.update_keyboard_focus();
+    }
+
     /// Queue a layout morph from the window's current geometry to `target`
     /// (no-op when nothing changed or the window isn't mapped yet). During a
     /// Super+drag the window must track the pointer 1:1, so drags don't morph.
     fn push_geo_anim(&mut self, window: &Window, target: Rectangle<i32, Logical>) {
-        if self.drag.as_ref().map(|d| &d.window == window).unwrap_or(false) { return; }
+        // During any drag, geometry must track the pointer 1:1 — a tiled
+        // resize relayouts every motion event and morphs would lag behind.
+        if self.drag.is_some() { return; }
         let Some(old) = self.space.element_geometry(window) else { return };
         if old == target { return; }
         self.geo_anims.retain(|(w, _, _)| w != window);

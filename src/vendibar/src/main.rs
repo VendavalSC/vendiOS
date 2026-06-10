@@ -133,7 +133,12 @@ fn vendi_logo() -> gtk::DrawingArea {
     area.set_content_width(18);
     area.set_content_height(18);
     area.set_valign(gtk::Align::Center);
-    area.set_draw_func(|_, cr, w, h| {
+    // Faces derive from the theme accent: bright face slightly lifted toward
+    // white, dark face at ~60% — keeps the obsidian look in any accent.
+    let (ar, ag, ab) = modules::accent_rgb();
+    let light = (ar + (1.0 - ar) * 0.18, ag + (1.0 - ag) * 0.18, ab + (1.0 - ab) * 0.18);
+    let dark  = (ar * 0.58, ag * 0.58, ab * 0.58);
+    area.set_draw_func(move |_, cr, w, h| {
         let (w, h) = (w as f64, h as f64);
         // Shard silhouette (clockwise):
         //   T  = top peak (off-center left)
@@ -153,10 +158,9 @@ fn vendi_logo() -> gtk::DrawingArea {
             cr.close_path();
             let _ = cr.fill();
         };
-        // Left face — bright lavender, catches the light.
-        face(cr, &[t, b, l], (0.804, 0.690, 0.992));
-        // Right face — deep obsidian purple.
-        face(cr, &[t, r, b], (0.467, 0.310, 0.745));
+        // Left face catches the light; right face stays deep obsidian.
+        face(cr, &[t, b, l], light);
+        face(cr, &[t, r, b], dark);
         // Ridge highlight — a hairline along the T→B edge.
         cr.set_source_rgba(0.93, 0.88, 1.0, 0.85);
         cr.set_line_width(0.9);

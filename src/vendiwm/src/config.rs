@@ -54,6 +54,7 @@ binds {
     bind "super+h"             "split-horizontal"
     bind "super+v"             "split-vertical"
     bind "super+f"             "fullscreen"
+    bind "super+o"             "overview"
     bind "super+shift+space"   "toggle-floating"
     bind "super+shift+escape"  "quit"
 
@@ -132,6 +133,10 @@ pub struct ThemeBlock {
     /// Wallpaper image path (png/jpg). Falls back to the built-in gradient.
     #[knus(child, unwrap(argument))]
     pub wallpaper:  Option<String>,
+    /// Frosted-glass blur behind overlay surfaces (vendi-menu). On by
+    /// default; turn off on GPUs where the extra passes hurt.
+    #[knus(child, unwrap(argument))]
+    pub blur:       Option<bool>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -171,6 +176,7 @@ pub struct Theme {
     pub gap:        i32,
     pub margin:     i32,
     pub wallpaper:  Option<String>,
+    pub blur:       bool,
 }
 
 impl Default for Theme {
@@ -184,6 +190,7 @@ impl Default for Theme {
             gap:        10,
             margin:     14,
             wallpaper:  None,
+            blur:       true,
         }
     }
 }
@@ -249,6 +256,7 @@ impl Config {
             if let Some(v) = t.gap     { theme.gap = v as i32; }
             if let Some(v) = t.margin  { theme.margin = v as i32; }
             if t.wallpaper.is_some()   { theme.wallpaper = t.wallpaper; }
+            if let Some(v) = t.blur    { theme.blur = v; }
         }
 
         Ok(Self { keybinds, keybinds_pretty, theme })
@@ -336,6 +344,7 @@ fn parse_action(s: &str) -> Result<Action> {
         "move-to-workspace" => Action::MoveToWorkspace(rest.parse().context("workspace number")?),
         "toggle-floating"   => Action::ToggleFloating,
         "fullscreen"        => Action::ToggleFullscreen,
+        "overview"          => Action::ToggleOverview,
         "quit"              => Action::Quit,
         other => anyhow::bail!("unknown action verb {other:?}"),
     })

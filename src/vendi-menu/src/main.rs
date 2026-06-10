@@ -51,9 +51,18 @@ fn main() -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
+/// Default theme ships in the binary; `vendi theme` generates an override at
+/// ~/.config/vendi/vendi-menu.css which replaces it wholesale.
 fn load_css() {
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(include_str!("style.css"));
+    let user_css = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .map(|p| p.join("vendi/vendi-menu.css"));
+    match user_css.filter(|p| p.exists()) {
+        Some(path) => provider.load_from_path(&path),
+        None => provider.load_from_string(include_str!("style.css")),
+    }
     gtk::style_context_add_provider_for_display(
         &gdk::Display::default().expect("no display"),
         &provider,

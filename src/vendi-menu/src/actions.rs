@@ -105,28 +105,38 @@ fn root_menu() -> Rc<MenuDef> {
 
 // ── theme / wallpaper (write the theme block, relaunch the compositor) ───────
 
+// Theme switching delegates to `vendi theme`, which recolors EVERYTHING
+// (vendiwm, bar, menu, alacritty, swaylock), then relaunches the session.
 fn theme_menu() -> MenuDef {
-    const ACCENTS: &[(&str, &str)] = &[
-        ("Mauve",    "#cba6f7"),
-        ("Blue",     "#89b4fa"),
-        ("Lavender", "#b4befe"),
-        ("Teal",     "#94e2d5"),
-        ("Green",    "#a6e3a1"),
-        ("Yellow",   "#f9e2af"),
-        ("Peach",    "#fab387"),
-        ("Red",      "#f38ba8"),
-        ("Pink",     "#f5c2e7"),
+    const FLAVORS: &[(&str, &str)] = &[
+        ("Mocha (dark)",     "mocha"),
+        ("Macchiato",        "macchiato"),
+        ("Frappé",           "frappe"),
+        ("Latte (light)",    "latte"),
     ];
+    const ACCENTS: &[&str] = &[
+        "mauve", "blue", "lavender", "teal", "green", "yellow", "peach", "red", "pink",
+    ];
+    let flavors = MenuDef {
+        title: "Flavor",
+        items: FLAVORS.iter().map(|&(label, id)| {
+            sh("\u{f040a}", label, format!("sh -c 'vendi theme {id} >/dev/null; pkill -x vendiwm'"))
+        }).collect(),
+    };
+    let accents = MenuDef {
+        title: "Accent",
+        items: ACCENTS.iter().map(|&name| {
+            let mut label = name.to_string();
+            if let Some(c) = label.get_mut(0..1) { c.make_ascii_uppercase(); }
+            sh("\u{f0e0c}", &label, format!("sh -c 'vendi theme accent {name} >/dev/null; pkill -x vendiwm'"))
+        }).collect(),
+    };
     MenuDef {
         title: "Theme",
-        items: ACCENTS.iter().map(|&(name, hex)| ItemDef {
-            glyph: "\u{f040a}",
-            label: format!("{name} accent"),
-            entry: Entry::Func(Box::new(move || {
-                set_theme_key("accent", Some(&format!("\"{hex}\"")));
-                relaunch();
-            })),
-        }).collect(),
+        items: vec![
+            submenu("\u{f040a}", "Flavor", flavors),
+            submenu("\u{f0e0c}", "Accent", accents),
+        ],
     }
 }
 

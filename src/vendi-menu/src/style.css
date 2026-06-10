@@ -15,7 +15,7 @@ window {
 }
 
 .menu-root {
-  background: rgba(24, 24, 37, 0.94);          /* Mantle, near-opaque */
+  background: rgba(24, 24, 37, 0.72);          /* Mantle — compositor frosts behind */
   border: 1px solid rgba(203, 166, 247, 0.35); /* faint mauve rim */
   border-radius: 16px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.40);

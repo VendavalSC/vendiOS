@@ -52,6 +52,8 @@ pub enum Action {
     ToggleFloating,
     /// Toggle fullscreen on the focused window.
     ToggleFullscreen,
+    /// Toggle the overview (exposé) window grid.
+    ToggleOverview,
     /// Quit the compositor.
     Quit,
 }

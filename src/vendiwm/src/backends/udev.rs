@@ -36,7 +36,7 @@ use smithay::{
         renderer::{
             Color32F, ImportDma, ImportMemWl,
             element::{
-                AsRenderElements, Kind,
+                AsRenderElements, Kind, RenderElement,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 surface::WaylandSurfaceRenderElement,
                 utils::{Relocate, RelocateRenderElement, RescaleRenderElement},
@@ -89,6 +89,10 @@ smithay::backend::renderer::element::render_elements! {
     // window's top-left), outer = open/drag scale (uniform, anchored center).
     Window=RelocateRenderElement<RescaleRenderElement<RescaleRenderElement<crate::render::RoundedElement>>>,
     Pixel=RescaleRenderElement<PixelShaderElement>,
+    // Close-animation ghosts — static textures of windows that just died.
+    Texture=smithay::backend::renderer::element::texture::TextureRenderElement<smithay::backend::renderer::gles::GlesTexture>,
+    // Frosted-glass patches behind overlay surfaces (vendi-menu).
+    Blur=crate::render::BlurElement,
 }
 
 type FrameElement = OutputRenderElements;
@@ -405,10 +409,13 @@ fn build_state(
         rule_checked:           Default::default(),
         drag:                   None,
         swipe:                  None,
+        overview:               false,
+        overview_t:             std::time::Instant::now(),
         last_zone:              None,
         open_anims:             Vec::new(),
         ws_anim:                None,
         geo_anims:              Vec::new(),
+        closing:                Vec::new(),
         config,
         pointer_location:       (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
@@ -440,6 +447,25 @@ pub struct DeviceState {
     pub rounded_prog: GlesTexProgram,
     /// Rounded border-ring pixel shader.
     pub border_prog:  GlesPixelProgram,
+    /// Separable gaussian blur pass (frosted glass behind vendi-menu).
+    pub blur_prog:    GlesTexProgram,
+    /// Ping-pong offscreen targets for the blur, at 1/4 output size.
+    /// Recreated whenever the output size changes.
+    pub blur_texs:    Option<(
+        smithay::backend::renderer::gles::GlesTexture,
+        smithay::backend::renderer::gles::GlesTexture,
+    )>,
+    /// Last-frame texture of every mapped window, keyed by protocol id —
+    /// surfaces die before we can animate a close, so this keeps the pixels.
+    pub tex_stash:    HashMap<u32, smithay::backend::renderer::gles::GlesTexture>,
+    /// In-flight close animations: stable element id, ghost texture, the
+    /// window's final rect, start time.
+    pub closing_anims: Vec<(
+        smithay::backend::renderer::element::Id,
+        smithay::backend::renderer::gles::GlesTexture,
+        smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+        std::time::Instant,
+    )>,
 }
 
 pub struct SurfaceState {
@@ -491,6 +517,10 @@ impl UdevData {
                 UniformName::new("thickness", UniformType::_1f),
             ],
         ).map_err(|e| anyhow::anyhow!("compile border shader: {e:?}"))?;
+        let blur_prog = renderer.compile_custom_texture_shader(
+            crate::render::BLUR_FRAG,
+            &[UniformName::new("dir", UniformType::_2f)],
+        ).map_err(|e| anyhow::anyhow!("compile blur shader: {e:?}"))?;
 
         // 5. Enumerate connectors so we can log + later create surfaces.
         let resources = drm.resource_handles()
@@ -518,6 +548,10 @@ impl UdevData {
             cursor:   Cursor::load(),
             rounded_prog,
             border_prog,
+            blur_prog,
+            blur_texs: None,
+            tex_stash: HashMap::new(),
+            closing_anims: Vec::new(),
         };
         Ok((dev, notifier))
     }
@@ -658,6 +692,10 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let cursor   = &device.cursor;
     let rounded_prog = device.rounded_prog.clone();
     let border_prog  = device.border_prog.clone();
+    let blur_prog    = device.blur_prog.clone();
+    let blur_texs     = &mut device.blur_texs;
+    let tex_stash     = &mut device.tex_stash;
+    let closing_anims = &mut device.closing_anims;
     let surface  = device.surfaces.get_mut(&crtc)
         .ok_or_else(|| anyhow::anyhow!("surface not found"))?;
 
@@ -688,10 +726,12 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                 .map(OutputRenderElements::Layer),
             );
         }
-        surface.compositor.render_frame(renderer, &elements, Color32F::new(0.0, 0.0, 0.0, 1.0), FrameFlags::DEFAULT)
+        let res = surface.compositor.render_frame(renderer, &elements, Color32F::new(0.0, 0.0, 0.0, 1.0), FrameFlags::DEFAULT)
             .map_err(|e| anyhow::anyhow!("render_frame: {e:?}"))?;
-        surface.compositor.queue_frame(())
-            .map_err(|e| anyhow::anyhow!("queue_frame: {e:?}"))?;
+        if !res.is_empty {
+            surface.compositor.queue_frame(())
+                .map_err(|e| anyhow::anyhow!("queue_frame: {e:?}"))?;
+        }
         if let Some(locker) = state.lock_pending.take() {
             locker.lock();
             state.locked = true;
@@ -745,13 +785,44 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         }
         None => (1.0, 1.0, 0),
     };
+    // Close animations: pair windows that died since last frame with their
+    // stashed textures; the ghosts fade + shrink in place.
+    const CLOSE_MS: f32 = 180.0;
+    closing_anims.retain(|(_, _, _, t)| {
+        (now.duration_since(*t).as_secs_f32() * 1000.0) < CLOSE_MS
+    });
+    for (id, geo) in state.closing.drain(..) {
+        if let Some(tex) = tex_stash.remove(&id) {
+            closing_anims.push((
+                smithay::backend::renderer::element::Id::new(),
+                tex,
+                geo,
+                now,
+            ));
+        }
+    }
+
+    // Overview: windows render at their grid cells instead of their real
+    // geometry; the wallpaper dims underneath. The dim eases over the same
+    // span as the geo morphs so enter/exit feel like one motion.
+    const OVERVIEW_MS: f32 = 220.0;
+    let overview_cells = if state.overview { state.overview_cells() } else { Vec::new() };
+    let ov_e = ease_out(
+        (now.duration_since(state.overview_t).as_secs_f32() * 1000.0 / OVERVIEW_MS).min(1.0),
+    );
+    let wallpaper_alpha = if state.overview { 1.0 - 0.55 * ov_e } else { 0.45 + 0.55 * ov_e };
+
     let anims_active = state.ws_anim.is_some()
         || !state.open_anims.is_empty()
         || !state.geo_anims.is_empty()
-        || state.drag.is_some();
+        || !closing_anims.is_empty()
+        || state.drag.is_some()
+        || (now.duration_since(state.overview_t).as_secs_f32() * 1000.0) < OVERVIEW_MS;
     let theme = state.config.theme.clone();
     let mut upper_layer_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
     let mut lower_layer_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+    // Logical rects that want a blurred-desktop slab behind them.
+    let mut blur_rects: Vec<smithay::utils::Rectangle<i32, smithay::utils::Logical>> = Vec::new();
     // A fullscreen window hides the Top layer (the bar) — only Overlay
     // surfaces (e.g. a lock screen) stay above it, per the wlr spec.
     let fullscreen_active = state.workspaces.active_ref().fullscreen.is_some();
@@ -769,6 +840,10 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         };
         for layer in upper_layers {
             let geo = match layer_map.layer_geometry(layer) { Some(g) => g, None => continue };
+            // The menu gets a frosted-glass slab of the desktop behind it.
+            if theme.blur && layer.namespace() == "vendi-menu" {
+                blur_rects.push(geo);
+            }
             let phys_loc = geo.loc.to_physical_precise_round(scale);
             upper_layer_elems.extend(
                 smithay::backend::renderer::element::AsRenderElements::<GlesRenderer>::render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
@@ -810,6 +885,40 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
 
     // Upper layers (Top/Overlay) → above windows but below the cursor.
     elements.extend(upper_layer_elems.into_iter().map(OutputRenderElements::Layer));
+    // Everything pushed from here down is "the desktop" — the blur pass at
+    // the bottom of this function re-renders elements[blur_mark..] into an
+    // offscreen target, and the frosted patches are inserted at this index
+    // (directly beneath the menu, above all desktop content).
+    let blur_mark = elements.len();
+
+    // Close ghosts — above live windows (the dying window was usually on top).
+    let ctx = smithay::backend::renderer::Renderer::context_id(renderer);
+    for (eid, tex, geo, t) in closing_anims.iter() {
+        let e = ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / CLOSE_MS).min(1.0));
+        let shrink = 1.0 - 0.15 * e as f64;
+        let size = smithay::utils::Size::<i32, smithay::utils::Logical>::from((
+            ((geo.size.w as f64 * shrink) as i32).max(1),
+            ((geo.size.h as f64 * shrink) as i32).max(1),
+        ));
+        let loc = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
+            geo.loc.x as f64 + (geo.size.w - size.w) as f64 / 2.0,
+            geo.loc.y as f64 + (geo.size.h - size.h) as f64 / 2.0,
+        ));
+        let ghost = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
+            eid.clone(),
+            ctx.clone(),
+            loc,
+            tex.clone(),
+            1,
+            Transform::Normal,
+            Some(1.0 - e),
+            None,
+            Some(size),
+            None,
+            Kind::Unspecified,
+        );
+        elements.push(OutputRenderElements::Texture(ghost));
+    }
 
     // Windows + borders, topmost first. Each window's surfaces go through
     // the rounded-corner shader; its border is an SDF ring drawn just above
@@ -819,8 +928,23 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let focused_surf = state.seat.get_keyboard().and_then(|k| k.current_focus());
     let fullscreen = state.workspaces.active_ref().fullscreen.clone();
     let stacked: Vec<_> = state.space.elements().cloned().collect();
+    let mut live_ids: Vec<u32> = Vec::with_capacity(stacked.len());
     for window in stacked.iter().rev() {
         let Some(geo) = state.space.element_geometry(window) else { continue };
+
+        // Stash this frame's texture so a close next frame can ghost it.
+        if let Some(surf) = window.wl_surface() {
+            use smithay::reexports::wayland_server::Resource;
+            let wid = surf.id().protocol_id();
+            live_ids.push(wid);
+            let tex = smithay::backend::renderer::utils::with_renderer_surface_state(
+                &surf,
+                |s| s.texture(ctx.clone()).cloned(),
+            ).flatten();
+            if let Some(tex) = tex {
+                tex_stash.insert(wid, tex);
+            }
+        }
 
         // The open clock starts on the first frame the window has committed
         // content — starting it at new_toplevel let the configure round-trip
@@ -856,20 +980,25 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
 
         // Layout morph: interpolate the whole rect (location AND size) from
         // the old slot, so moves, resizes, and fullscreen toggles glide.
-        // The workspace slide rides on the same rect.
+        // The workspace slide rides on the same rect. In overview the
+        // destination is the window's grid cell, not its real geometry.
+        let dest = overview_cells.iter()
+            .find(|(w, _)| w == window)
+            .map(|(_, r)| *r)
+            .unwrap_or(geo);
         let target = state.geo_anims.iter()
             .find(|(w, _, _)| w == window)
             .map(|(_, old, t)| {
                 let e = ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / MORPH_MS).min(1.0));
                 let l = |a: i32, b: i32| (a as f32 + (b - a) as f32 * e).round() as i32;
                 smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
-                    (l(old.loc.x, geo.loc.x) + ws_off, l(old.loc.y, geo.loc.y)).into(),
-                    (l(old.size.w, geo.size.w).max(1), l(old.size.h, geo.size.h).max(1)).into(),
+                    (l(old.loc.x, dest.loc.x) + ws_off, l(old.loc.y, dest.loc.y)).into(),
+                    (l(old.size.w, dest.size.w).max(1), l(old.size.h, dest.size.h).max(1)).into(),
                 )
             })
             .unwrap_or_else(|| smithay::utils::Rectangle::new(
-                (geo.loc.x + ws_off, geo.loc.y).into(),
-                geo.size,
+                (dest.loc.x + ws_off, dest.loc.y).into(),
+                dest.size,
             ));
 
         let is_fullscreen = fullscreen.as_ref() == Some(window);
@@ -934,20 +1063,159 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         }
     }
 
+    // Drop stashed textures for windows that no longer exist (their close
+    // ghosts, if any, were taken out of the stash above).
+    tex_stash.retain(|id, _| live_ids.contains(id));
+
     // Lower layers (Bottom/Background) → below windows and borders.
     elements.extend(lower_layer_elems.into_iter().map(OutputRenderElements::Layer));
 
-    // Wallpaper — the very back of the stack.
+    // Wallpaper — the very back of the stack. Dimmed in overview.
     if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
         renderer,
         (0.0, 0.0),
         &surface.wallpaper,
-        None,
+        Some(wallpaper_alpha),
         None,
         None,
         Kind::Unspecified,
     ) {
         elements.push(OutputRenderElements::Memory(elem));
+    }
+
+    // ── frosted glass ────────────────────────────────────────────────────────
+    // Only runs while something wants it (the menu is open). The desktop
+    // part of the element stack (everything under the menu) is re-rendered
+    // into a 1/4-size offscreen texture, gaussian-blurred in four separable
+    // passes, and a rounded crop of the result is slid in directly beneath
+    // each requesting surface. The 4x downscale does half the softening and
+    // keeps the passes cheap enough for virgl.
+    if !blur_rects.is_empty() {
+        use smithay::backend::renderer::{Bind, Frame, Offscreen, Renderer as _, Texture};
+        use smithay::backend::renderer::element::Element as _;
+        const DOWN: i32 = 4;
+        let out_size = state.space.output_geometry(&surface.output)
+            .map(|g| g.size)
+            .unwrap_or_else(|| (1, 1).into());
+        let (qw, qh) = ((out_size.w / DOWN).max(1), (out_size.h / DOWN).max(1));
+        let stale = blur_texs.as_ref()
+            .map(|(a, _)| { let s = Texture::size(a); s.w != qw || s.h != qh })
+            .unwrap_or(true);
+        if stale {
+            let a = renderer.create_buffer(smithay::backend::allocator::Fourcc::Abgr8888, (qw, qh).into());
+            let b = renderer.create_buffer(smithay::backend::allocator::Fourcc::Abgr8888, (qw, qh).into());
+            match (a, b) {
+                (Ok(a), Ok(b)) => *blur_texs = Some((a, b)),
+                (a, b) => {
+                    tracing::warn!(a_err = a.is_err(), b_err = b.is_err(), "blur target alloc failed");
+                    *blur_texs = None;
+                }
+            }
+        }
+        if let Some((texa, texb)) = blur_texs.as_mut() {
+            let qsize = smithay::utils::Size::<i32, smithay::utils::Physical>::from((qw, qh));
+            let full  = smithay::utils::Rectangle::from_size(qsize);
+            let theme_clear = Color32F::new(
+                theme.background[0], theme.background[1], theme.background[2], 1.0,
+            );
+
+            // Pass 0: desktop (elements below blur_mark are the menu itself
+            // and the cursor — skipped) into texa, downscaled, back-to-front.
+            let scene = (|| -> std::result::Result<(), smithay::backend::renderer::gles::GlesError> {
+                let mut fb = renderer.bind(texa)?;
+                let mut frame = renderer.render(&mut fb, qsize, Transform::Normal)?;
+                frame.clear(theme_clear, &[full])?;
+                for elem in elements[blur_mark..].iter().rev() {
+                    let src = elem.src();
+                    let dst = elem.geometry(scale);
+                    let dst = smithay::utils::Rectangle::<i32, smithay::utils::Physical>::new(
+                        (dst.loc.x / DOWN, dst.loc.y / DOWN).into(),
+                        ((dst.size.w / DOWN).max(1), (dst.size.h / DOWN).max(1)).into(),
+                    );
+                    let _ = RenderElement::<GlesRenderer>::draw(elem, &mut frame, src, dst, &[full], &[], None);
+                }
+                let _ = frame.finish()?;
+                Ok(())
+            })();
+
+            // Passes 1-4: separable gaussian, ping-pong, radius growing —
+            // ends back in texa.
+            let mut blurred = scene.is_ok();
+            if blurred {
+                let dirs: [(f32, f32); 4] = [
+                    (1.0 / qw as f32, 0.0), (0.0, 1.0 / qh as f32),
+                    (2.0 / qw as f32, 0.0), (0.0, 2.0 / qh as f32),
+                ];
+                for (i, dir) in dirs.iter().enumerate() {
+                    let (from, to) = if i % 2 == 0 {
+                        (texa.clone(), &mut *texb)
+                    } else {
+                        (texb.clone(), &mut *texa)
+                    };
+                    let pass = (|| -> std::result::Result<(), smithay::backend::renderer::gles::GlesError> {
+                        let mut fb = renderer.bind(to)?;
+                        let mut frame = renderer.render(&mut fb, qsize, Transform::Normal)?;
+                        frame.override_default_tex_program(
+                            blur_prog.clone(),
+                            vec![Uniform::new("dir", [dir.0, dir.1])],
+                        );
+                        let elem = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
+                            smithay::backend::renderer::element::Id::new(),
+                            ctx.clone(),
+                            (0.0, 0.0),
+                            from,
+                            1,
+                            Transform::Normal,
+                            Some(1.0),
+                            None,
+                            None,
+                            None,
+                            Kind::Unspecified,
+                        );
+                        let src = smithay::backend::renderer::element::Element::src(&elem);
+                        let res = RenderElement::<GlesRenderer>::draw(&elem, &mut frame, src, full, &[full], &[], None);
+                        frame.clear_tex_program_override();
+                        res?;
+                        let _ = frame.finish()?;
+                        Ok(())
+                    })();
+                    if let Err(e) = pass {
+                        tracing::warn!(?e, "blur pass failed");
+                        blurred = false;
+                        break;
+                    }
+                }
+            } else if let Err(e) = scene {
+                tracing::warn!(?e, "blur scene pass failed");
+            }
+
+            // Rounded crops of the blurred desktop, one per requesting rect,
+            // spliced in directly beneath the menu.
+            if blurred {
+                for (i, r) in blur_rects.iter().enumerate() {
+                    let src = smithay::utils::Rectangle::<f64, smithay::utils::Logical>::new(
+                        (r.loc.x as f64 / DOWN as f64, r.loc.y as f64 / DOWN as f64).into(),
+                        (r.size.w as f64 / DOWN as f64, r.size.h as f64 / DOWN as f64).into(),
+                    );
+                    let inner = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
+                        smithay::backend::renderer::element::Id::new(),
+                        ctx.clone(),
+                        (r.loc.x as f64, r.loc.y as f64),
+                        texa.clone(),
+                        1,
+                        Transform::Normal,
+                        Some(1.0),
+                        Some(src),
+                        Some(r.size),
+                        None,
+                        Kind::Unspecified,
+                    );
+                    // 16px matches the menu card's CSS border-radius.
+                    let patch = crate::render::BlurElement::new(inner, rounded_prog.clone(), 16.0);
+                    elements.insert(blur_mark + i, OutputRenderElements::Blur(patch));
+                }
+            }
+        }
     }
 
     // Keep the loop hot while animations are in flight.
@@ -959,10 +1227,14 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let clear = Color32F::new(
         theme.background[0], theme.background[1], theme.background[2], 1.0,
     );
-    surface.compositor.render_frame(renderer, &elements, clear, FrameFlags::DEFAULT)
+    let res = surface.compositor.render_frame(renderer, &elements, clear, FrameFlags::DEFAULT)
         .map_err(|e| anyhow::anyhow!("render_frame: {e:?}"))?;
-    surface.compositor.queue_frame(())
-        .map_err(|e| anyhow::anyhow!("queue_frame: {e:?}"))?;
+    // Nothing changed → nothing to flip. Queuing anyway just earns an
+    // EmptyFrame error from DRM (and a warn in the log) every idle frame.
+    if !res.is_empty {
+        surface.compositor.queue_frame(())
+            .map_err(|e| anyhow::anyhow!("queue_frame: {e:?}"))?;
+    }
 
     // Frame callbacks — clients only redraw if we tell them this frame shipped.
     // Without these, alacritty draws once and goes silent.
@@ -1035,6 +1307,13 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                     // chords like super+shift+1 never match because shift
                     // turns the sym into `exclam`.
                     let sym = handle.modified_sym();
+                    // Esc backs out of the overview without needing a bind.
+                    if data.overview
+                        && key_state == smithay::backend::input::KeyState::Pressed
+                        && sym.raw() == smithay::input::keyboard::xkb::keysyms::KEY_Escape
+                    {
+                        return FilterResult::Intercept(Some(crate::input::Action::ToggleOverview));
+                    }
                     crate::input::handle(&data.config, sym.raw(), key_state, mods)
                         .or_else(|| handle.raw_syms().iter().find_map(|s| {
                             crate::input::handle(&data.config, s.raw(), key_state, mods)
@@ -1111,7 +1390,23 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             }
 
             if bstate == smithay::backend::input::ButtonState::Pressed {
-                // Super+LeftDrag = move floating, Super+RightDrag = resize.
+                // Overview: a click picks the cell under the cursor (focus +
+                // zoom back), a miss just closes the overview. Clients never
+                // see this press — the windows aren't really there.
+                if state.overview {
+                    let pos = state.pointer_location;
+                    let hit = state.overview_cells().into_iter()
+                        .find(|(_, cell)| cell.to_f64().contains(pos));
+                    if let Some((window, _)) = hit {
+                        state.focus_window(&window);
+                        state.space.raise_element(&window, true);
+                    }
+                    state.toggle_overview();
+                    return;
+                }
+                // Super+LeftDrag = move (a tiled window detaches in place and
+                // follows the cursor); Super+RightDrag = resize (free-resize
+                // floating, split-ratio drag on tiled).
                 let logo = state.seat.get_keyboard()
                     .map(|k| k.modifier_state().logo)
                     .unwrap_or(false);
@@ -1120,18 +1415,46 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                     let pos = state.pointer_location;
                     let target = state.space.element_under(pos).map(|(w, _)| w.clone());
                     if let Some(window) = target {
-                        let rect = state.workspaces.active_ref().floating.iter()
+                        let floating_rect = state.workspaces.active_ref().floating.iter()
                             .find(|(w, _)| w == &window)
                             .map(|(_, r)| *r);
-                        if let Some(start_rect) = rect {
-                            state.focus_window_at_cursor();
-                            state.drag = Some(crate::state::Drag {
-                                window,
-                                resize:     code == BTN_RIGHT,
-                                start_ptr:  pos,
+                        let tiled = floating_rect.is_none()
+                            && state.workspaces.active_ref().tree.contains(&window);
+                        let drag = match (floating_rect, tiled, code) {
+                            (Some(start_rect), _, _) => Some(crate::state::Drag {
+                                window:      window.clone(),
+                                resize:      code == BTN_RIGHT,
+                                tile_resize: false,
+                                start_ptr:   pos,
                                 start_rect,
-                                started:    std::time::Instant::now(),
-                            });
+                                started:     std::time::Instant::now(),
+                            }),
+                            (None, true, BTN_LEFT) => {
+                                state.space.element_geometry(&window).map(|geo| {
+                                    state.float_window_at(&window, geo);
+                                    crate::state::Drag {
+                                        window:      window.clone(),
+                                        resize:      false,
+                                        tile_resize: false,
+                                        start_ptr:   pos,
+                                        start_rect:  geo,
+                                        started:     std::time::Instant::now(),
+                                    }
+                                })
+                            }
+                            (None, true, BTN_RIGHT) => Some(crate::state::Drag {
+                                window:      window.clone(),
+                                resize:      true,
+                                tile_resize: true,
+                                start_ptr:   pos,
+                                start_rect:  Default::default(),
+                                started:     std::time::Instant::now(),
+                            }),
+                            _ => None,
+                        };
+                        if let Some(drag) = drag {
+                            state.focus_window_at_cursor();
+                            state.drag = Some(drag);
                             return;   // the client never sees this press
                         }
                     }
@@ -1192,8 +1515,13 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                     }
                 }
                 4 if dy.abs() >= 120.0 && dy.abs() > dx.abs() => {
-                    let cmd = if dy < 0.0 { "vendi-menu" } else { "vendi-menu actions" };
-                    let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+                    if dy < 0.0 {
+                        // Swipe up — Mission Control.
+                        state.run_action(crate::input::Action::ToggleOverview);
+                    } else {
+                        let _ = std::process::Command::new("sh")
+                            .arg("-c").arg("vendi-menu actions").spawn();
+                    }
                 }
                 _ => {}
             }

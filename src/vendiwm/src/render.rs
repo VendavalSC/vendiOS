@@ -16,8 +16,9 @@ use smithay::{
                 Element, Id, Kind, RenderElement, UnderlyingStorage,
                 memory::MemoryRenderBuffer,
                 surface::WaylandSurfaceRenderElement,
+                texture::TextureRenderElement,
             },
-            gles::{GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform},
+            gles::{GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform},
             utils::{CommitCounter, DamageSet, OpaqueRegions},
         },
     },
@@ -72,6 +73,43 @@ void main() {
         color = vec4(0.0, 0.3, 0.0, 0.2) + color * 0.8;
 #endif
     gl_FragColor = color;
+}
+"#;
+
+/// Separable gaussian blur pass (texture shader). `dir` carries the sample
+/// step in UV space — (r/w, 0) for the horizontal pass, (0, r/h) for the
+/// vertical one. Run over a downscaled copy of the desktop; the downscale
+/// itself contributes most of the softness.
+pub const BLUR_FRAG: &str = r#"#version 100
+//_DEFINES
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision mediump float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+uniform vec2 dir;
+
+void main() {
+    vec4 sum = texture2D(tex, v_coords) * 0.2270270270;
+    sum += texture2D(tex, v_coords + dir * 1.3846153846) * 0.3162162162;
+    sum += texture2D(tex, v_coords - dir * 1.3846153846) * 0.3162162162;
+    sum += texture2D(tex, v_coords + dir * 3.2307692308) * 0.0702702703;
+    sum += texture2D(tex, v_coords - dir * 3.2307692308) * 0.0702702703;
+    gl_FragColor = sum * alpha;
 }
 "#;
 
@@ -272,6 +310,70 @@ impl RenderElement<GlesRenderer> for RoundedElement {
 
     fn underlying_storage(&self, _renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
         // Refuse direct scanout: the corners only exist when the shader runs.
+        None
+    }
+}
+
+/// Frosted-glass patch: a crop of the blurred desktop texture, drawn through
+/// the rounded-corner shader so it hugs the card it sits behind (vendi-menu).
+pub struct BlurElement {
+    inner:   TextureRenderElement<GlesTexture>,
+    program: GlesTexProgram,
+    radius:  f32,
+}
+
+impl BlurElement {
+    pub fn new(
+        inner: TextureRenderElement<GlesTexture>,
+        program: GlesTexProgram,
+        radius: f32,
+    ) -> Self {
+        Self { inner, program, radius }
+    }
+}
+
+impl Element for BlurElement {
+    fn id(&self) -> &Id { self.inner.id() }
+    fn current_commit(&self) -> CommitCounter { self.inner.current_commit() }
+    fn location(&self, scale: Scale<f64>) -> Point<i32, Physical> { self.inner.location(scale) }
+    fn src(&self) -> Rectangle<f64, BufferCoords> { self.inner.src() }
+    fn transform(&self) -> Transform { self.inner.transform() }
+    fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> { self.inner.geometry(scale) }
+    fn damage_since(&self, scale: Scale<f64>, commit: Option<CommitCounter>) -> DamageSet<i32, Physical> {
+        self.inner.damage_since(scale, commit)
+    }
+    fn opaque_regions(&self, _scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        OpaqueRegions::default()
+    }
+    fn alpha(&self) -> f32 { self.inner.alpha() }
+    fn kind(&self) -> Kind { self.inner.kind() }
+}
+
+impl RenderElement<GlesRenderer> for BlurElement {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        src: Rectangle<f64, BufferCoords>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        cache: Option<&smithay::utils::user_data::UserDataMap>,
+    ) -> Result<(), GlesError> {
+        frame.override_default_tex_program(
+            self.program.clone(),
+            vec![
+                Uniform::new("size", (dst.size.w as f32, dst.size.h as f32)),
+                Uniform::new("radius", self.radius),
+            ],
+        );
+        let res = RenderElement::<GlesRenderer>::draw(
+            &self.inner, frame, src, dst, damage, opaque_regions, cache,
+        );
+        frame.clear_tex_program_override();
+        res
+    }
+
+    fn underlying_storage(&self, _renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
         None
     }
 }

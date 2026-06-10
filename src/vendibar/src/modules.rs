@@ -43,10 +43,11 @@ pub fn music() -> gtk::Box {
     let playing = Rc::new(Cell::new(false));
     {
         let (phase, playing) = (phase.clone(), playing.clone());
+        let (ar, ag, ab) = accent_rgb();
         eq.set_draw_func(move |_, cr, w, h| {
             const BARS: usize = 4;
             let (w, h) = (w as f64, h as f64);
-            cr.set_source_rgba(0.796, 0.651, 0.969, 1.0);   // mauve
+            cr.set_source_rgba(ar, ag, ab, 1.0);
             let slot = w / BARS as f64;
             let bw = slot * 0.62;
             let t = phase.get();
@@ -293,6 +294,29 @@ fn refresh_battery(label: &gtk::Label) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Theme accent for cairo-drawn widgets (logo, equalizer). `vendi theme`
+/// writes ACCENT_HEX into ~/.config/vendi/theme-state; default is Mauve.
+pub fn accent_rgb() -> (f64, f64, f64) {
+    let path = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .map(|p| p.join("vendi/theme-state"));
+    if let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) {
+        for line in text.lines() {
+            if let Some(hex) = line.trim().strip_prefix("ACCENT_HEX=") {
+                let hex = hex.trim();
+                if hex.len() == 6 {
+                    let p = |i| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+                    if let (Some(r), Some(g), Some(b)) = (p(0), p(2), p(4)) {
+                        return (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+                    }
+                }
+            }
+        }
+    }
+    (0.796, 0.651, 0.969)   // mauve
+}
 
 fn read_cmd(argv: &[&str]) -> Option<String> {
     let out = std::process::Command::new(argv[0]).args(&argv[1..]).output().ok()?;
