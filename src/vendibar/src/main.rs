@@ -86,9 +86,10 @@ fn build_ui(app: &gtk::Application) {
     // ── center: clock ────────────────────────────────────────────────────────
     let clock = modules::clock();
 
-    // ── right: volume · network · battery ──────────────────────────────────
+    // ── right: music · volume · network · battery ──────────────────────────
     let right = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     right.add_css_class("status");
+    right.append(&modules::music());
     right.append(&modules::volume());
     right.append(&modules::network());
     if let Some(battery) = modules::battery() {

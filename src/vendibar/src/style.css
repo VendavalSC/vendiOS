@@ -57,3 +57,15 @@ window {
 .status .muted       { color: #585b70; }
 .status .offline     { color: #585b70; }
 .status .low         { color: #f38ba8; }   /* Red — battery critical */
+
+/* ── music: animated eq bars + now playing ───────────────────────────── */
+.music {
+  padding: 0 7px;
+}
+.music-label {
+  padding: 0;
+  color: #a6adc8;
+  font-size: 12px;
+  transition: color 150ms ease;
+}
+.music:hover .music-label { color: #cba6f7; }

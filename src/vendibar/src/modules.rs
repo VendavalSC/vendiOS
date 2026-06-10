@@ -1,7 +1,8 @@
-// System modules: clock, volume, network, battery.
+// System modules: clock, music, volume, network, battery.
 //
 // Each returns a finished widget that keeps itself updated with glib timers.
-// Everything reads cheap sources (/sys, wpctl) — no daemons, no D-Bus yet.
+// Everything reads cheap sources (/sys, wpctl, playerctl) — no daemons, no
+// D-Bus bindings yet.
 
 use gtk4 as gtk;
 use gtk::{glib, prelude::*};
@@ -17,6 +18,135 @@ pub fn clock() -> gtk::Label {
     tick();
     glib::timeout_add_seconds_local(5, move || { tick(); glib::ControlFlow::Continue });
     label
+}
+
+/// MPRIS now-playing widget: a tiny animated equalizer + "artist – title".
+/// Hidden entirely when no player is running. Click toggles play/pause,
+/// scroll skips next/previous. Polls playerctl — same zero-daemon approach
+/// as the other modules.
+pub fn music() -> gtk::Box {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    row.add_css_class("music");
+    row.set_visible(false);
+
+    // ── the equalizer ────────────────────────────────────────────────────────
+    // Four cairo bars bobbing on offset sine waves while playing; calm low
+    // bars while paused. The clock only ticks while music actually plays.
+    let eq = gtk::DrawingArea::new();
+    eq.set_content_width(15);
+    eq.set_content_height(13);
+    eq.set_valign(gtk::Align::Center);
+    let phase   = Rc::new(Cell::new(0.0_f64));
+    let playing = Rc::new(Cell::new(false));
+    {
+        let (phase, playing) = (phase.clone(), playing.clone());
+        eq.set_draw_func(move |_, cr, w, h| {
+            const BARS: usize = 4;
+            let (w, h) = (w as f64, h as f64);
+            cr.set_source_rgba(0.796, 0.651, 0.969, 1.0);   // mauve
+            let slot = w / BARS as f64;
+            let bw = slot * 0.62;
+            let t = phase.get();
+            for i in 0..BARS {
+                let level = if playing.get() {
+                    0.25 + 0.75 * (t * 1.0 + i as f64 * 1.9).sin().abs()
+                } else {
+                    0.22
+                };
+                let bh = (level * h).max(2.0);
+                let x = i as f64 * slot;
+                // Rounded caps: a rectangle with a small radius via arcs is
+                // overkill at this size — a 1px-radius rectangle reads fine.
+                cr.rectangle(x, h - bh, bw, bh);
+            }
+            let _ = cr.fill();
+        });
+    }
+    {
+        let (phase, playing, eq) = (phase.clone(), playing.clone(), eq.clone());
+        glib::timeout_add_local(std::time::Duration::from_millis(90), move || {
+            if playing.get() && eq.is_visible() {
+                phase.set(phase.get() + 0.55);
+                eq.queue_draw();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    let label = gtk::Label::new(None);
+    label.add_css_class("music-label");
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_max_width_chars(28);
+
+    row.append(&eq);
+    row.append(&label);
+
+    // ── state poll ───────────────────────────────────────────────────────────
+    let refresh: Rc<dyn Fn()> = {
+        let (playing, row, label, eq) = (playing.clone(), row.clone(), label.clone(), eq.clone());
+        Rc::new(move || {
+            let status = read_cmd(&["playerctl", "status"])
+                .map(|s| s.trim().to_string());
+            match status.as_deref() {
+                Some("Playing") | Some("Paused") => {
+                    let is_playing = status.as_deref() == Some("Playing");
+                    if playing.replace(is_playing) != is_playing {
+                        eq.queue_draw();
+                    }
+                    let artist = read_cmd(&["playerctl", "metadata", "artist"])
+                        .map(|s| s.trim().to_string()).unwrap_or_default();
+                    let title = read_cmd(&["playerctl", "metadata", "title"])
+                        .map(|s| s.trim().to_string()).unwrap_or_default();
+                    let text = match (artist.is_empty(), title.is_empty()) {
+                        (false, false) => format!("{artist} – {title}"),
+                        (true, false)  => title,
+                        _              => "playing".into(),
+                    };
+                    label.set_text(&text);
+                    row.set_visible(true);
+                }
+                _ => {
+                    playing.set(false);
+                    row.set_visible(false);
+                }
+            }
+        })
+    };
+    refresh();
+    {
+        let refresh = refresh.clone();
+        glib::timeout_add_seconds_local(2, move || {
+            refresh();
+            glib::ControlFlow::Continue
+        });
+    }
+
+    // ── controls ─────────────────────────────────────────────────────────────
+    let click = gtk::GestureClick::new();
+    {
+        let refresh = refresh.clone();
+        click.connect_released(move |_, _, _, _| {
+            run(&["playerctl", "play-pause"]);
+            refresh();
+        });
+    }
+    row.add_controller(click);
+
+    let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    {
+        let refresh = refresh.clone();
+        scroll.connect_scroll(move |_, _, dy| {
+            run(&["playerctl", if dy < 0.0 { "next" } else { "previous" }]);
+            refresh();
+            glib::Propagation::Stop
+        });
+    }
+    row.add_controller(scroll);
+
+    row
 }
 
 /// Volume readout via wpctl. Click toggles mute, scroll adjusts ±2%.
