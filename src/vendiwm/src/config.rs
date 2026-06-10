@@ -38,7 +38,7 @@ binds {
     bind "super+tab"           "focus-next"
     bind "super+shift+tab"     "focus-prev"
     bind "super+k"             "spawn vendi-menu keys"
-    bind "super+escape"        "spawn swaylock -f"
+    bind "super+escape"        "lock"
     bind "super+left"          "focus-left"
     bind "super+right"         "focus-right"
     bind "super+up"            "focus-up"
@@ -345,6 +345,7 @@ fn parse_action(s: &str) -> Result<Action> {
         "toggle-floating"   => Action::ToggleFloating,
         "fullscreen"        => Action::ToggleFullscreen,
         "overview"          => Action::ToggleOverview,
+        "lock"              => Action::Lock,
         "quit"              => Action::Quit,
         other => anyhow::bail!("unknown action verb {other:?}"),
     })

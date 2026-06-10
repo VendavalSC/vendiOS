@@ -90,7 +90,7 @@ fn root_menu() -> Rc<MenuDef> {
     let power = MenuDef {
         title: "Power",
         items: vec![
-            sh("\u{f033e}", "Lock",             "swaylock -f"),
+            sh("\u{f033e}", "Lock",             "vendi-ctl lock"),
             sh("\u{f04b2}", "Suspend",          "systemctl suspend"),
             sh("\u{f0450}", "Relaunch session", "pkill -x vendiwm"),
             sh("\u{f0709}", "Restart",          "systemctl reboot"),

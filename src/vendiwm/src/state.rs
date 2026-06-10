@@ -114,6 +114,14 @@ pub struct State {
     // One-shot screenshot request from IPC: render the next frame to this
     // PNG path (the backend services and clears it).
     pub screenshot:            Option<String>,
+    /// vendi-lock — the native lock screen (distinct from the
+    /// ext-session-lock fields above, which serve external lockers like
+    /// swaylock): while active, rendering shows only the lock screen and
+    /// keyboard input feeds the password buffer.
+    pub vlock:                 bool,
+    pub vlock_input:           String,
+    /// Set on a failed unlock attempt — drives the red flash.
+    pub vlock_fail:            Option<std::time::Instant>,
 
     // Last layer-shell non-exclusive zone — relayout only runs when a layer
     // commit actually changes it. Without this, every bar/menu frame would
@@ -937,6 +945,7 @@ impl State {
             ToggleFloating      => self.toggle_floating(),
             ToggleFullscreen    => self.toggle_fullscreen(),
             ToggleOverview      => self.toggle_overview(),
+            Lock                => self.lock_session(),
             Quit => { self.quit_requested = true; return true; }
         }
         false
@@ -1150,6 +1159,46 @@ impl State {
     /// Flat (window, cell) list — the morph and hit-test view of the layout.
     pub fn overview_cells(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
         self.overview_layout().cells.into_iter().map(|(w, r, _)| (w, r)).collect()
+    }
+
+    /// Lock the session: the renderer switches to the lock screen and the
+    /// keyboard filter routes everything into the password buffer.
+    pub fn lock_session(&mut self) {
+        if self.vlock { return; }
+        tracing::info!("session locked");
+        self.vlock = true;
+        self.vlock_input.clear();
+        self.vlock_fail = None;
+        self.drag = None;
+        self.overview = false;
+        self.pending_redraw = true;
+    }
+
+    /// Try the buffered password against PAM (same stack as login). The
+    /// buffer is consumed either way.
+    pub fn lock_submit(&mut self) {
+        let pass = std::mem::take(&mut self.vlock_input);
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| {
+                users::get_current_username()
+                    .map(|u| u.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let ok = (|| {
+            let mut auth = pam::Authenticator::with_password("system-auth").ok()?;
+            auth.get_handler().set_credentials(user.as_str(), pass.as_str());
+            auth.authenticate().ok()
+        })().is_some();
+        if ok {
+            tracing::info!("session unlocked");
+            self.vlock = false;
+            self.vlock_fail = None;
+        } else {
+            tracing::info!("unlock failed");
+            self.vlock_fail = Some(std::time::Instant::now());
+        }
+        self.pending_redraw = true;
     }
 
     /// Focus + raise a specific window (overview click).

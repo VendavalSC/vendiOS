@@ -412,6 +412,9 @@ fn build_state(
         overview:               false,
         overview_t:             std::time::Instant::now(),
         screenshot:             None,
+        vlock: false,
+        vlock_input: String::new(),
+        vlock_fail: None,
         last_zone:              None,
         open_anims:             Vec::new(),
         ws_anim:                None,
@@ -853,6 +856,10 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         .map(|g| g.loc)
         .unwrap_or_default();
 
+    // vendi-lock: while locked nothing of the desktop may reach the frame —
+    // windows, layers, ghosts, and the cursor are all skipped below.
+    let locked = state.vlock;
+
     let scale = smithay::utils::Scale::from(1.0_f64);
 
     // ── session lock: render ONLY the lock surface ──────────────────────────
@@ -980,9 +987,10 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let ov_e = ease_out(
         (now.duration_since(state.overview_t).as_secs_f32() * 1000.0 / OVERVIEW_MS).min(1.0),
     );
-    let wallpaper_alpha = if state.overview { 1.0 - 0.55 * ov_e } else { 0.45 + 0.55 * ov_e };
+    let wallpaper_alpha = if locked { 0.30 } else if state.overview { 1.0 - 0.55 * ov_e } else { 0.45 + 0.55 * ov_e };
 
     let anims_active = state.ws_anim.is_some()
+        || state.vlock_fail.map(|t| now.duration_since(t).as_secs_f32() < 1.0).unwrap_or(false)
         || !state.open_anims.is_empty()
         || !state.geo_anims.is_empty()
         || !closing_anims.is_empty()
@@ -996,7 +1004,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // A fullscreen window hides the Top layer (the bar) — only Overlay
     // surfaces (e.g. a lock screen) stay above it, per the wlr spec.
     let fullscreen_active = state.workspaces.active_ref().fullscreen.is_some();
-    {
+    if !locked {
         let layer_map = layer_map_for_output(&surface.output);
         // `layer_geometry` returns location relative to the output; we feed it
         // to render_elements in physical px so the surface lands where the
@@ -1041,16 +1049,18 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         state.pointer_location.x - out_loc.x as f64 - cursor.hotspot.0 as f64,
         state.pointer_location.y - out_loc.y as f64 - cursor.hotspot.1 as f64,
     ));
-    if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
-        renderer,
-        pointer_phys,
-        &cursor.buffer,
-        None,
-        None,
-        None,
-        Kind::Cursor,
-    ) {
-        elements.push(OutputRenderElements::Memory(elem));
+    if !locked {
+        if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            pointer_phys,
+            &cursor.buffer,
+            None,
+            None,
+            None,
+            Kind::Cursor,
+        ) {
+            elements.push(OutputRenderElements::Memory(elem));
+        }
     }
     // Screenshots skip everything up to here (i.e. the cursor).
     let after_cursor = elements.len();
@@ -1065,7 +1075,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
 
     // Close ghosts — above live windows (the dying window was usually on top).
     let ctx = smithay::backend::renderer::Renderer::context_id(renderer);
-    for (eid, tex, geo, t) in closing_anims.iter() {
+    for (eid, tex, geo, t) in closing_anims.iter().filter(|_| !locked) {
         let e = ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / CLOSE_MS).min(1.0));
         let shrink = 1.0 - 0.15 * e as f64;
         let size = smithay::utils::Size::<i32, smithay::utils::Logical>::from((
@@ -1099,7 +1109,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let border_w = theme.border;
     let focused_surf = state.seat.get_keyboard().and_then(|k| k.current_focus());
     let fullscreen = state.workspaces.active_ref().fullscreen.clone();
-    let stacked: Vec<_> = state.space.elements().cloned().collect();
+    let stacked: Vec<_> = if locked { Vec::new() } else { state.space.elements().cloned().collect() };
     let mut live_ids: Vec<u32> = Vec::with_capacity(stacked.len());
     for window in stacked.iter().rev() {
         let Some(geo) = state.space.element_geometry(window) else { continue };
@@ -1300,7 +1310,64 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     }
 
     // Lower layers (Bottom/Background) → below windows and borders.
-    elements.extend(lower_layer_elems.into_iter().map(OutputRenderElements::Layer));
+    if !locked {
+        elements.extend(lower_layer_elems.into_iter().map(OutputRenderElements::Layer));
+    }
+
+    // vendi-lock UI: a row of accent password dots over the dimmed
+    // wallpaper (red while an attempt just failed); a hollow hint ring
+    // marks the locked state while the buffer is empty.
+    if locked {
+        let osize = state.space.output_geometry(&surface.output)
+            .map(|g| g.size)
+            .unwrap_or((1, 1).into());
+        let failed = state.vlock_fail
+            .map(|t| now.duration_since(t).as_secs_f32() < 0.8)
+            .unwrap_or(false);
+        let color = if failed { [0.886, 0.137, 0.102, 1.0] } else { theme.accent };
+        let n = state.vlock_input.chars().count().min(32) as i32;
+        let cy = (osize.h as f32 * 0.60) as i32;
+        if n == 0 {
+            let ring = PixelShaderElement::new(
+                border_prog.clone(),
+                smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
+                    (osize.w / 2 - 14, cy - 14).into(), (28, 28).into(),
+                ),
+                None,
+                0.9,
+                vec![
+                    Uniform::new("color", color),
+                    Uniform::new("radius", 14.0),
+                    Uniform::new("thickness", 2.0),
+                ],
+                Kind::Unspecified,
+            );
+            elements.push(OutputRenderElements::Pixel(
+                RescaleRenderElement::from_element(ring, (0, 0).into(), 1.0),
+            ));
+        }
+        let gap = 34;
+        let x0 = osize.w / 2 - (n * gap) / 2;
+        for i in 0..n {
+            let dot = PixelShaderElement::new(
+                border_prog.clone(),
+                smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
+                    (x0 + i * gap + gap / 2 - 7, cy - 7).into(), (14, 14).into(),
+                ),
+                None,
+                1.0,
+                vec![
+                    Uniform::new("color", color),
+                    Uniform::new("radius", 7.0),
+                    Uniform::new("thickness", 7.0),
+                ],
+                Kind::Unspecified,
+            );
+            elements.push(OutputRenderElements::Pixel(
+                RescaleRenderElement::from_element(dot, (0, 0).into(), 1.0),
+            ));
+        }
+    }
 
     // Wallpaper — the very back of the stack. Dimmed in overview.
     if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
@@ -1586,6 +1653,31 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                     // chords like super+shift+1 never match because shift
                     // turns the sym into `exclam`.
                     let sym = handle.modified_sym();
+                    // vendi-lock: every key feeds the password buffer;
+                    // nothing reaches clients or binds.
+                    if data.vlock {
+                        if key_state == smithay::backend::input::KeyState::Pressed {
+                            use smithay::input::keyboard::xkb::keysyms;
+                            match sym.raw() {
+                                keysyms::KEY_Return | keysyms::KEY_KP_Enter => data.lock_submit(),
+                                keysyms::KEY_Escape => {
+                                    data.vlock_input.clear();
+                                    data.pending_redraw = true;
+                                }
+                                keysyms::KEY_BackSpace => {
+                                    data.vlock_input.pop();
+                                    data.pending_redraw = true;
+                                }
+                                _ => {
+                                    if let Some(c) = sym.key_char().filter(|c| !c.is_control()) {
+                                        data.vlock_input.push(c);
+                                        data.pending_redraw = true;
+                                    }
+                                }
+                            }
+                        }
+                        return FilterResult::Intercept(None);
+                    }
                     // Esc backs out of the overview without needing a bind.
                     if data.overview
                         && key_state == smithay::backend::input::KeyState::Pressed
@@ -1609,6 +1701,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
 
         // ── pointer motion (relative — typical of mice) ──────────────────────
         InputEvent::PointerMotion { event } => {
+            if state.vlock { return; }
             let Some(pointer) = state.seat.get_pointer() else { return };
             let delta_x = event.delta_x();
             let delta_y = event.delta_y();
@@ -1632,6 +1725,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
 
         // ── pointer motion (absolute — touchscreens/tablets) ─────────────────
         InputEvent::PointerMotionAbsolute { event } => {
+            if state.vlock { return; }
             let Some(pointer) = state.seat.get_pointer() else { return };
             let Some(output) = state.space.outputs().next().cloned() else { return };
             let Some(geo) = state.space.output_geometry(&output) else { return };
@@ -1650,6 +1744,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
 
         // ── click ────────────────────────────────────────────────────────────
         InputEvent::PointerButton { event } => {
+            if state.vlock { return; }
             let Some(pointer) = state.seat.get_pointer() else { return };
             let bstate = event.state();
             const BTN_LEFT:  u32 = 0x110;
@@ -1764,6 +1859,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
 
         // ── scroll ──────────────────────────────────────────────────────────
         InputEvent::PointerAxis { event } => {
+            if state.vlock { return; }
             use smithay::backend::input::{Axis, AxisSource};
             let Some(pointer) = state.seat.get_pointer() else { return };
             let mut frame = AxisFrame::new(InputEventTrait::time_msec(&event))
@@ -1782,10 +1878,12 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
         // 3 fingers horizontal: workspace switch. 4 fingers vertical: swipe
         // up opens the launcher, down the actions menu.
         InputEvent::GestureSwipeBegin { event } => {
+            if state.vlock { return; }
             use smithay::backend::input::GestureBeginEvent;
             state.swipe = Some((event.fingers(), 0.0, 0.0));
         }
         InputEvent::GestureSwipeUpdate { event } => {
+            if state.vlock { return; }
             use smithay::backend::input::GestureSwipeUpdateEvent as _;
             if let Some((_, dx, dy)) = state.swipe.as_mut() {
                 *dx += event.delta_x();
@@ -1793,6 +1891,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             }
         }
         InputEvent::GestureSwipeEnd { event } => {
+            if state.vlock { return; }
             use smithay::backend::input::GestureEndEvent;
             let Some((fingers, dx, dy)) = state.swipe.take() else { return };
             if event.cancelled() { return; }

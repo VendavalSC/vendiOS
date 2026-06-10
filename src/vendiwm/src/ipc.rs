@@ -48,6 +48,8 @@ pub enum Request {
     Subscribe     { events: Vec<EventKind> },
     /// Capture the next composed frame to a PNG (default /tmp/vendiwm-shot.png).
     Screenshot    { path: Option<String> },
+    /// Lock the session (vendi-lock, the compositor-native lock screen).
+    Lock,
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,6 +327,10 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
         Request::Screenshot { path } => {
             state.screenshot = Some(path.unwrap_or_else(|| "/tmp/vendiwm-shot.png".into()));
             state.pending_redraw = true;
+            Response::Ok { ok: true }
+        }
+        Request::Lock => {
+            state.lock_session();
             Response::Ok { ok: true }
         }
     };

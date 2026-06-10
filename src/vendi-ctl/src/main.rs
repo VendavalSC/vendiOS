@@ -31,6 +31,7 @@ fn main() -> Result<()> {
         "close"            => close_cmd(&args[1..]),
         "list-windows"     => ipc_call(json!({"cmd": "list-windows"})),
         "list-workspaces"  => ipc_call(json!({"cmd": "list-workspaces"})),
+        "lock"             => ipc_call(json!({"cmd": "lock"})),
         "split"            => split_cmd(&args[1..]),
         "move"             => move_cmd(&args[1..]),
         "subscribe"        => subscribe_cmd(&args[1..]),
@@ -48,6 +49,7 @@ Usage:
   vendi-ctl close [window-id]           close a window (default: focused)
   vendi-ctl list-windows                snapshot of windows
   vendi-ctl list-workspaces             snapshot of workspaces
+  vendi-ctl lock                        lock the session (vendi-lock)
   vendi-ctl split horizontal|vertical   set next-split direction
   vendi-ctl move <window-id> <ws-id>    move window to a workspace
   vendi-ctl subscribe <event>           stream events (window, workspace)
@@ -60,9 +62,23 @@ fn socket_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("VENDIWM_SOCK") {
         return Ok(PathBuf::from(p));
     }
-    let rt = std::env::var_os("XDG_RUNTIME_DIR")
-        .ok_or_else(|| anyhow::anyhow!("XDG_RUNTIME_DIR not set"))?;
-    Ok(PathBuf::from(rt).join("vendiwm-1.ipc.sock"))
+    let rt = PathBuf::from(
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .ok_or_else(|| anyhow::anyhow!("XDG_RUNTIME_DIR not set"))?,
+    );
+    // The IPC socket is named after the wayland socket ("wayland-1.ipc.sock").
+    if let Ok(wl) = std::env::var("WAYLAND_DISPLAY") {
+        let p = rt.join(format!("{wl}.ipc.sock"));
+        if p.exists() { return Ok(p); }
+    }
+    // Fall back to scanning for any *.ipc.sock (e.g. called from a tty).
+    if let Ok(entries) = std::fs::read_dir(&rt) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".ipc.sock") { return Ok(e.path()); }
+        }
+    }
+    Ok(rt.join("vendiwm-1.ipc.sock"))
 }
 
 fn connect() -> Result<UnixStream> {
