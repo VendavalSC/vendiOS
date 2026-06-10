@@ -109,17 +109,20 @@ pub struct State {
     // trigger a configure storm to every toplevel.
     pub last_zone:             Option<Rectangle<i32, Logical>>,
 
-    // Window-open animations: (window, started-at). The render loop fades +
-    // scales these in and prunes finished entries.
-    pub open_anims:            Vec<(Window, std::time::Instant)>,
+    // Window-open animations. The Instant is None until the window's first
+    // frame actually renders — starting the clock at new_toplevel would burn
+    // most of the animation during the configure round-trip, so windows
+    // popped in half-faded. The render loop starts the clock lazily.
+    pub open_anims:            Vec<(Window, Option<std::time::Instant>)>,
 
     // Workspace-switch animation: (started-at, direction). The new desk
     // fades in and slides from the side it lives on (+1 = from the right).
     pub ws_anim:               Option<(std::time::Instant, i32)>,
 
-    // Tile-move animations: (window, previous location, started-at). The
-    // render loop glides each window from its old slot to the new one.
-    pub move_anims:            Vec<(Window, Point<i32, Logical>, std::time::Instant)>,
+    // Layout-morph animations: (window, previous geometry, started-at). The
+    // render loop interpolates location AND size, so tile moves, split
+    // resizes, and fullscreen toggles all glide instead of snapping.
+    pub geo_anims:             Vec<(Window, Rectangle<i32, Logical>, std::time::Instant)>,
 
     // Compiled keybinds + future settings, loaded at startup from KDL.
     pub config:                Config,
@@ -155,6 +158,8 @@ pub struct Drag {
     pub resize:     bool,
     pub start_ptr:  Point<f64, Logical>,
     pub start_rect: Rectangle<i32, Logical>,
+    // When the grab began — the renderer eases in a slight pick-up scale.
+    pub started:    std::time::Instant,
 }
 
 // ── per-client data ──────────────────────────────────────────────────────────
@@ -310,7 +315,7 @@ impl XdgShellHandler for State {
         let window = Window::new_wayland_window(surface);
         self.workspaces.active().tree.insert(window.clone());
         self.workspaces.active().focus_floating = None;
-        self.open_anims.push((window.clone(), std::time::Instant::now()));
+        self.open_anims.push((window.clone(), None));
         self.space.map_element(window, (0, 0), true);
         self.relayout();  // sets size in pending state and sends configure.
         self.update_keyboard_focus();
@@ -920,13 +925,8 @@ impl State {
                 toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
                 toplevel.send_configure();
             }
-            // Tile moved → glide it over (only when it was already mapped).
-            if let Some(old) = self.space.element_location(&window) {
-                if old != rect.loc {
-                    self.move_anims.retain(|(w, _, _)| w != &window);
-                    self.move_anims.push((window.clone(), old, std::time::Instant::now()));
-                }
-            }
+            // Tile moved or resized → morph it over (only when already mapped).
+            self.push_geo_anim(&window, rect);
             self.space.map_element(window, rect.loc, false);
         }
 
@@ -937,6 +937,7 @@ impl State {
                 toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
                 toplevel.send_pending_configure();
             }
+            self.push_geo_anim(&window, rect);
             self.space.map_element(window.clone(), rect.loc, false);
             self.space.raise_element(&window, false);
         }
@@ -948,11 +949,23 @@ impl State {
                 toplevel.with_pending_state(|s| { s.size = Some(geometry.size); });
                 toplevel.send_configure();
             }
+            self.push_geo_anim(&window, geometry);
             self.space.map_element(window.clone(), geometry.loc, false);
             self.space.raise_element(&window, true);
         }
 
         self.pending_redraw = true;
+    }
+
+    /// Queue a layout morph from the window's current geometry to `target`
+    /// (no-op when nothing changed or the window isn't mapped yet). During a
+    /// Super+drag the window must track the pointer 1:1, so drags don't morph.
+    fn push_geo_anim(&mut self, window: &Window, target: Rectangle<i32, Logical>) {
+        if self.drag.as_ref().map(|d| &d.window == window).unwrap_or(false) { return; }
+        let Some(old) = self.space.element_geometry(window) else { return };
+        if old == target { return; }
+        self.geo_anims.retain(|(w, _, _)| w != window);
+        self.geo_anims.push((window.clone(), old, std::time::Instant::now()));
     }
 }
 

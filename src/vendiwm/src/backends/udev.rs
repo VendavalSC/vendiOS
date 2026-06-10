@@ -85,7 +85,9 @@ smithay::backend::renderer::element::render_elements! {
     pub OutputRenderElements<=GlesRenderer>;
     Layer=WaylandSurfaceRenderElement<GlesRenderer>,
     Memory=MemoryRenderBufferRenderElement<GlesRenderer>,
-    Window=RelocateRenderElement<RescaleRenderElement<crate::render::RoundedElement>>,
+    // Two rescale layers: inner = layout morph (non-uniform, anchored at the
+    // window's top-left), outer = open/drag scale (uniform, anchored center).
+    Window=RelocateRenderElement<RescaleRenderElement<RescaleRenderElement<crate::render::RoundedElement>>>,
     Pixel=RescaleRenderElement<PixelShaderElement>,
 }
 
@@ -406,7 +408,7 @@ fn build_state(
         last_zone:              None,
         open_anims:             Vec::new(),
         ws_anim:                None,
-        move_anims:             Vec::new(),
+        geo_anims:              Vec::new(),
         config,
         pointer_location:       (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
@@ -709,9 +711,10 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // Open: fade + scale-in per window. Workspace switch: the whole desk
     // fades + settles. Eased with cubic ease-out; while anything is in
     // flight we keep pending_redraw set so the loop renders every tick.
-    const OPEN_MS: f32 = 260.0;
-    const WS_MS:   f32 = 220.0;
-    const MOVE_MS: f32 = 220.0;
+    const OPEN_MS:  f32 = 260.0;
+    const WS_MS:    f32 = 220.0;
+    const MORPH_MS: f32 = 230.0;
+    const DRAG_MS:  f32 = 120.0;
     fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t).powi(3) }
     // Spring-ish: overshoots the target by ~10% then settles — the iOS feel.
     fn ease_out_back(t: f32) -> f32 {
@@ -722,11 +725,12 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let now = std::time::Instant::now();
     state.open_anims.retain(|(w, t)| {
         smithay::utils::IsAlive::alive(w)
-            && (now.duration_since(*t).as_secs_f32() * 1000.0) < OPEN_MS
+            && t.map(|t| (now.duration_since(t).as_secs_f32() * 1000.0) < OPEN_MS)
+                .unwrap_or(true)
     });
-    state.move_anims.retain(|(w, _, t)| {
+    state.geo_anims.retain(|(w, _, t)| {
         smithay::utils::IsAlive::alive(w)
-            && (now.duration_since(*t).as_secs_f32() * 1000.0) < MOVE_MS
+            && (now.duration_since(*t).as_secs_f32() * 1000.0) < MORPH_MS
     });
     let ws_progress = state.ws_anim.map(|(t, _)| now.duration_since(t).as_secs_f32() * 1000.0 / WS_MS);
     let ws_dir = state.ws_anim.map(|(_, d)| d).unwrap_or(0);
@@ -743,7 +747,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     };
     let anims_active = state.ws_anim.is_some()
         || !state.open_anims.is_empty()
-        || !state.move_anims.is_empty();
+        || !state.geo_anims.is_empty()
+        || state.drag.is_some();
     let theme = state.config.theme.clone();
     let mut upper_layer_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
     let mut lower_layer_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
@@ -817,45 +822,72 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     for window in stacked.iter().rev() {
         let Some(geo) = state.space.element_geometry(window) else { continue };
 
+        // The open clock starts on the first frame the window has committed
+        // content — starting it at new_toplevel let the configure round-trip
+        // eat most of the animation, so windows popped in half-faded. Until
+        // then the window isn't drawn at all.
+        let committed = window.geometry().size;
+        if committed.w > 0 && committed.h > 0 {
+            if let Some((_, started)) = state.open_anims.iter_mut().find(|(w, _)| w == window) {
+                if started.is_none() { *started = Some(now); }
+            }
+        } else if state.open_anims.iter().any(|(w, _)| w == window) {
+            continue;
+        }
+
         // Per-window open animation on top of the workspace-switch one.
         // Alpha eases out plainly; scale takes the spring (slight overshoot).
         let open_t = state.open_anims.iter()
             .find(|(w, _)| w == window)
-            .map(|(_, t)| (now.duration_since(*t).as_secs_f32() * 1000.0 / OPEN_MS).min(1.0));
+            .and_then(|(_, t)| *t)
+            .map(|t| (now.duration_since(t).as_secs_f32() * 1000.0 / OPEN_MS).min(1.0));
         let alpha = ws_alpha * open_t.map(ease_out).unwrap_or(1.0);
-        let scale_anim: f64 = ws_scale
-            * open_t.map(|t| 0.90 + 0.10 * ease_out_back(t) as f64).unwrap_or(1.0);
-
-        // Tile-move glide: offset from the old slot toward the new one.
-        // The workspace slide rides on the same offset.
-        let move_off = state.move_anims.iter()
-            .find(|(w, _, _)| w == window)
-            .map(|(_, from, t)| {
-                let e = ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / MOVE_MS).min(1.0));
-                let dx = ((from.x - geo.loc.x) as f32 * (1.0 - e)).round() as i32;
-                let dy = ((from.y - geo.loc.y) as f32 * (1.0 - e)).round() as i32;
-                (dx, dy)
+        // Super+drag pick-up: ease in a slight grow while the grab holds.
+        let drag_scale: f64 = state.drag.as_ref()
+            .filter(|d| &d.window == window && !d.resize)
+            .map(|d| {
+                let e = ease_out((now.duration_since(d.started).as_secs_f32() * 1000.0 / DRAG_MS).min(1.0));
+                1.0 + 0.02 * e as f64
             })
-            .unwrap_or((0, 0));
-        let move_off = (move_off.0 + ws_off, move_off.1);
+            .unwrap_or(1.0);
+        let scale_anim: f64 = ws_scale
+            * open_t.map(|t| 0.90 + 0.10 * ease_out_back(t) as f64).unwrap_or(1.0)
+            * drag_scale;
 
-        let center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
-            geo.loc.x + move_off.0 + geo.size.w / 2,
-            geo.loc.y + move_off.1 + geo.size.h / 2,
-        ));
+        // Layout morph: interpolate the whole rect (location AND size) from
+        // the old slot, so moves, resizes, and fullscreen toggles glide.
+        // The workspace slide rides on the same rect.
+        let target = state.geo_anims.iter()
+            .find(|(w, _, _)| w == window)
+            .map(|(_, old, t)| {
+                let e = ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / MORPH_MS).min(1.0));
+                let l = |a: i32, b: i32| (a as f32 + (b - a) as f32 * e).round() as i32;
+                smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
+                    (l(old.loc.x, geo.loc.x) + ws_off, l(old.loc.y, geo.loc.y)).into(),
+                    (l(old.size.w, geo.size.w).max(1), l(old.size.h, geo.size.h).max(1)).into(),
+                )
+            })
+            .unwrap_or_else(|| smithay::utils::Rectangle::new(
+                (geo.loc.x + ws_off, geo.loc.y).into(),
+                geo.size,
+            ));
 
         let is_fullscreen = fullscreen.as_ref() == Some(window);
         let radius = if is_fullscreen { 0.0 } else { theme.radius };
 
-        // Border ring (skip on fullscreen).
+        // Border ring, drawn around the interpolated rect (skip on fullscreen).
         if !is_fullscreen {
             let win_surf = window.wl_surface();
             let focused = matches!((&focused_surf, &win_surf), (Some(f), Some(s)) if **s == *f);
             let c = if focused { theme.accent } else { theme.inactive };
             let area = smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
-                (geo.loc.x + move_off.0 - border_w, geo.loc.y + move_off.1 - border_w).into(),
-                (geo.size.w + border_w * 2, geo.size.h + border_w * 2).into(),
+                (target.loc.x - border_w, target.loc.y - border_w).into(),
+                (target.size.w + border_w * 2, target.size.h + border_w * 2).into(),
             );
+            let ring_center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
+                target.loc.x + target.size.w / 2,
+                target.loc.y + target.size.h / 2,
+            ));
             let ring = PixelShaderElement::new(
                 border_prog.clone(),
                 area,
@@ -869,19 +901,35 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                 Kind::Unspecified,
             );
             elements.push(OutputRenderElements::Pixel(
-                RescaleRenderElement::from_element(ring, center, scale_anim),
+                RescaleRenderElement::from_element(ring, ring_center, scale_anim),
             ));
         }
 
-        // Window content (toplevel + subsurfaces + popups), rounded.
+        // Window content (toplevel + subsurfaces + popups), rounded. Inner
+        // rescale = morph from the committed size to the interpolated one
+        // (anchored at the content's top-left); outer rescale = open/drag
+        // scale (anchored at the on-screen center, pre-relocate coords);
+        // relocate shifts everything to the interpolated location.
         let render_loc = (geo.loc - window.geometry().loc).to_physical_precise_round(scale);
         let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             window.render_elements(renderer, render_loc, scale, alpha);
+        let morph_scale = smithay::utils::Scale {
+            x: target.size.w as f64 / geo.size.w.max(1) as f64,
+            y: target.size.h as f64 / geo.size.h.max(1) as f64,
+        };
+        let anchor: smithay::utils::Point<i32, smithay::utils::Physical> =
+            geo.loc.to_physical_precise_round(scale);
+        let content_center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
+            geo.loc.x + target.size.w / 2,
+            geo.loc.y + target.size.h / 2,
+        ));
+        let off = (target.loc.x - geo.loc.x, target.loc.y - geo.loc.y);
         for elem in surfaces {
             let rounded = crate::render::RoundedElement::new(elem, rounded_prog.clone(), radius);
-            let rescaled = RescaleRenderElement::from_element(rounded, center, scale_anim);
+            let morphed = RescaleRenderElement::from_element(rounded, anchor, morph_scale);
+            let rescaled = RescaleRenderElement::from_element(morphed, content_center, scale_anim);
             elements.push(OutputRenderElements::Window(
-                RelocateRenderElement::from_element(rescaled, move_off, Relocate::Relative),
+                RelocateRenderElement::from_element(rescaled, off, Relocate::Relative),
             ));
         }
     }
@@ -1082,6 +1130,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                                 resize:     code == BTN_RIGHT,
                                 start_ptr:  pos,
                                 start_rect,
+                                started:    std::time::Instant::now(),
                             });
                             return;   // the client never sees this press
                         }

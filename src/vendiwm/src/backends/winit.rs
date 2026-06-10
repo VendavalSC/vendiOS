@@ -139,7 +139,7 @@ pub fn run() -> Result<()> {
         last_zone: None,
         open_anims: Vec::new(),
         ws_anim: None,
-        move_anims: Vec::new(),
+        geo_anims: Vec::new(),
         config,
         pointer_location: (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
