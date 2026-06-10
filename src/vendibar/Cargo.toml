@@ -1,0 +1,15 @@
+[package]
+name        = "vendibar"
+version     = "0.0.1"
+edition     = "2021"
+description = "vendiOS status bar — GTK4 + layer-shell, minimal macOS-style"
+
+[dependencies]
+anyhow.workspace = true
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json         = { workspace = true }
+chrono = "0.4"
+gtk4 = { version = "0.11.3", features = ["v4_12"] }
+gtk4-layer-shell = "0.8.0"
+async-channel = "2.5.0"

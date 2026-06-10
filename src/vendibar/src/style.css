@@ -1,0 +1,59 @@
+/* vendibar default theme — Catppuccin Mocha, minimal macOS style.
+ *
+ * The bar is invisible: no background, no borders, no pills. Only the
+ * content reads. Override wholesale at ~/.config/vendi/vendibar.css.
+ */
+
+window {
+  background: transparent;
+}
+
+.bar {
+  padding: 0 14px;
+  font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
+  font-size: 13px;
+  color: #cdd6f4;            /* Mocha text */
+}
+
+.logo {
+  color: #cba6f7;            /* Mauve — the vendi gem */
+  font-size: 15px;
+}
+
+/* ── workspaces: bare numbers, weight carried by color alone ─────────── */
+.workspaces button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  min-height: 0;
+  min-width: 0;
+  padding: 0 7px;
+  margin: 0;
+  color: #585b70;            /* Surface2 — empty workspace */
+  font-size: 13px;
+  transition: color 150ms ease;
+}
+.workspaces button.occupied { color: #a6adc8; }   /* Subtext0 */
+.workspaces button.active   { color: #cba6f7; }   /* Mauve    */
+.workspaces button:hover    { color: #f5c2e7; }   /* Pink     */
+
+.title {
+  color: #7f849c;            /* Overlay1 — present but quiet */
+}
+
+.clock {
+  color: #cdd6f4;
+  font-weight: 600;
+}
+
+/* ── right status: icons + numbers, evenly spaced ────────────────────── */
+.status label {
+  padding: 0 7px;
+  color: #a6adc8;
+  transition: color 150ms ease;
+}
+.status label:hover  { color: #cdd6f4; }
+.status .muted       { color: #585b70; }
+.status .offline     { color: #585b70; }
+.status .low         { color: #f38ba8; }   /* Red — battery critical */
