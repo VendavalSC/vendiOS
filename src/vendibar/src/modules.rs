@@ -174,6 +174,12 @@ pub fn volume() -> gtk::Label {
     }
     label.add_controller(click);
 
+    // Right-click: the audio output picker, floating.
+    let rclick = gtk::GestureClick::new();
+    rclick.set_button(3);
+    rclick.connect_released(|_, _, _, _| spawn_float(&["vendi", "audio"]));
+    label.add_controller(rclick);
+
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     {
         let label = label.clone();
@@ -181,6 +187,12 @@ pub fn volume() -> gtk::Label {
             let dir = if dy < 0.0 { "2%+" } else { "2%-" };
             run(&["wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", dir]);
             refresh_volume(&label);
+            // Accent flash so the change registers at a glance.
+            label.add_css_class("bump");
+            let label = label.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                label.remove_css_class("bump");
+            });
             glib::Propagation::Stop
         });
     }

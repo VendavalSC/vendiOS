@@ -15,10 +15,10 @@ mod keys;
 
 use gtk4 as gtk;
 use gtk::{gdk, glib, prelude::*};
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 
 const APP_ID:    &str = "os.vendi.menu";
-const WIDTH:     i32  = 600;
+const WIDTH:     i32  = 680;
 const MAX_HITS:  usize = 8;
 
 fn main() -> glib::ExitCode {
@@ -83,8 +83,8 @@ fn build_ui(app: &gtk::Application) {
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("vendi-menu"));
     window.set_keyboard_mode(KeyboardMode::Exclusive);
-    window.set_anchor(Edge::Top, true);
-    window.set_margin(Edge::Top, 220);
+    // No anchors: layer-shell centers the surface on the output, and it
+    // stays centered as the results panel grows and shrinks.
     window.set_default_width(WIDTH);
     window.add_css_class("menu");
 

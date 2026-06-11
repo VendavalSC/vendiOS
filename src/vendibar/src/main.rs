@@ -117,7 +117,21 @@ fn build_ui(app: &gtk::Application) {
                 ipc::Msg::Workspaces { active, list } => {
                     render_workspaces(&workspaces, active, &list);
                 }
-                ipc::Msg::Title(text) => title.set_text(&text),
+                ipc::Msg::Title(text) => {
+                    // Quick fade through transparent so title changes read
+                    // as a swap, not a glitchy reflow.
+                    if title.text() != text {
+                        title.add_css_class("swap");
+                        let title = title.clone();
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(130),
+                            move || {
+                                title.set_text(&text);
+                                title.remove_css_class("swap");
+                            },
+                        );
+                    }
+                }
                 ipc::Msg::Disconnected => {
                     // Compositor went away: show base state, keep retrying.
                     title.set_text("");

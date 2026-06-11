@@ -13,6 +13,11 @@ window {
   font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
   font-size: 13px;
   color: #cdd6f4;            /* Mocha text */
+  animation: bar-in 360ms ease-out;
+}
+@keyframes bar-in {
+  from { opacity: 0; margin-top: -10px; }
+  to   { opacity: 1; margin-top: 0; }
 }
 
 .logo {
@@ -40,7 +45,9 @@ window {
 
 .title {
   color: #7f849c;            /* Overlay1 — present but quiet */
+  transition: opacity 130ms ease;
 }
+.title.swap { opacity: 0; }
 
 .clock {
   color: #cdd6f4;
@@ -54,6 +61,7 @@ window {
   transition: color 150ms ease;
 }
 .status label:hover  { color: #cdd6f4; }
+.status .bump        { color: #cba6f7; }   /* volume flash */
 .status .muted       { color: #585b70; }
 .status .offline     { color: #585b70; }
 .status .low         { color: #f38ba8; }   /* Red — battery critical */

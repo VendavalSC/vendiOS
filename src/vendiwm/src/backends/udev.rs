@@ -1956,6 +1956,9 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                             .map(|(_, r)| *r);
                         let tiled = floating_rect.is_none()
                             && state.workspaces.active_ref().tree.contains(&window);
+                        // Move/resize drags only act on floating windows —
+                        // tiles stay tiled (Super+RightDrag still trades
+                        // split ratios, KDE-style).
                         let drag = match (floating_rect, tiled, code) {
                             (Some(start_rect), _, _) => Some(crate::state::Drag {
                                 window:      window.clone(),
@@ -1965,19 +1968,6 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                                 start_rect,
                                 started:     std::time::Instant::now(),
                             }),
-                            (None, true, BTN_LEFT) => {
-                                state.space.element_geometry(&window).map(|geo| {
-                                    state.float_window_at(&window, geo);
-                                    crate::state::Drag {
-                                        window:      window.clone(),
-                                        resize:      false,
-                                        tile_resize: false,
-                                        start_ptr:   pos,
-                                        start_rect:  geo,
-                                        started:     std::time::Instant::now(),
-                                    }
-                                })
-                            }
                             (None, true, BTN_RIGHT) => Some(crate::state::Drag {
                                 window:      window.clone(),
                                 resize:      true,

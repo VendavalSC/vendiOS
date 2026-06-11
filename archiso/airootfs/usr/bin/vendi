@@ -302,6 +302,11 @@ window { background: transparent; }
   font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
   font-size: 13px;
   color: #${P[text]};
+  animation: bar-in 360ms ease-out;
+}
+@keyframes bar-in {
+  from { opacity: 0; margin-top: -10px; }
+  to   { opacity: 1; margin-top: 0; }
 }
 .logo { color: #${a}; font-size: 15px; }
 .workspaces button {
@@ -313,10 +318,12 @@ window { background: transparent; }
 .workspaces button.occupied { color: #${P[subtext0]}; }
 .workspaces button.active   { color: #${a}; }
 .workspaces button:hover    { color: #${P[pink]}; }
-.title { color: #${P[overlay1]}; }
+.title { color: #${P[overlay1]}; transition: opacity 130ms ease; }
+.title.swap { opacity: 0; }
 .clock { color: #${P[text]}; font-weight: 600; }
 .status label { padding: 0 7px; color: #${P[subtext0]}; transition: color 150ms ease; }
 .status label:hover { color: #${P[text]}; }
+.status .bump   { color: #${a}; }
 .status .muted   { color: #${P[surface2]}; }
 .status .offline { color: #${P[surface2]}; }
 .status .low     { color: #${P[red]}; }
