@@ -30,12 +30,13 @@ CFG_USER=''
 CFG_USER_PASS=''
 CFG_ROOT_PASS=''
 CFG_AUR=1            # install AUR helper (yay)
+CFG_BAR='classic'    # status bar: classic (vendiBar) | pro (vendiBar Pro)
 CFG_SWAP=0
 CFG_SWAP_SIZE=4      # GiB
 CFG_LUKS=1           # encrypt root with LUKS (recommended default)
 CFG_LUKS_PASS=''
 
-STEPS=(welcome locale timezone keyboard disk partmode filesystem encryption users extras confirm install done)
+STEPS=(welcome locale timezone keyboard disk partmode filesystem encryption users bar extras confirm install done)
 TOTAL=${#STEPS[@]}
 STEP=0
 
@@ -369,10 +370,21 @@ step_users() {
         CFG_ROOT_PASS || return 1
 }
 
+# ── step: bar ─────────────────────────────────────────────────────────────────
+step_bar() {
+    local opts=(
+        'vendiBar      —  GTK4 · light on resources · simple but stylish'
+        'vendiBar Pro  —  quickshell · dynamic notch bar · modern looks'
+    )
+    local sel
+    ui_menu "Status Bar" 10 "$TOTAL" sel "${opts[@]}" || return 1
+    [[ "$sel" == 'vendiBar Pro'* ]] && CFG_BAR='pro' || CFG_BAR='classic'
+}
+
 # ── step: extras ──────────────────────────────────────────────────────────────
 step_extras() {
     ui_clear
-    ui_panel_draw 10 "$TOTAL" "Extra Options"
+    ui_panel_draw 11 "$TOTAL" "Extra Options"
     ui_hints "Space:toggle" "Enter:continue" "Esc:back"
 
     local -a labels=(
@@ -421,7 +433,7 @@ step_extras() {
 # ── step: confirm ─────────────────────────────────────────────────────────────
 step_confirm() {
     ui_clear
-    ui_panel_draw 11 "$TOTAL" "Review & Confirm"
+    ui_panel_draw 12 "$TOTAL" "Review & Confirm"
     ui_hints "Enter:install" "Esc:back"
 
     local sx=$(( UI_X+3 ))
@@ -442,6 +454,7 @@ step_confirm() {
     _row 10 "Firmware"   "${FIRMWARE^^}"
     _row 11 "Swap"       "$( [[ $CFG_SWAP -eq 1 ]] && echo "${CFG_SWAP_SIZE} GiB swapfile" || echo 'none' )"
     _row 12 "AUR helper" "$( [[ $CFG_AUR -eq 1 ]] && echo 'yay' || echo 'none' )"
+    _row 13 "Bar"        "$( [[ $CFG_BAR == pro ]] && echo 'vendiBar Pro (quickshell)' || echo 'vendiBar (GTK4)' )"
 
     # Full-disk installs get an unmissable warning band before the point of
     # no return.
@@ -481,7 +494,7 @@ step_install() {
     _ok()  { _at $(( 6+$1 )) $(( UI_X+3 )); printf "${BG_BASE}${FG_GREEN}✓ ${R}${BG_BASE}${FG_SUBTEXT}${2}${R}"; }
 
     ui_clear
-    ui_panel_draw 12 "$TOTAL" "Installing vendiOS"
+    ui_panel_draw 13 "$TOTAL" "Installing vendiOS"
     ui_hints "please wait — do not interrupt"
 
     # The whole checklist up front, dimmed; each _ok below turns a line
@@ -643,6 +656,8 @@ step_install() {
     _status 89 "Configuring desktop environment"
     _log "hyprland + waybar + foot + wofi"
     sys_install_wm "$CFG_USER"
+    mkdir -p "/mnt/home/${CFG_USER}/.config/vendi"
+    echo "$CFG_BAR" > "/mnt/home/${CFG_USER}/.config/vendi/bar"
     _ok 11 "Desktop configured"
 
     # ── 16. AUR helper ────────────────────────────────────────
@@ -674,7 +689,7 @@ step_install() {
 # ── step: done ────────────────────────────────────────────────────────────────
 step_done() {
     ui_clear
-    ui_panel_draw 13 "$TOTAL" "Installation Complete"
+    ui_panel_draw 14 "$TOTAL" "Installation Complete"
     ui_hints "Enter:reboot" "Esc:shell" "L:view log"
 
     local sx=$(( UI_X+3 ))
@@ -724,6 +739,7 @@ main() {
             filesystem) step_filesystem || result=$? ;;
             encryption) step_encryption || result=$? ;;
             users)      step_users      || result=$? ;;
+            bar)        step_bar        || result=$? ;;
             extras)     step_extras     || result=$? ;;
             confirm)    step_confirm    || result=$? ;;
             install)
@@ -731,7 +747,7 @@ main() {
                 # actually exits on the first failed command. (Without the
                 # subshell, the `||` below disables errexit inside it.)
                 if ! ( step_install ); then
-                    ui_clear; ui_panel_draw 11 "$TOTAL" "Installation Failed"
+                    ui_clear; ui_panel_draw 12 "$TOTAL" "Installation Failed"
                     ui_pline 3 "${FG_RED}${BOLD}Installation failed.${R}"
                     ui_pline 5 "${FG_DIM}Log saved to /tmp/vendios-install.log${R}"
                     ui_hints "L:view log" "Esc:back"

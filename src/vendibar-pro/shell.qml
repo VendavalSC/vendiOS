@@ -1,13 +1,13 @@
-// vendibar Pro — seamless notch bar for vendiOS (quickshell/QML).
+// vendibar Pro — dynamic notch bar for vendiOS (quickshell/QML).
 //
-// One continuous silhouette hugging the top edge: a thin strip across the
-// screen with three notches flowing out of it (concave fillets, rounded
-// bottoms), Dynamic-Island style. Notch widths track their content and
-// morph smoothly. Theme accent follows ~/.config/vendi/theme-state live;
-// compositor state over vendi-ctl.    Run: quickshell -c vendibar-pro
+// One silhouette hugging the top edge: a thin strip with three notches
+// flowing out of it. The notches are alive — click the clock and the center
+// notch swells into a dashboard (calendar + media); click the stats and the
+// right notch opens the control center (volume, system, quick actions).
+// Dynamic-Island morphs: widths and heights spring with content.
 //
-//   ┌────────────────────────────────────────────────────────────────┐  ← strip
-//   ╰── shard · ws · title ──╯  ╰── clock · date ──╯  ╰── status ────╯
+// Theme accent follows ~/.config/vendi/theme-state live; compositor state
+// over vendi-ctl.            Run: quickshell -c vendibar-pro
 //
 import Quickshell
 import Quickshell.Io
@@ -20,17 +20,17 @@ ShellRoot {
 
     // ── theme ────────────────────────────────────────────────────────────────
     property color accent: "#cba6f7"
-    property color panel:  Qt.rgba(0.043, 0.043, 0.071, 0.94)   // #0b0b12
+    property color panel:  Qt.rgba(0.043, 0.043, 0.071, 0.96)   // #0b0b12
     property color fg:     "#cdd6f4"
     property color dim:    "#717189"
     property string mono:  "JetBrainsMonoNL Nerd Font"
 
     // geometry
-    readonly property int stripH: 3      // the edge strip between notches
-    readonly property int barH:   38     // notch height including strip
-    readonly property int fillet: 12     // concave curve into the strip
-    readonly property int bcr:    15     // notch bottom corner radius
-    readonly property int pad:    18     // notch content side padding
+    readonly property int stripH: 3
+    readonly property int barH:   38
+    readonly property int fillet: 12
+    readonly property int bcr:    15
+    readonly property int pad:    18
 
     FileView {
         path: Quickshell.env("HOME") + "/.config/vendi/theme-state"
@@ -199,22 +199,59 @@ ShellRoot {
             required property var modelData
             screen: modelData
             anchors { top: true; left: true; right: true }
-            implicitHeight: root.barH
             color: "transparent"
             WlrLayershell.namespace: "vendibar-pro"
 
-            // animated notch widths, driven by content
-            property real lw: leftRow.implicitWidth  + root.pad * 2
-            property real cw: centerRow.implicitWidth + root.pad * 2
-            property real rw: rightRow.implicitWidth + root.pad * 2
+            // ── expansion state ─────────────────────────────────────────────
+            property bool centerOpen: false
+            property bool rightOpen: false
+            function toggleCenter() { centerOpen = !centerOpen; if (centerOpen) rightOpen = false; }
+            function toggleRight()  { rightOpen = !rightOpen;  if (rightOpen) centerOpen = false; }
+
+            // notch dimensions, all springy
+            property real lw: leftRow.implicitWidth + root.pad * 2
+            property real cw: centerOpen ? 470 : centerRow.implicitWidth + root.pad * 2
+            property real rw: rightOpen ? 400 : rightRow.implicitWidth + root.pad * 2
+            property real ch: centerOpen ? 332 : root.barH
+            property real rh: rightOpen ? 296 : root.barH
             Behavior on lw { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
-            Behavior on cw { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
-            Behavior on rw { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            Behavior on cw { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+            Behavior on rw { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+            Behavior on ch { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+            Behavior on rh { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
             onLwChanged: silhouette.requestPaint()
             onCwChanged: silhouette.requestPaint()
             onRwChanged: silhouette.requestPaint()
+            onChChanged: silhouette.requestPaint()
+            onRhChanged: silhouette.requestPaint()
 
-            // ── the silhouette: strip + three seamless notches ──────────────
+            // the window grows with the tallest notch; the desktop never
+            // reflows — expansions overlay it.
+            implicitHeight: Math.ceil(Math.max(root.barH, ch, rh)) + 4
+            exclusiveZone: root.barH
+
+            // only the notches take input — the gaps are click-through
+            mask: Region {
+                x: 0; y: 0; width: panelWin.lw; height: root.barH
+                Region {
+                    x: (panelWin.width - panelWin.cw) / 2; y: 0
+                    width: panelWin.cw; height: panelWin.ch
+                }
+                Region {
+                    x: panelWin.width - panelWin.rw; y: 0
+                    width: panelWin.rw; height: panelWin.rh
+                }
+            }
+
+            // auto-close when the pointer wanders off an open panel
+            HoverHandler { id: panelHover }
+            Timer {
+                running: (panelWin.centerOpen || panelWin.rightOpen) && !panelHover.hovered
+                interval: 1600
+                onTriggered: { panelWin.centerOpen = false; panelWin.rightOpen = false; }
+            }
+
+            // ── silhouette ──────────────────────────────────────────────────
             Canvas {
                 id: silhouette
                 anchors.fill: parent
@@ -224,37 +261,38 @@ ShellRoot {
                 }
                 onPaint: {
                     const ctx = getContext("2d");
-                    const w = width, H = height;
+                    const w = width;
                     const s = root.stripH, r = root.fillet, b = root.bcr;
                     const lw = panelWin.lw, cw = panelWin.cw, rw = panelWin.rw;
+                    const lh = root.barH, chh = panelWin.ch, rhh = panelWin.rh;
                     const cx = (w - cw) / 2;
                     const rx = w - rw;
                     ctx.reset();
                     ctx.beginPath();
                     ctx.moveTo(0, 0);
                     // left notch — flush with the screen corner
-                    ctx.lineTo(0, H - b);
-                    ctx.arcTo(0, H, b, H, b);
-                    ctx.lineTo(lw - b, H);
-                    ctx.arcTo(lw, H, lw, H - b, b);
+                    ctx.lineTo(0, lh - b);
+                    ctx.arcTo(0, lh, b, lh, b);
+                    ctx.lineTo(lw - b, lh);
+                    ctx.arcTo(lw, lh, lw, lh - b, b);
                     ctx.lineTo(lw, s + r);
                     ctx.arc(lw + r, s + r, r, Math.PI, Math.PI * 1.5, false);
-                    // strip to center notch
+                    // center notch
                     ctx.lineTo(cx - r, s);
                     ctx.arc(cx - r, s + r, r, -Math.PI / 2, 0, false);
-                    ctx.lineTo(cx, H - b);
-                    ctx.arcTo(cx, H, cx + b, H, b);
-                    ctx.lineTo(cx + cw - b, H);
-                    ctx.arcTo(cx + cw, H, cx + cw, H - b, b);
+                    ctx.lineTo(cx, chh - b);
+                    ctx.arcTo(cx, chh, cx + b, chh, b);
+                    ctx.lineTo(cx + cw - b, chh);
+                    ctx.arcTo(cx + cw, chh, cx + cw, chh - b, b);
                     ctx.lineTo(cx + cw, s + r);
                     ctx.arc(cx + cw + r, s + r, r, Math.PI, Math.PI * 1.5, false);
-                    // strip to right notch — flush with the right corner
+                    // right notch — flush with the right corner
                     ctx.lineTo(rx - r, s);
                     ctx.arc(rx - r, s + r, r, -Math.PI / 2, 0, false);
-                    ctx.lineTo(rx, H - b);
-                    ctx.arcTo(rx, H, rx + b, H, b);
-                    ctx.lineTo(w - b, H);
-                    ctx.arcTo(w, H, w, H - b, b);
+                    ctx.lineTo(rx, rhh - b);
+                    ctx.arcTo(rx, rhh, rx + b, rhh, b);
+                    ctx.lineTo(w - b, rhh);
+                    ctx.arcTo(w, rhh, w, rhh - b, b);
                     ctx.lineTo(w, 0);
                     ctx.closePath();
                     ctx.fillStyle = root.panel;
@@ -273,13 +311,19 @@ ShellRoot {
                 Layout.preferredHeight: 14
                 color: Qt.rgba(1, 1, 1, 0.10)
             }
+            component Glyph: Text {
+                color: root.dim
+                font.family: root.mono
+                font.pixelSize: 13
+                verticalAlignment: Text.AlignVCenter
+            }
 
             // ── left notch: shard · workspaces · title ──────────────────────
             RowLayout {
                 id: leftRow
                 x: root.pad
-                height: parent.height - root.stripH
                 y: root.stripH
+                height: root.barH - root.stripH
                 spacing: 12
 
                 Mono { text: "󰜁"; color: root.accent; font.pixelSize: 17 }
@@ -325,35 +369,196 @@ ShellRoot {
                 }
             }
 
-            // ── center notch: clock · date ──────────────────────────────────
+            // ── center notch collapsed row: clock · date ────────────────────
             RowLayout {
                 id: centerRow
                 anchors.horizontalCenter: parent.horizontalCenter
-                height: parent.height - root.stripH
                 y: root.stripH
+                height: root.barH - root.stripH
                 spacing: 10
+                opacity: panelWin.centerOpen ? 0 : 1
+                Behavior on opacity { NumberAnimation { duration: 140 } }
                 Mono { id: clockT; font.bold: true; font.pixelSize: 14 }
                 Mono { id: dateT; color: root.dim }
-                Timer {
-                    interval: 1000; running: true; repeat: true; triggeredOnStart: true
-                    onTriggered: {
-                        const now = new Date();
-                        clockT.text = Qt.formatDateTime(now, "HH:mm");
-                        dateT.text  = Qt.formatDateTime(now, "ddd d MMM");
+                TapHandler { onTapped: panelWin.toggleCenter() }
+            }
+            Timer {
+                interval: 1000; running: true; repeat: true; triggeredOnStart: true
+                onTriggered: {
+                    const now = new Date();
+                    clockT.text = Qt.formatDateTime(now, "HH:mm");
+                    dateT.text  = Qt.formatDateTime(now, "ddd d MMM");
+                    bigClock.text = Qt.formatDateTime(now, "HH:mm");
+                    bigDate.text  = Qt.formatDateTime(now, "dddd, d MMMM");
+                }
+            }
+
+            // ── dashboard (expanded center notch) ───────────────────────────
+            Item {
+                id: dashboard
+                x: (panelWin.width - panelWin.cw) / 2
+                y: root.stripH
+                width: panelWin.cw
+                height: panelWin.ch - root.stripH
+                clip: true
+                visible: opacity > 0
+                opacity: panelWin.centerOpen ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 180 } }
+                TapHandler { onTapped: {} }   // swallow clicks inside
+
+                // month offset for ‹ › navigation; resets on open
+                property int monthOff: 0
+                Connections {
+                    target: panelWin
+                    function onCenterOpenChanged() { if (panelWin.centerOpen) dashboard.monthOff = 0; }
+                }
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 20
+                    spacing: 10
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ColumnLayout {
+                            spacing: 0
+                            Mono { id: bigClock; font.pixelSize: 30; font.bold: true; color: root.fg }
+                            Mono { id: bigDate; color: root.dim }
+                        }
+                        Item { Layout.fillWidth: true }
+                        Mono {
+                            text: "󰅖"
+                            color: root.dim
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: panelWin.centerOpen = false
+                            }
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
+
+                    // calendar header + nav
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Mono {
+                            id: calTitle
+                            font.bold: true
+                            color: root.accent
+                            text: {
+                                const d = new Date();
+                                d.setDate(1); d.setMonth(d.getMonth() + dashboard.monthOff);
+                                return Qt.formatDateTime(d, "MMMM yyyy");
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                        Mono {
+                            text: "‹"; font.pixelSize: 16; color: root.dim
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: dashboard.monthOff-- }
+                        }
+                        Mono {
+                            text: "›"; font.pixelSize: 16; color: root.dim
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: dashboard.monthOff++ }
+                        }
+                    }
+
+                    // calendar grid (Monday-first)
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 7
+                        rowSpacing: 2
+                        columnSpacing: 0
+                        Repeater {
+                            model: ["Mo","Tu","We","Th","Fr","Sa","Su"]
+                            Mono {
+                                required property var modelData
+                                text: modelData
+                                color: root.dim
+                                font.pixelSize: 10
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                        }
+                        Repeater {
+                            model: {
+                                const base = new Date();
+                                base.setDate(1);
+                                base.setMonth(base.getMonth() + dashboard.monthOff);
+                                const off = (base.getDay() + 6) % 7;
+                                const days = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
+                                const today = new Date();
+                                const isThisMonth = dashboard.monthOff === 0;
+                                const cells = [];
+                                for (let i = 0; i < off; i++) cells.push({ d: "", today: false });
+                                for (let d = 1; d <= days; d++)
+                                    cells.push({ d: String(d), today: isThisMonth && d === today.getDate() });
+                                return cells;
+                            }
+                            Rectangle {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                height: 22
+                                radius: 11
+                                color: modelData.today ? root.accent : "transparent"
+                                Mono {
+                                    anchors.centerIn: parent
+                                    text: parent.modelData.d
+                                    font.pixelSize: 11
+                                    font.bold: parent.modelData.today
+                                    color: parent.modelData.today ? "#0b0b12"
+                                         : parent.modelData.d === "" ? "transparent" : root.fg
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
+
+                    // media controls
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 14
+                        Mono {
+                            text: root.musicStatus.length > 0
+                                  ? (root.musicTrack.length > 36 ? root.musicTrack.slice(0, 36) + "…" : root.musicTrack)
+                                  : "nothing playing"
+                            color: root.dim
+                            Layout.fillWidth: true
+                        }
+                        Glyph {
+                            text: "󰒮"; font.pixelSize: 15
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: Quickshell.execDetached(["playerctl", "previous"]) }
+                        }
+                        Glyph {
+                            text: root.musicStatus === "Playing" ? "󰏤" : "󰐊"
+                            color: root.accent; font.pixelSize: 16
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: Quickshell.execDetached(["playerctl", "play-pause"]) }
+                        }
+                        Glyph {
+                            text: "󰒭"; font.pixelSize: 15
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: Quickshell.execDetached(["playerctl", "next"]) }
+                        }
                     }
                 }
             }
 
-            // ── right notch: music · stats · vol/net/bat · power ────────────
+            // ── right notch collapsed row ───────────────────────────────────
             RowLayout {
                 id: rightRow
                 anchors.right: parent.right
                 anchors.rightMargin: root.pad
-                height: parent.height - root.stripH
                 y: root.stripH
+                height: root.barH - root.stripH
                 spacing: 12
+                opacity: panelWin.rightOpen ? 0 : 1
+                Behavior on opacity { NumberAnimation { duration: 140 } }
 
-                // music — collapses away when nothing plays
                 RowLayout {
                     spacing: 8
                     visible: root.musicStatus.length > 0
@@ -363,65 +568,33 @@ ShellRoot {
                         font.pixelSize: 13
                     }
                     Mono {
-                        text: root.musicTrack.length > 30 ? root.musicTrack.slice(0, 30) + "…" : root.musicTrack
+                        text: root.musicTrack.length > 26 ? root.musicTrack.slice(0, 26) + "…" : root.musicTrack
                         color: root.dim
                     }
                     TapHandler { onTapped: Quickshell.execDetached(["playerctl", "play-pause"]) }
                 }
                 Sep { visible: root.musicStatus.length > 0 }
 
-                Mono { text: "󰻠"; color: root.cpu > 85 ? "#f38ba8" : root.dim; font.pixelSize: 13 }
-                Mono { text: Math.round(root.cpu) + "%" }
-                Mono { text: "󰍛"; color: root.mem > 85 ? "#f38ba8" : root.dim; font.pixelSize: 13 }
-                Mono { text: Math.round(root.mem) + "%" }
-
-                Sep {}
-
-                Mono {
-                    text: (root.muted ? "󰝟" : root.volume > 50 ? "󰕾" : root.volume > 0 ? "󰖀" : "󰕿")
-                          + " " + (root.volume < 0 ? "—" : root.volume + "%")
-                    color: root.muted ? root.dim : root.fg
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        onClicked: ev => {
-                            if (ev.button === Qt.RightButton)
-                                Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"]);
-                            else
-                                Quickshell.execDetached(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
-                            volRefresh.start();
-                        }
-                        onWheel: w => {
-                            Quickshell.execDetached(["wpctl", "set-volume", "-l", "1.0",
-                                "@DEFAULT_AUDIO_SINK@", w.angleDelta.y > 0 ? "2%+" : "2%-"]);
-                            volRefresh.start();
-                        }
+                RowLayout {
+                    spacing: 6
+                    Glyph { text: "󰻠"; color: root.cpu > 85 ? "#f38ba8" : root.dim }
+                    Mono { text: Math.round(root.cpu) + "%" }
+                    Glyph { text: "󰍛"; color: root.mem > 85 ? "#f38ba8" : root.dim }
+                    Mono { text: Math.round(root.mem) + "%" }
+                    Glyph { text: root.netIcon }
+                    Mono {
+                        text: (root.muted ? "󰝟" : "󰕾") + " " + (root.volume < 0 ? "—" : root.volume + "%")
+                        color: root.muted ? root.dim : root.fg
                     }
-                    Timer { id: volRefresh; interval: 120; onTriggered: volProc.running = true }
-                }
-
-                Mono {
-                    text: root.netIcon
-                    font.pixelSize: 13
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: Quickshell.execDetached(
-                            ["alacritty", "--class", "vendi-float", "-e", "vendi", "wifi"])
+                    Mono {
+                        visible: root.hasBattery
+                        text: (root.charging ? "󰂄" : "󰁾") + " " + root.battery + "%"
+                        color: root.battery <= 20 && !root.charging ? "#f38ba8" : root.fg
                     }
-                }
-
-                Mono {
-                    visible: root.hasBattery
-                    text: (root.charging ? "󰂄" : root.battery > 80 ? "󰁹"
-                          : root.battery > 50 ? "󰁾" : root.battery > 20 ? "󰁻" : "󰁺")
-                          + " " + root.battery + "%"
-                    color: root.battery <= 20 && !root.charging ? "#f38ba8" : root.fg
+                    TapHandler { onTapped: panelWin.toggleRight() }
                 }
 
                 Sep {}
-
                 Mono {
                     text: "󰐥"
                     color: root.accent
@@ -431,6 +604,171 @@ ShellRoot {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: Quickshell.execDetached(["vendi-menu", "power"])
                     }
+                }
+            }
+
+            // ── control center (expanded right notch) ───────────────────────
+            Item {
+                id: control
+                x: panelWin.width - panelWin.rw
+                y: root.stripH
+                width: panelWin.rw
+                height: panelWin.rh - root.stripH
+                clip: true
+                visible: opacity > 0
+                opacity: panelWin.rightOpen ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 180 } }
+                TapHandler { onTapped: {} }
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 20
+                    spacing: 12
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Mono { text: "Control Center"; font.bold: true; color: root.accent }
+                        Item { Layout.fillWidth: true }
+                        Mono {
+                            text: "󰅖"
+                            color: root.dim
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: panelWin.rightOpen = false
+                            }
+                        }
+                    }
+
+                    // volume slider
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Glyph {
+                            text: root.muted ? "󰝟" : "󰕾"
+                            color: root.muted ? root.dim : root.fg
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    Quickshell.execDetached(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
+                                    ccVolRefresh.start();
+                                }
+                            }
+                        }
+                        Rectangle {
+                            id: volTrack
+                            Layout.fillWidth: true
+                            height: 8
+                            radius: 4
+                            color: Qt.rgba(1, 1, 1, 0.10)
+                            Rectangle {
+                                width: Math.max(8, parent.width * Math.max(0, root.volume) / 100)
+                                height: parent.height
+                                radius: 4
+                                color: root.muted ? root.dim : root.accent
+                                Behavior on width { NumberAnimation { duration: 80 } }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                function setVol(mx) {
+                                    const pct = Math.round(Math.max(0, Math.min(1, mx / volTrack.width)) * 100);
+                                    root.volume = pct;
+                                    Quickshell.execDetached(["wpctl", "set-volume", "-l", "1.0",
+                                        "@DEFAULT_AUDIO_SINK@", pct + "%"]);
+                                }
+                                onPressed: m => setVol(m.x - 6)
+                                onPositionChanged: m => { if (pressed) setVol(m.x - 6) }
+                                onReleased: ccVolRefresh.start()
+                            }
+                        }
+                        Mono { text: (root.volume < 0 ? "—" : root.volume + "%"); Layout.preferredWidth: 38 }
+                        Timer { id: ccVolRefresh; interval: 150; onTriggered: volProc.running = true }
+                    }
+
+                    // cpu / mem bars
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 10
+                            Glyph { text: "󰻠" }
+                            Rectangle {
+                                Layout.fillWidth: true; height: 8; radius: 4
+                                color: Qt.rgba(1, 1, 1, 0.10)
+                                Rectangle {
+                                    width: parent.width * root.cpu / 100
+                                    height: parent.height; radius: 4
+                                    color: root.cpu > 85 ? "#f38ba8" : root.accent
+                                    Behavior on width { NumberAnimation { duration: 300 } }
+                                }
+                            }
+                            Mono { text: Math.round(root.cpu) + "%"; Layout.preferredWidth: 38 }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 10
+                            Glyph { text: "󰍛" }
+                            Rectangle {
+                                Layout.fillWidth: true; height: 8; radius: 4
+                                color: Qt.rgba(1, 1, 1, 0.10)
+                                Rectangle {
+                                    width: parent.width * root.mem / 100
+                                    height: parent.height; radius: 4
+                                    color: root.mem > 85 ? "#f38ba8" : root.accent
+                                    Behavior on width { NumberAnimation { duration: 300 } }
+                                }
+                            }
+                            Mono { text: Math.round(root.mem) + "%"; Layout.preferredWidth: 38 }
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
+
+                    // quick actions
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        rowSpacing: 8
+                        columnSpacing: 8
+                        component QuickAction: Rectangle {
+                            property string glyph
+                            property string label
+                            property var run
+                            Layout.fillWidth: true
+                            height: 38
+                            radius: 12
+                            color: qaHover.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                            Behavior on color { ColorAnimation { duration: 120 } }
+                            HoverHandler { id: qaHover }
+                            RowLayout {
+                                anchors.centerIn: parent
+                                spacing: 8
+                                Glyph { text: glyph; color: root.accent }
+                                Mono { text: label }
+                            }
+                            TapHandler { onTapped: run() }
+                        }
+                        QuickAction {
+                            glyph: "󰤨"; label: "Wi-Fi"
+                            run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "wifi"])
+                        }
+                        QuickAction {
+                            glyph: "󰂯"; label: "Bluetooth"
+                            run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "bt"])
+                        }
+                        QuickAction {
+                            glyph: "󰕾"; label: "Audio"
+                            run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"])
+                        }
+                        QuickAction {
+                            glyph: "󰐥"; label: "Power"
+                            run: () => Quickshell.execDetached(["vendi-menu", "power"])
+                        }
+                    }
+
+                    Item { Layout.fillHeight: true }
                 }
             }
         }

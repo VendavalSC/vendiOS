@@ -851,6 +851,8 @@ impl State {
                     Dir::Up    => entry.1.size.h = (entry.1.size.h - STEP).max(120),
                 }
                 let (window, rect) = (entry.0.clone(), entry.1);
+                // Glide to the new size instead of snapping.
+                self.push_geo_anim(&window, rect);
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
                     toplevel.send_pending_configure();
