@@ -213,14 +213,19 @@ ShellRoot {
     }
 
     // ── weather (wttr.in) ────────────────────────────────────────────────────
-    property string weather: ""
+    property string weather: ""        // "☁️ +24°C" — bar + dashboard header
+    property string weatherCond: ""    // "Partly cloudy"
     Process {
         id: wxProc
-        command: ["sh", "-c", "curl -sf --max-time 6 'https://wttr.in/?format=%c+%t' | head -c 64"]
+        command: ["sh", "-c", "curl -sf --max-time 6 'https://wttr.in/?format=%c|%t|%C' | head -c 96"]
         stdout: SplitParser {
             onRead: l => {
-                const w = l.trim().replace(/\s+/g, " ");
-                if (w && !w.includes("Unknown")) root.weather = w;
+                if (l.includes("Unknown")) return;
+                const p = l.split("|").map(s => s.trim().replace(/\s+/g, " "));
+                if (p.length >= 2 && p[1]) {
+                    root.weather = (p[0] ? p[0] + " " : "") + p[1];
+                    root.weatherCond = p[2] ?? "";
+                }
             }
         }
     }
@@ -231,6 +236,28 @@ ShellRoot {
     Timer {   // retry fast until the first fix lands (boot races the network)
         interval: 90000; running: root.weather === ""; repeat: true
         onTriggered: wxProc.running = true
+    }
+
+    // ── identity / uptime (dashboard header) ─────────────────────────────────
+    property string userName: Quickshell.env("USER") || "vendi"
+    property string hostName: ""
+    property string uptimeStr: ""
+    FileView {
+        path: "/etc/hostname"
+        onLoaded: root.hostName = text().trim()
+    }
+    FileView {
+        id: upFile
+        path: "/proc/uptime"
+        onLoaded: {
+            const s = parseFloat(text().split(" ")[0]);
+            const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+            root.uptimeStr = (h > 0 ? h + "h " : "") + m + "m";
+        }
+    }
+    Timer {
+        interval: 60000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: upFile.reload()
     }
 
     // ── wallpapers (~/Pictures/Wallpapers) ───────────────────────────────────
@@ -321,12 +348,16 @@ ShellRoot {
             // ── expansion state ─────────────────────────────────────────────
             property bool centerOpen: false
             property bool rightOpen: false
-            function toggleCenter() { centerOpen = !centerOpen; if (centerOpen) rightOpen = false; }
-            function toggleRight()  { rightOpen = !rightOpen;  if (rightOpen) centerOpen = false; }
+            property bool powerOpen: false
+            function toggleCenter() { centerOpen = !centerOpen; if (centerOpen) { rightOpen = false; powerOpen = false; } }
+            function toggleRight()  { rightOpen = !rightOpen;  if (rightOpen) { centerOpen = false; powerOpen = false; } }
+            function togglePower()  { powerOpen = !powerOpen;  if (powerOpen) { centerOpen = false; rightOpen = false; } }
 
-            // right notch mode: control wins, then toasts, then volume OSD
+            // right notch mode: power menu wins, then control center, then
+            // toasts, then the volume OSD
             readonly property string rightMode:
-                rightOpen ? "control"
+                powerOpen ? "power"
+                : rightOpen ? "control"
                 : root.toasts.length > 0 ? "toast"
                 : root.osdShow ? "osd"
                 : "idle"
@@ -337,13 +368,15 @@ ShellRoot {
             property real cw: centerOpen ? 480
                 : centerRow.implicitWidth + root.pad * 2 + (centerHover.hovered ? 10 : 0)
             property real rw: rightMode === "control" ? 400
+                : rightMode === "power" ? 240
                 : rightMode === "toast" ? 380
                 : rightMode === "osd" ? 270
                 : rightRow.implicitWidth + root.pad * 2 + (rightHover.hovered ? 10 : 0)
-            property real ch: centerOpen ? 462 : root.barH
+            property real ch: centerOpen ? 506 : root.barH
             property real rh: rightMode === "control"
                     ? 312 + (root.notifHistory.length > 0
                              ? 30 + Math.min(root.notifHistory.length, 3) * 22 : 0)
+                : rightMode === "power" ? 224
                 : rightMode === "toast"
                     ? Math.max(root.barH, toastCol.implicitHeight + root.stripH + 26)
                 : root.barH
@@ -379,9 +412,14 @@ ShellRoot {
             // auto-close when the pointer wanders off an open panel
             HoverHandler { id: panelHover }
             Timer {
-                running: (panelWin.centerOpen || panelWin.rightOpen) && !panelHover.hovered
+                running: (panelWin.centerOpen || panelWin.rightOpen || panelWin.powerOpen)
+                         && !panelHover.hovered
                 interval: 1600
-                onTriggered: { panelWin.centerOpen = false; panelWin.rightOpen = false; }
+                onTriggered: {
+                    panelWin.centerOpen = false;
+                    panelWin.rightOpen = false;
+                    panelWin.powerOpen = false;
+                }
             }
 
             // ── silhouette ──────────────────────────────────────────────────
@@ -403,9 +441,9 @@ ShellRoot {
                     ctx.reset();
                     ctx.beginPath();
                     ctx.moveTo(0, 0);
-                    // left notch — flush with the screen corner
-                    ctx.lineTo(0, lh - b);
-                    ctx.arcTo(0, lh, b, lh, b);
+                    // left notch — flat against the screen edge; only the
+                    // inner bottom corner rounds
+                    ctx.lineTo(0, lh);
                     ctx.lineTo(lw - b, lh);
                     ctx.arcTo(lw, lh, lw, lh - b, b);
                     ctx.lineTo(lw, s + r);
@@ -424,8 +462,7 @@ ShellRoot {
                     ctx.arc(rx - r, s + r, r, -Math.PI / 2, 0, false);
                     ctx.lineTo(rx, rhh - b);
                     ctx.arcTo(rx, rhh, rx + b, rhh, b);
-                    ctx.lineTo(w - b, rhh);
-                    ctx.arcTo(w, rhh, w, rhh - b, b);
+                    ctx.lineTo(w, rhh);
                     ctx.lineTo(w, 0);
                     ctx.closePath();
                     ctx.fillStyle = root.panel;
@@ -561,16 +598,51 @@ ShellRoot {
 
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: 14
+                        Rectangle {
+                            Layout.preferredWidth: 46
+                            Layout.preferredHeight: 46
+                            radius: 23
+                            color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+                            Mono {
+                                anchors.centerIn: parent
+                                text: "󰜁"
+                                color: root.accent
+                                font.pixelSize: 22
+                            }
+                        }
                         ColumnLayout {
-                            spacing: 0
-                            Mono { id: bigClock; font.pixelSize: 30; font.bold: true; color: root.fg }
-                            Mono { id: bigDate; color: root.dim }
+                            spacing: 1
+                            Mono { id: bigClock; font.pixelSize: 26; font.bold: true; color: root.fg }
+                            Mono { id: bigDate; color: root.dim; font.pixelSize: 11 }
+                            Mono {
+                                text: root.userName
+                                      + (root.hostName !== "" ? "@" + root.hostName : "")
+                                      + " · vendiwm · up " + root.uptimeStr
+                                color: root.dim
+                                font.pixelSize: 10
+                            }
                         }
                         Item { Layout.fillWidth: true }
-                        Mono { text: root.weather; visible: root.weather !== ""; color: root.dim }
+                        ColumnLayout {
+                            spacing: 1
+                            visible: root.weather !== ""
+                            Mono {
+                                text: root.weather
+                                font.pixelSize: 14
+                                Layout.alignment: Qt.AlignRight
+                            }
+                            Mono {
+                                text: root.weatherCond
+                                color: root.dim
+                                font.pixelSize: 10
+                                Layout.alignment: Qt.AlignRight
+                            }
+                        }
                         Mono {
                             text: "󰅖"
                             color: root.dim
+                            Layout.alignment: Qt.AlignTop
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
@@ -723,63 +795,85 @@ ShellRoot {
 
                     Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
 
-                    // media — album art, track, controls, progress
-                    RowLayout {
+                    // media card — album art washes across the backdrop
+                    ClippingRectangle {
                         Layout.fillWidth: true
-                        spacing: 12
-                        ClippingRectangle {
-                            Layout.preferredWidth: 40
-                            Layout.preferredHeight: 40
-                            radius: 8
-                            color: Qt.rgba(1, 1, 1, 0.05)
+                        Layout.preferredHeight: 64
+                        radius: 12
+                        color: Qt.rgba(1, 1, 1, 0.04)
+                        Image {
+                            anchors.fill: parent
+                            source: root.player?.trackArtUrl ?? ""
+                            fillMode: Image.PreserveAspectCrop
+                            sourceSize.width: 480
+                            asynchronous: true
+                            opacity: 0.16
                             visible: (root.player?.trackArtUrl ?? "") !== ""
-                            Image {
-                                anchors.fill: parent
-                                source: root.player?.trackArtUrl ?? ""
-                                fillMode: Image.PreserveAspectCrop
-                                sourceSize.width: 80
-                                asynchronous: true
-                            }
                         }
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 3
-                            Mono {
-                                text: root.musicTrack !== ""
-                                      ? (root.musicTrack.length > 34 ? root.musicTrack.slice(0, 34) + "…" : root.musicTrack)
-                                      : "nothing playing"
-                                color: root.musicTrack !== "" ? root.fg : root.dim
-                            }
-                            Rectangle {
-                                Layout.fillWidth: true
-                                height: 3
-                                radius: 1.5
-                                color: Qt.rgba(1, 1, 1, 0.10)
-                                visible: root.musicTrack !== ""
-                                Rectangle {
-                                    width: parent.width * root.musicProgress
-                                    height: parent.height
-                                    radius: 1.5
-                                    color: root.accent
-                                    Behavior on width { NumberAnimation { duration: 500 } }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.margins: 10
+                            spacing: 12
+                            ClippingRectangle {
+                                Layout.preferredWidth: 44
+                                Layout.preferredHeight: 44
+                                radius: 9
+                                color: Qt.rgba(1, 1, 1, 0.06)
+                                Image {
+                                    anchors.fill: parent
+                                    source: root.player?.trackArtUrl ?? ""
+                                    fillMode: Image.PreserveAspectCrop
+                                    sourceSize.width: 88
+                                    asynchronous: true
+                                    visible: (root.player?.trackArtUrl ?? "") !== ""
+                                }
+                                Glyph {
+                                    anchors.centerIn: parent
+                                    text: "󰝚"
+                                    font.pixelSize: 17
+                                    visible: (root.player?.trackArtUrl ?? "") === ""
                                 }
                             }
-                        }
-                        Glyph {
-                            text: "󰒮"; font.pixelSize: 15
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.player?.previous() }
-                        }
-                        Glyph {
-                            text: root.musicPlaying ? "󰏤" : "󰐊"
-                            color: root.accent; font.pixelSize: 16
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.player?.togglePlaying() }
-                        }
-                        Glyph {
-                            text: "󰒭"; font.pixelSize: 15
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.player?.next() }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 4
+                                Mono {
+                                    text: root.musicTrack !== ""
+                                          ? (root.musicTrack.length > 34 ? root.musicTrack.slice(0, 34) + "…" : root.musicTrack)
+                                          : "nothing playing"
+                                    color: root.musicTrack !== "" ? root.fg : root.dim
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 3
+                                    radius: 1.5
+                                    color: Qt.rgba(1, 1, 1, 0.10)
+                                    visible: root.musicTrack !== ""
+                                    Rectangle {
+                                        width: parent.width * root.musicProgress
+                                        height: parent.height
+                                        radius: 1.5
+                                        color: root.accent
+                                        Behavior on width { NumberAnimation { duration: 500 } }
+                                    }
+                                }
+                            }
+                            Glyph {
+                                text: "󰒮"; font.pixelSize: 15
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.player?.previous() }
+                            }
+                            Glyph {
+                                text: root.musicPlaying ? "󰏤" : "󰐊"
+                                color: root.accent; font.pixelSize: 16
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.player?.togglePlaying() }
+                            }
+                            Glyph {
+                                text: "󰒭"; font.pixelSize: 15
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.player?.next() }
+                            }
                         }
                     }
 
@@ -833,26 +927,26 @@ ShellRoot {
                 }
                 Sep { visible: SystemTray.items.values.length > 0 }
 
+                // quiet icon cluster — no numbers in the corner; the control
+                // center carries the detail
                 RowLayout {
-                    spacing: 6
-                    Glyph { text: "󰻠"; color: root.cpu > 85 ? root.alert : root.dim }
-                    Mono { text: Math.round(root.cpu) + "%" }
-                    Glyph { text: "󰍛"; color: root.mem > 85 ? root.alert : root.dim }
-                    Mono { text: Math.round(root.mem) + "%" }
-                    Glyph { text: root.netIcon }
-                    Mono {
-                        text: (root.muted ? "󰝟" : "󰕾") + " " + (root.volume < 0 ? "—" : root.volume + "%")
+                    spacing: 11
+                    Glyph { text: root.netIcon; font.pixelSize: 14 }
+                    Glyph {
+                        text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
                         color: root.muted ? root.dim : root.fg
+                        font.pixelSize: 14
                     }
-                    Mono {
+                    Glyph {
                         visible: root.hasBattery
-                        text: (root.charging ? "󰂄" : "󰁾") + " " + root.battery + "%"
+                        text: root.charging ? "󰂄" : "󰁾"
                         color: root.battery <= 20 && !root.charging ? root.alert : root.fg
+                        font.pixelSize: 14
                     }
-                    Mono {
-                        visible: root.notifHistory.length > 0
-                        text: "󰂚 " + root.notifHistory.length
-                        color: root.dim
+                    Glyph {
+                        text: root.notifHistory.length > 0 ? "󰂚" : "󰂜"
+                        color: root.notifHistory.length > 0 ? root.fg : root.dim
+                        font.pixelSize: 14
                     }
                     TapHandler { onTapped: panelWin.toggleRight() }
                 }
@@ -865,7 +959,7 @@ ShellRoot {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: Quickshell.execDetached(["vendi-menu", "power"])
+                        onClicked: panelWin.togglePower()
                     }
                 }
             }
@@ -1006,6 +1100,75 @@ ShellRoot {
                             }
                         }
                     }
+                }
+            }
+
+            // ── power menu (right notch, native — lock · suspend · restart ·
+            //    shut down) ──────────────────────────────────────────────────
+            Item {
+                id: powerPanel
+                x: panelWin.width - panelWin.rw
+                y: root.stripH
+                width: panelWin.rw
+                height: panelWin.rh - root.stripH
+                clip: true
+                visible: opacity > 0
+                opacity: panelWin.rightMode === "power" ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 180 } }
+                TapHandler { onTapped: {} }
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 14
+                    spacing: 5
+
+                    component PowerRow: Rectangle {
+                        property string glyph
+                        property string label
+                        property bool danger: false
+                        property var run
+                        Layout.fillWidth: true
+                        height: 40
+                        radius: 11
+                        color: prHover.hovered
+                            ? (danger ? Qt.rgba(0.953, 0.545, 0.659, 0.18) : Qt.rgba(1, 1, 1, 0.10))
+                            : Qt.rgba(1, 1, 1, 0.05)
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                        HoverHandler { id: prHover; cursorShape: Qt.PointingHandCursor }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 14
+                            spacing: 12
+                            Glyph {
+                                text: glyph
+                                color: danger && prHover.hovered ? root.alert : root.accent
+                                font.pixelSize: 15
+                            }
+                            Mono { text: label }
+                            Item { Layout.fillWidth: true }
+                        }
+                        TapHandler {
+                            onTapped: { panelWin.powerOpen = false; run(); }
+                        }
+                    }
+
+                    PowerRow {
+                        glyph: "󰌾"; label: "Lock"
+                        run: () => Quickshell.execDetached(["vendi-ctl", "lock"])
+                    }
+                    PowerRow {
+                        glyph: "󰒲"; label: "Suspend"
+                        run: () => Quickshell.execDetached(["systemctl", "suspend"])
+                    }
+                    PowerRow {
+                        glyph: "󰜉"; label: "Restart"; danger: true
+                        run: () => Quickshell.execDetached(["systemctl", "reboot"])
+                    }
+                    PowerRow {
+                        glyph: "󰐥"; label: "Shut down"; danger: true
+                        run: () => Quickshell.execDetached(["systemctl", "poweroff"])
+                    }
+                    Item { Layout.fillHeight: true }
                 }
             }
 
@@ -1197,7 +1360,7 @@ ShellRoot {
                         }
                         QuickAction {
                             glyph: "󰐥"; label: "Power"
-                            run: () => Quickshell.execDetached(["vendi-menu", "power"])
+                            run: () => panelWin.togglePower()
                         }
                     }
 

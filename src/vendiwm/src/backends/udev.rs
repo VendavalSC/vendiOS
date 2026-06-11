@@ -1789,7 +1789,16 @@ fn send_frames_surface_tree(
 fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp) {
     let state = &mut app.state;
     match event {
-        InputEvent::DeviceAdded { device }   => tracing::info!(?device, "input device added"),
+        InputEvent::DeviceAdded { mut device } => {
+            // Touchpad defaults (anything with tap support): tap-to-click,
+            // tap-and-drag, natural scrolling. Mice keep traditional scroll.
+            if device.config_tap_finger_count() > 0 {
+                let _ = device.config_tap_set_enabled(true);
+                let _ = device.config_tap_set_drag_enabled(true);
+                let _ = device.config_scroll_set_natural_scroll_enabled(true);
+            }
+            tracing::info!(?device, "input device added");
+        }
         InputEvent::DeviceRemoved { device } => tracing::info!(?device, "input device removed"),
 
         // ── keyboard ─────────────────────────────────────────────────────────
@@ -2020,13 +2029,35 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             if state.vlock { return; }
             use smithay::backend::input::{Axis, AxisSource};
             let Some(pointer) = state.seat.get_pointer() else { return };
-            let mut frame = AxisFrame::new(InputEventTrait::time_msec(&event))
-                .source(AxisSource::Wheel);
-            if let Some(h) = event.amount(Axis::Horizontal) {
+            let source = event.source();
+            // Wheel clicks often report ONLY v120 (discrete) — amount() comes
+            // back None and an empty frame scrolls nothing (firefox). Fall
+            // back to v120/120 * 15px per notch, and forward the discrete
+            // value so clients that count notches get it too.
+            let h = event.amount(Axis::Horizontal)
+                .or_else(|| event.amount_v120(Axis::Horizontal).map(|d| d * 15.0 / 120.0))
+                .unwrap_or(0.0);
+            let v = event.amount(Axis::Vertical)
+                .or_else(|| event.amount_v120(Axis::Vertical).map(|d| d * 15.0 / 120.0))
+                .unwrap_or(0.0);
+            let mut frame = AxisFrame::new(InputEventTrait::time_msec(&event)).source(source);
+            if h != 0.0 {
                 frame = frame.value(Axis::Horizontal, h);
+                if let Some(d) = event.amount_v120(Axis::Horizontal) {
+                    frame = frame.v120(Axis::Horizontal, d as i32);
+                }
             }
-            if let Some(v) = event.amount(Axis::Vertical) {
+            if v != 0.0 {
                 frame = frame.value(Axis::Vertical, v);
+                if let Some(d) = event.amount_v120(Axis::Vertical) {
+                    frame = frame.v120(Axis::Vertical, d as i32);
+                }
+            }
+            // Trackpad fingers lifting emit zero-amount events — those are
+            // axis-stop markers (kinetic scroll cue), not empty frames.
+            if source == AxisSource::Finger {
+                if event.amount(Axis::Horizontal) == Some(0.0) { frame = frame.stop(Axis::Horizontal); }
+                if event.amount(Axis::Vertical)   == Some(0.0) { frame = frame.stop(Axis::Vertical); }
             }
             pointer.axis(state, frame);
             pointer.frame(state);
