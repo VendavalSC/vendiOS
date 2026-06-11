@@ -51,8 +51,11 @@ pub enum Request {
     /// Lock the session (vendi-lock, the compositor-native lock screen).
     Lock,
     /// Switch the wallpaper at runtime. The path is persisted to
-    /// ~/.config/vendi/wallpaper so it survives restarts.
+    /// ~/.config/vendi/wallpaper so it survives restarts. "default" clears
+    /// back to the procedural gradient.
     Wallpaper     { path: String },
+    /// Re-read vendiwm.kdl and apply theme + binds live, no restart.
+    ReloadConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,6 +331,27 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
             state.lock_session();
             Response::Ok { ok: true }
         }
+        Request::ReloadConfig => {
+            match crate::config::Config::load() {
+                Ok(cfg) => {
+                    state.config = cfg;
+                    // Background/accent may have changed — rebuild wallpaper.
+                    state.wallpaper_gen += 1;
+                    state.pending_redraw = true;
+                    tracing::info!("config reloaded");
+                    Response::Ok { ok: true }
+                }
+                Err(e) => Response::Error { error: format!("reload: {e}") },
+            }
+        }
+        Request::Wallpaper { path } if path == "default" || path.is_empty() => {
+            state.config.theme.wallpaper = None;
+            state.wallpaper_gen += 1;
+            state.pending_redraw = true;
+            let _ = remove_wallpaper_persist();
+            tracing::info!("wallpaper cleared to gradient");
+            Response::Ok { ok: true }
+        }
         Request::Wallpaper { path } => {
             if !std::path::Path::new(&path).is_file() {
                 Response::Error { error: format!("no such file: {path}") }
@@ -345,6 +369,15 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
     };
 
     Some(serde_json::to_string(&resp).unwrap_or_else(|e| format!(r#"{{"error":"serialize: {e}"}}"#)))
+}
+
+fn remove_wallpaper_persist() -> std::io::Result<()> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .ok_or_else(|| std::io::Error::other("no HOME"))?
+        .join("vendi");
+    std::fs::remove_file(base.join("wallpaper"))
 }
 
 /// Write the active wallpaper path to ~/.config/vendi/wallpaper (atomic:

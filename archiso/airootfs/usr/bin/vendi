@@ -244,6 +244,15 @@ _palette() {
 
 # "cba6f7" → "203, 166, 247" (for CSS rgba()).
 _rgb() { printf "%d, %d, %d" $((16#${1:0:2})) $((16#${1:2:2})) $((16#${1:4:2})); }
+# Desaturate a hex color 60% toward its own gray — neutral surfaces that
+# still sit in the theme's value range (the classic bar body uses this).
+_neutral() {
+    local h=$1 r g b avg
+    r=$((16#${h:0:2})); g=$((16#${h:2:2})); b=$((16#${h:4:2}))
+    avg=$(( (r + g + b) / 3 ))
+    printf "%02x%02x%02x" \
+        $(( (r*4 + avg*6) / 10 )) $(( (g*4 + avg*6) / 10 )) $(( (b*4 + avg*6) / 10 ))
+}
 # "cba6f7" → "203;166;247" (for ANSI truecolor escapes).
 _rgbsemi() { printf "%d;%d;%d" $((16#${1:0:2})) $((16#${1:2:2})) $((16#${1:4:2})); }
 
@@ -299,6 +308,9 @@ _theme_apply() {
 window { background: transparent; }
 .bar {
   padding: 0 14px;
+  background: #$(_neutral "${P[surface0]}");
+  border: 1px solid rgba($(_rgb "${P[text]}"), 0.06);
+  border-radius: 11px;
   font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
   font-size: 13px;
   color: #${P[text]};
@@ -558,8 +570,17 @@ EOF
 THEME=${name}
 ACCENT_HEX=${a}
 EOF
+
+    # ── apply live (no session restart) ────────────────────────
+    # vendiwm re-reads its config over IPC; vendibar-pro follows theme-state
+    # on its own; the classic GTK bar reads its CSS at startup, so bounce it
+    # (the session's bar supervisor respawns it).
+    if [[ -n "${VENDIWM_SOCK:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
+        vendi-ctl reload >/dev/null 2>&1 || true
+        pkill -x vendibar 2>/dev/null || true
+        _ok "applied live"
+    fi
     _ok "theme: ${name}"
-    _info "relaunch the session (super+alt+space → Settings → Reload) to apply WM + bar colors"
 }
 
 _theme_desc() {
@@ -601,6 +622,34 @@ cmd_theme() {
             ;;
         *)
             _theme_apply "$sub"
+            ;;
+    esac
+}
+
+# ── bar flavor ────────────────────────────────────────────────────────────────
+# `vendi bar <classic|pro>` switches the status bar without touching the
+# compositor: write the choice, kill the running bar, and the session's bar
+# supervisor respawns the right one (and sorts out mako).
+cmd_bar() {
+    local choice=${1:-}
+    local cur
+    cur=$(cat "$HOME/.config/vendi/bar" 2>/dev/null || echo classic)
+    case "$choice" in
+        "")
+            _header "bar"
+            _kv "current" "$cur"
+            _info "vendi bar <classic|pro> to switch"
+            ;;
+        classic|pro)
+            mkdir -p "$HOME/.config/vendi"
+            echo "$choice" > "$HOME/.config/vendi/bar"
+            pkill -x vendibar 2>/dev/null || true
+            pkill -x quickshell 2>/dev/null || true
+            _ok "bar: ${choice}"
+            ;;
+        *)
+            _err "unknown bar: ${choice} (have: classic pro)"
+            return 1
             ;;
     esac
 }
@@ -755,6 +804,7 @@ cmd_help() {
     _cmd "snapshot" "create / manage btrfs snapshots"
     _cmd "rollback" "roll back to a previous snapshot"
     _cmd "theme"    "recolor the whole desktop (mocha latte gruvbox mono think)"
+    _cmd "bar"      "switch the status bar (classic / pro)"
     _cmd "wifi"     "scan and connect to wireless networks"
     _cmd "bt"       "pair and connect bluetooth devices"
     _cmd "audio"    "pick output sink, volume, mute"
@@ -773,6 +823,7 @@ case "${1:-help}" in
     snapshot) cmd_snapshot ;;
     rollback) shift; cmd_rollback "$@" ;;
     theme)    shift; cmd_theme "$@" ;;
+    bar)      shift; cmd_bar "$@" ;;
     wifi)     cmd_wifi  ;;
     bt|bluetooth) cmd_bt ;;
     audio)    cmd_audio ;;

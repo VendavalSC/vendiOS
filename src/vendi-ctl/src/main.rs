@@ -31,7 +31,8 @@ fn main() -> Result<()> {
         "close"            => close_cmd(&args[1..]),
         "list-windows"     => ipc_call(json!({"cmd": "list-windows"})),
         "list-workspaces"  => ipc_call(json!({"cmd": "list-workspaces"})),
-        "lock"             => ipc_call(json!({"cmd": "lock"})),
+        "lock"             => lock_cmd(),
+        "reload"           => ipc_call(json!({"cmd": "reload-config"})),
         "workspace"        => workspace_cmd(&args[1..]),
         "split"            => split_cmd(&args[1..]),
         "move"             => move_cmd(&args[1..]),
@@ -60,6 +61,8 @@ Usage:
   vendi-ctl wallpaper <path>            set the wallpaper (persists)
   vendi-ctl wallpaper random|next       pick from ~/Pictures/Wallpapers
   vendi-ctl wallpaper list              list ~/Pictures/Wallpapers (* = active)
+  vendi-ctl wallpaper default           clear back to the procedural gradient
+  vendi-ctl reload                      re-read vendiwm.kdl live (theme, binds)
 
 Reads $VENDIWM_SOCK or falls back to $XDG_RUNTIME_DIR/vendiwm-1.ipc.sock."#);
 }
@@ -180,6 +183,26 @@ fn move_cmd(args: &[String]) -> Result<()> {
 // ── wallpaper ────────────────────────────────────────────────────────────────
 
 /// The wallpaper library: ~/Pictures/Wallpapers (png/jpg/jpeg/webp), sorted.
+/// Prefer the quickshell lock screen (vendilock, ext-session-lock); fall
+/// back to the compositor-native vendi-lock when quickshell is missing.
+fn lock_cmd() -> Result<()> {
+    let has_vendilock = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(r#"command -v quickshell >/dev/null && { [ -f "$HOME/.config/quickshell/vendilock/shell.qml" ] || [ -f /etc/xdg/quickshell/vendilock/shell.qml ]; }"#)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if has_vendilock {
+        std::process::Command::new("quickshell")
+            .args(["-c", "vendilock"])
+            .spawn()
+            .context("spawn vendilock")?;
+        Ok(())
+    } else {
+        ipc_call(json!({"cmd": "lock"}))
+    }
+}
+
 fn wallpaper_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
     Ok(PathBuf::from(home).join("Pictures/Wallpapers"))
@@ -215,8 +238,11 @@ fn wallpaper_current() -> Option<String> {
 
 fn wallpaper_cmd(args: &[String]) -> Result<()> {
     let arg = args.first().map(String::as_str)
-        .ok_or_else(|| anyhow::anyhow!("wallpaper: usage: wallpaper <path|random|next|list>"))?;
+        .ok_or_else(|| anyhow::anyhow!("wallpaper: usage: wallpaper <path|random|next|list|default>"))?;
     let path = match arg {
+        "default" | "none" => {
+            return ipc_call(json!({"cmd": "wallpaper", "path": "default"}));
+        }
         "list" => {
             let cur = wallpaper_current();
             for p in wallpaper_library()? {

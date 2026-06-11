@@ -1,7 +1,7 @@
 /* vendibar default theme — Catppuccin Mocha, minimal macOS style.
  *
- * The bar is invisible: no background, no borders, no pills. Only the
- * content reads. Override wholesale at ~/.config/vendi/vendibar.css.
+ * A floating solid bar: neutral gray rounded rectangle hovering under the
+ * top edge. Override wholesale at ~/.config/vendi/vendibar.css.
  */
 
 window {
@@ -10,6 +10,9 @@ window {
 
 .bar {
   padding: 0 14px;
+  background: #35363d;       /* desaturated Surface0 — neutral, not purple */
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 11px;
   font-family: "JetBrainsMonoNL Nerd Font", "JetBrainsMono Nerd Font", monospace;
   font-size: 13px;
   color: #cdd6f4;            /* Mocha text */

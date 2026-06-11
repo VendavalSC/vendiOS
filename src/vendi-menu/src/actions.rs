@@ -61,8 +61,8 @@ fn root_menu() -> Rc<MenuDef> {
     let settings = MenuDef {
         title: "Settings",
         items: vec![
-            sh("\u{f035b}", "Bar: minimal", "sh -c 'mkdir -p ~/.config/vendi; echo classic > ~/.config/vendi/bar; pkill -x vendiwm'"),
-            sh("\u{f035c}", "Bar: pro",     "sh -c 'mkdir -p ~/.config/vendi; echo pro > ~/.config/vendi/bar; pkill -x vendiwm'"),
+            sh("\u{f035b}", "Bar: minimal", "vendi bar classic"),
+            sh("\u{f035c}", "Bar: pro",     "vendi bar pro"),
             sh("\u{f0493}", "WM config",  format!("{FLOAT_TERM} sh -c 'mkdir -p ~/.config/vendi && ${{EDITOR:-vim}} ~/.config/vendi/vendiwm.kdl'")),
             sh("\u{f035b}", "Bar style",  format!("{FLOAT_TERM} sh -c 'mkdir -p ~/.config/vendi && ${{EDITOR:-vim}} ~/.config/vendi/vendibar.css'")),
             sh("\u{f0450}", "Reload session", "pkill -x vendiwm"),
@@ -117,10 +117,11 @@ fn root_menu() -> Rc<MenuDef> {
     })
 }
 
-// ── theme / wallpaper (write the theme block, relaunch the compositor) ───────
+// ── theme / wallpaper (applied live over IPC, no compositor restart) ─────────
 
 // Theme switching delegates to `vendi theme`, which recolors EVERYTHING
-// (vendiwm, bar, menu, alacritty, swaylock), then relaunches the session.
+// (vendiwm, bar, menu, alacritty, swaylock) and applies it live — the
+// compositor re-reads its config over IPC, no session restart.
 fn theme_menu() -> MenuDef {
     // Big global themes — one pick, full look. Matches `vendi theme list`.
     const THEMES: &[(&str, &str, &str)] = &[
@@ -133,7 +134,7 @@ fn theme_menu() -> MenuDef {
     MenuDef {
         title: "Theme",
         items: THEMES.iter().map(|&(glyph, label, id)| {
-            sh(glyph, label, format!("sh -c 'vendi theme {id} >/dev/null; pkill -x vendiwm'"))
+            sh(glyph, label, format!("vendi theme {id}"))
         }).collect(),
     }
 }
@@ -144,7 +145,8 @@ fn wallpaper_menu() -> MenuDef {
         label: "Default gradient".into(),
         entry: Entry::Func(Box::new(|| {
             set_theme_key("wallpaper", None);
-            relaunch();
+            let _ = std::process::Command::new("vendi-ctl")
+                .args(["wallpaper", "default"]).spawn();
         })),
     }];
 
@@ -171,8 +173,10 @@ fn wallpaper_menu() -> MenuDef {
                 glyph: "\u{f0e09}",
                 label,
                 entry: Entry::Func(Box::new(move || {
-                    set_theme_key("wallpaper", Some(&format!("\"{path_str}\"")));
-                    relaunch();
+                    // Live IPC swap (with the circle-reveal animation); the
+                    // compositor persists the choice itself.
+                    let _ = std::process::Command::new("vendi-ctl")
+                        .args(["wallpaper", &path_str]).spawn();
                 })),
             });
         }
@@ -233,10 +237,6 @@ pub(crate) fn set_theme_key(key: &str, value: Option<&str>) {
     if let Err(e) = std::fs::write(&path, lines.join("\n") + "\n") {
         tracing::error!(?e, "write vendiwm.kdl failed");
     }
-}
-
-pub(crate) fn relaunch() {
-    let _ = std::process::Command::new("pkill").args(["-x", "vendiwm"]).spawn();
 }
 
 // ── power profile menu (`vendi-menu power`, the bar battery click) ──────────

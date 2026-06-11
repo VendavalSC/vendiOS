@@ -64,6 +64,10 @@ fn build_ui(app: &gtk::Application) {
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
+    // Float the bar: a solid rounded rectangle hovering off the edges.
+    window.set_margin(Edge::Top, 8);
+    window.set_margin(Edge::Left, 10);
+    window.set_margin(Edge::Right, 10);
     window.auto_exclusive_zone_enable();
     window.set_default_size(-1, BAR_HEIGHT);
 

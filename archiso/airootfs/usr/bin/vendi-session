@@ -15,6 +15,10 @@ LOG="${HOME}/logs/vendi-session.log"
 # Release Plymouth's hold on the framebuffer so the compositor takes over.
 plymouth quit --retain-splash 2>/dev/null || true
 
+# The exec below turns this shell into the compositor, so $$ is the
+# compositor's pid — the bar supervisor watches it to know when to quit.
+WM_PID=$$
+
 # Best-effort: wait for the compositor's wayland socket to appear, then bring
 # up waybar and friends as siblings inside the same session. Backgrounded so
 # the compositor exec below stays in the foreground for greetd.
@@ -36,26 +40,26 @@ spawn_desktop() {
     # Status bar — ~/.config/vendi/bar picks the flavor:
     #   classic (default)  GTK4 vendibar, minimal macOS-style
     #   pro                quickshell island bar (vendibar-pro)
-    # Retry loop: a stale wayland socket file from a previous session can
-    # make the wait above return before the compositor actually listens.
-    local bar_choice
-    bar_choice=$(cat "$HOME/.config/vendi/bar" 2>/dev/null || echo classic)
+    # Supervisor loop: re-reads the choice file every spawn, so
+    # `vendi bar <classic|pro>` only has to kill the running bar to switch —
+    # no compositor restart. Exits with the compositor ($WM_PID).
+    # Mako: notification daemon for the classic bar only. vendibar-pro is its
+    # own notification server (island toasts) — mako would race it for the
+    # org.freedesktop.Notifications bus name.
     (
-        for _ in $(seq 1 15); do
+        while kill -0 "$WM_PID" 2>/dev/null; do
+            local bar_choice
+            bar_choice=$(cat "$HOME/.config/vendi/bar" 2>/dev/null || echo classic)
             if [[ "$bar_choice" == "pro" ]] && command -v quickshell >/dev/null; then
-                quickshell -c vendibar-pro >>"$LOG" 2>&1 && break
+                pkill -x mako 2>/dev/null || true
+                quickshell -c vendibar-pro >>"$LOG" 2>&1 || true
             else
-                GSK_RENDERER=cairo vendibar >>"$LOG" 2>&1 && break
+                if ! pgrep -x mako >/dev/null; then mako >>"$LOG" 2>&1 & fi
+                GSK_RENDERER=cairo vendibar >>"$LOG" 2>&1 || true
             fi
-            sleep 1
+            sleep 0.5
         done
     ) &
-    # Mako: notification daemon for the classic bar. vendibar-pro is its own
-    # notification server (island toasts) — mako would race it for the
-    # org.freedesktop.Notifications bus name.
-    if [[ "$bar_choice" != "pro" ]] || ! command -v quickshell >/dev/null; then
-        mako >>"$LOG" 2>&1 &
-    fi
 }
 
 (spawn_desktop) &

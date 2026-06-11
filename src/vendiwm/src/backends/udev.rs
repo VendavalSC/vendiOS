@@ -101,6 +101,50 @@ smithay::backend::renderer::element::render_elements! {
 
 type FrameElement = OutputRenderElements;
 
+/// Render `elements[skip..]` (bottom-up) into an offscreen texture, read it
+/// back, write a PNG. Shared by the normal and locked screenshot paths.
+fn save_screenshot(
+    renderer: &mut GlesRenderer,
+    elements: &[FrameElement],
+    skip: usize,
+    bg: Color32F,
+    out_size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    scale: smithay::utils::Scale<f64>,
+    path: &str,
+) -> anyhow::Result<()> {
+    use smithay::backend::renderer::{Bind, ExportMem, Frame, Offscreen, Renderer as _};
+    use smithay::backend::renderer::element::Element as _;
+    let size_phys = smithay::utils::Size::<i32, smithay::utils::Physical>::from((out_size.w, out_size.h));
+    let full = smithay::utils::Rectangle::from_size(size_phys);
+    let mut tex: smithay::backend::renderer::gles::GlesTexture = renderer
+        .create_buffer(smithay::backend::allocator::Fourcc::Abgr8888, (out_size.w, out_size.h).into())
+        .map_err(|e| anyhow::anyhow!("create_buffer: {e:?}"))?;
+    {
+        let mut fb = renderer.bind(&mut tex)
+            .map_err(|e| anyhow::anyhow!("bind: {e:?}"))?;
+        let mut frame = renderer.render(&mut fb, size_phys, Transform::Normal)
+            .map_err(|e| anyhow::anyhow!("render: {e:?}"))?;
+        frame.clear(bg, &[full]).map_err(|e| anyhow::anyhow!("clear: {e:?}"))?;
+        for elem in elements[skip..].iter().rev() {
+            let src = elem.src();
+            let dst = elem.geometry(scale);
+            let _ = RenderElement::<GlesRenderer>::draw(elem, &mut frame, src, dst, &[full], &[], None);
+        }
+        let _ = frame.finish().map_err(|e| anyhow::anyhow!("finish: {e:?}"))?;
+    }
+    let mapping = renderer.copy_texture(
+        &tex,
+        smithay::utils::Rectangle::from_size((out_size.w, out_size.h).into()),
+        smithay::backend::allocator::Fourcc::Abgr8888,
+    ).map_err(|e| anyhow::anyhow!("copy_texture: {e:?}"))?;
+    let data = renderer.map_texture(&mapping)
+        .map_err(|e| anyhow::anyhow!("map_texture: {e:?}"))?;
+    let img = image::RgbaImage::from_raw(out_size.w as u32, out_size.h as u32, data.to_vec())
+        .ok_or_else(|| anyhow::anyhow!("mapping size mismatch"))?;
+    img.save(path)?;
+    Ok(())
+}
+
 /// Concrete `DrmCompositor` parameterisation we use. `U=()` means we hand a
 /// unit value to `queue_frame` (no per-frame presentation feedback userdata).
 type GbmDrmCompositor = DrmCompositor<
@@ -980,6 +1024,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         ) {
             elements.push(OutputRenderElements::Memory(elem));
         }
+        let cursor_end = elements.len();
         if let Some(lock) = &state.lock_surface {
             elements.extend(
                 smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
@@ -999,6 +1044,18 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             locker.lock();
             state.locked = true;
             tracing::info!("session locked");
+        }
+        // Screenshots still work while locked — they capture only the lock
+        // surface (never the desktop underneath).
+        if let Some(path) = state.screenshot.take() {
+            let out_size = state.space.output_geometry(&surface.output)
+                .map(|g| g.size)
+                .unwrap_or_else(|| (1, 1).into());
+            let bg = Color32F::new(0.0, 0.0, 0.0, 1.0);
+            match save_screenshot(renderer, &elements, cursor_end, bg, out_size, scale, &path) {
+                Ok(())  => tracing::info!(%path, "screenshot saved (locked)"),
+                Err(e) => tracing::warn!(?e, %path, "screenshot failed"),
+            }
         }
         let time_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1745,44 +1802,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // Re-render the element stack (sans cursor) into an offscreen texture,
     // read it back, write PNG. One-shot; failures only log.
     if let Some(path) = state.screenshot.take() {
-        use smithay::backend::renderer::{Bind, ExportMem, Frame, Offscreen, Renderer as _};
-        use smithay::backend::renderer::element::Element as _;
         let out_size = state.space.output_geometry(&surface.output)
             .map(|g| g.size)
             .unwrap_or_else(|| (1, 1).into());
-        let shot = (|| -> anyhow::Result<()> {
-            let size_phys = smithay::utils::Size::<i32, smithay::utils::Physical>::from((out_size.w, out_size.h));
-            let full = smithay::utils::Rectangle::from_size(size_phys);
-            let mut tex: smithay::backend::renderer::gles::GlesTexture = renderer
-                .create_buffer(smithay::backend::allocator::Fourcc::Abgr8888, (out_size.w, out_size.h).into())
-                .map_err(|e| anyhow::anyhow!("create_buffer: {e:?}"))?;
-            {
-                let mut fb = renderer.bind(&mut tex)
-                    .map_err(|e| anyhow::anyhow!("bind: {e:?}"))?;
-                let mut frame = renderer.render(&mut fb, size_phys, Transform::Normal)
-                    .map_err(|e| anyhow::anyhow!("render: {e:?}"))?;
-                let bg = Color32F::new(theme.background[0], theme.background[1], theme.background[2], 1.0);
-                frame.clear(bg, &[full]).map_err(|e| anyhow::anyhow!("clear: {e:?}"))?;
-                for elem in elements[after_cursor..].iter().rev() {
-                    let src = elem.src();
-                    let dst = elem.geometry(scale);
-                    let _ = RenderElement::<GlesRenderer>::draw(elem, &mut frame, src, dst, &[full], &[], None);
-                }
-                let _ = frame.finish().map_err(|e| anyhow::anyhow!("finish: {e:?}"))?;
-            }
-            let mapping = renderer.copy_texture(
-                &tex,
-                smithay::utils::Rectangle::from_size((out_size.w, out_size.h).into()),
-                smithay::backend::allocator::Fourcc::Abgr8888,
-            ).map_err(|e| anyhow::anyhow!("copy_texture: {e:?}"))?;
-            let data = renderer.map_texture(&mapping)
-                .map_err(|e| anyhow::anyhow!("map_texture: {e:?}"))?;
-            let img = image::RgbaImage::from_raw(out_size.w as u32, out_size.h as u32, data.to_vec())
-                .ok_or_else(|| anyhow::anyhow!("mapping size mismatch"))?;
-            img.save(&path)?;
-            Ok(())
-        })();
-        match shot {
+        let bg = Color32F::new(theme.background[0], theme.background[1], theme.background[2], 1.0);
+        match save_screenshot(renderer, &elements, after_cursor, bg, out_size, scale, &path) {
             Ok(())  => tracing::info!(%path, "screenshot saved"),
             Err(e) => tracing::warn!(?e, %path, "screenshot failed"),
         }
