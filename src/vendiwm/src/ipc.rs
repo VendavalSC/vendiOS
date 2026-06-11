@@ -50,6 +50,9 @@ pub enum Request {
     Screenshot    { path: Option<String> },
     /// Lock the session (vendi-lock, the compositor-native lock screen).
     Lock,
+    /// Switch the wallpaper at runtime. The path is persisted to
+    /// ~/.config/vendi/wallpaper so it survives restarts.
+    Wallpaper     { path: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,7 +328,36 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
             state.lock_session();
             Response::Ok { ok: true }
         }
+        Request::Wallpaper { path } => {
+            if !std::path::Path::new(&path).is_file() {
+                Response::Error { error: format!("no such file: {path}") }
+            } else {
+                state.config.theme.wallpaper = Some(path.clone());
+                state.wallpaper_gen += 1;
+                state.pending_redraw = true;
+                if let Err(e) = persist_wallpaper(&path) {
+                    tracing::warn!(?e, "wallpaper set but not persisted");
+                }
+                tracing::info!(%path, "wallpaper switched");
+                Response::Ok { ok: true }
+            }
+        }
     };
 
     Some(serde_json::to_string(&resp).unwrap_or_else(|e| format!(r#"{{"error":"serialize: {e}"}}"#)))
+}
+
+/// Write the active wallpaper path to ~/.config/vendi/wallpaper (atomic:
+/// tmp + rename). Config::load reads it back as the strongest override.
+fn persist_wallpaper(path: &str) -> std::io::Result<()> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .ok_or_else(|| std::io::Error::other("no HOME"))?
+        .join("vendi");
+    std::fs::create_dir_all(&base)?;
+    let target = base.join("wallpaper");
+    let tmp = base.join("wallpaper.tmp");
+    std::fs::write(&tmp, format!("{path}\n"))?;
+    std::fs::rename(&tmp, &target)
 }

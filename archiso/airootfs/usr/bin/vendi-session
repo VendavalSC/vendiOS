@@ -50,8 +50,12 @@ spawn_desktop() {
             sleep 1
         done
     ) &
-    # Mako: lightweight notification daemon, matches the bar's palette.
-    mako    >>"$LOG" 2>&1 &
+    # Mako: notification daemon for the classic bar. vendibar-pro is its own
+    # notification server (island toasts) — mako would race it for the
+    # org.freedesktop.Notifications bus name.
+    if [[ "$bar_choice" != "pro" ]] || ! command -v quickshell >/dev/null; then
+        mako >>"$LOG" 2>&1 &
+    fi
 }
 
 (spawn_desktop) &

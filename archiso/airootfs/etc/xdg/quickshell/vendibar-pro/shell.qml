@@ -1,17 +1,28 @@
 // vendibar Pro — dynamic notch bar for vendiOS (quickshell/QML).
 //
 // One silhouette hugging the top edge: a thin strip with three notches
-// flowing out of it. The notches are alive — click the clock and the center
-// notch swells into a dashboard (calendar + media); click the stats and the
-// right notch opens the control center (volume, system, quick actions).
-// Dynamic-Island morphs: widths and heights spring with content.
+// flowing out of it. The notches are alive:
+//   center — click the clock: dashboard (big clock, weather, calendar,
+//            wallpaper picker, media with album art)
+//   right  — click the stats: control center (volume, system, notification
+//            history, quick actions). Notifications toast out of this notch
+//            (vendibar-pro IS the notification daemon), and external volume
+//            changes bulge it into a transient OSD.
 //
+// Native quickshell services: Pipewire (live volume), UPower (battery),
+// Mpris (media), Notifications (org.freedesktop.Notifications), SystemTray.
 // Theme accent follows ~/.config/vendi/theme-state live; compositor state
 // over vendi-ctl.            Run: quickshell -c vendibar-pro
 //
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import Quickshell.Widgets
+import Quickshell.Services.Pipewire
+import Quickshell.Services.UPower
+import Quickshell.Services.Mpris
+import Quickshell.Services.Notifications
+import Quickshell.Services.SystemTray
 import QtQuick
 import QtQuick.Layouts
 
@@ -23,6 +34,7 @@ ShellRoot {
     property color panel:  Qt.rgba(0.043, 0.043, 0.071, 0.96)   // #0b0b12
     property color fg:     "#cdd6f4"
     property color dim:    "#717189"
+    property color alert:  "#f38ba8"
     property string mono:  "JetBrainsMonoNL Nerd Font"
 
     // geometry
@@ -90,18 +102,10 @@ ShellRoot {
         onExited: { if (acc.length) root.wsList = acc; acc = []; }
     }
 
-    // ── system state ─────────────────────────────────────────────────────────
+    // ── cpu / mem (proc files — no daemon needed) ────────────────────────────
     property real cpu: 0
     property real mem: 0
     property var cpuPrev: null
-    property int volume: -1
-    property bool muted: false
-    property string netIcon: "󰤭"
-    property int battery: -1
-    property bool charging: false
-    property bool hasBattery: false
-    property string musicStatus: ""
-    property string musicTrack: ""
 
     FileView {
         id: procStat
@@ -127,19 +131,50 @@ ShellRoot {
     }
     Timer {
         interval: 2500; running: true; repeat: true; triggeredOnStart: true
-        onTriggered: { procStat.reload(); memInfo.reload(); volProc.running = true; }
+        onTriggered: { procStat.reload(); memInfo.reload(); }
     }
 
-    Process {
-        id: volProc
-        command: ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"]
-        stdout: SplitParser {
-            onRead: line => {
-                const m = /Volume:\s+([\d.]+)(\s+\[MUTED\])?/.exec(line);
-                if (m) { root.volume = Math.round(parseFloat(m[1]) * 100); root.muted = !!m[2]; }
-            }
-        }
+    // ── audio (pipewire, live — no polling) ──────────────────────────────────
+    PwObjectTracker { objects: [Pipewire.defaultAudioSink] }
+    property var sinkAudio: Pipewire.defaultAudioSink?.audio ?? null
+    property int volume: sinkAudio ? Math.round(sinkAudio.volume * 100) : -1
+    property bool muted: sinkAudio?.muted ?? false
+    function setVolume(pct) {
+        if (!sinkAudio) return;
+        sinkAudio.muted = false;
+        sinkAudio.volume = Math.max(0, Math.min(1, pct / 100));
     }
+
+    // volume OSD: external changes bulge the right notch for a moment.
+    // Armed late so the initial pipewire binding doesn't flash it at startup.
+    property bool osdShow: false
+    property bool osdArmed: false
+    Timer { interval: 4000; running: true; onTriggered: root.osdArmed = true }
+    Timer { id: osdTimer; interval: 1400; onTriggered: root.osdShow = false }
+    Connections {
+        target: root.sinkAudio
+        function onVolumeChanged() { root.pokeOsd() }
+        function onMutedChanged()  { root.pokeOsd() }
+    }
+    function pokeOsd() {
+        if (!osdArmed) return;
+        osdShow = true;
+        osdTimer.restart();
+    }
+
+    // ── battery (upower) ─────────────────────────────────────────────────────
+    property var batDev: UPower.displayDevice
+    property bool hasBattery: (batDev?.isLaptopBattery ?? false)
+    property int battery: {
+        const p = batDev?.percentage ?? 0;
+        return Math.round(p <= 1 ? p * 100 : p);
+    }
+    property bool charging: batDev
+        ? batDev.state === UPowerDeviceState.Charging
+        : false
+
+    // ── network ──────────────────────────────────────────────────────────────
+    property string netIcon: "󰤭"
     Process {
         id: netProc
         property bool found: false
@@ -155,41 +190,122 @@ ShellRoot {
         onStarted: found = false
         onExited: { if (!found) root.netIcon = "󰤭"; }
     }
+    Timer {
+        interval: 8000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: netProc.running = true
+    }
+
+    // ── media (mpris) ────────────────────────────────────────────────────────
+    property var player: null
+    property bool musicPlaying: player
+        ? player.playbackState === MprisPlaybackState.Playing
+        : false
+    property string musicTrack: {
+        if (!player) return "";
+        const artist = player.trackArtist || "";
+        const title = player.trackTitle || "";
+        return artist && title ? artist + " — " + title : (title || artist);
+    }
+    property real musicProgress: 0
+    function pickPlayer() {
+        const all = Mpris.players.values;
+        return all.find(p => p.playbackState === MprisPlaybackState.Playing) ?? all[0] ?? null;
+    }
+
+    // ── weather (wttr.in) ────────────────────────────────────────────────────
+    property string weather: ""
     Process {
-        id: batProc
-        property var lines: []
-        command: ["sh", "-c",
-            "cat /sys/class/power_supply/BAT*/capacity /sys/class/power_supply/BAT*/status 2>/dev/null"]
-        stdout: SplitParser { onRead: l => batProc.lines.push(l) }
-        onStarted: lines = []
-        onExited: {
-            root.hasBattery = lines.length >= 2;
-            if (root.hasBattery) {
-                root.battery = parseInt(lines[0]);
-                root.charging = lines[1].trim() === "Charging";
+        id: wxProc
+        command: ["sh", "-c", "curl -sf --max-time 6 'https://wttr.in/?format=%c+%t' | head -c 64"]
+        stdout: SplitParser {
+            onRead: l => {
+                const w = l.trim().replace(/\s+/g, " ");
+                if (w && !w.includes("Unknown")) root.weather = w;
             }
         }
     }
     Timer {
-        interval: 8000; running: true; repeat: true; triggeredOnStart: true
-        onTriggered: { netProc.running = true; batProc.running = true; }
+        interval: 1800000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: wxProc.running = true
+    }
+    Timer {   // retry fast until the first fix lands (boot races the network)
+        interval: 90000; running: root.weather === ""; repeat: true
+        onTriggered: wxProc.running = true
     }
 
+    // ── wallpapers (~/Pictures/Wallpapers) ───────────────────────────────────
+    property var wallpapers: []
+    property string currentWall: ""
     Process {
-        id: musicProc
-        command: ["playerctl", "--follow", "metadata", "--format", "{{status}}|{{artist}} — {{title}}"]
+        id: wpList
+        command: ["sh", "-c",
+            "ls -1 \"$HOME\"/Pictures/Wallpapers/*.png \"$HOME\"/Pictures/Wallpapers/*.jpg " +
+            "\"$HOME\"/Pictures/Wallpapers/*.jpeg \"$HOME\"/Pictures/Wallpapers/*.webp 2>/dev/null"]
         running: true
-        stdout: SplitParser {
-            onRead: line => {
-                const i = line.indexOf("|");
-                if (i < 0) { root.musicStatus = ""; return; }
-                root.musicStatus = line.slice(0, i);
-                root.musicTrack = line.slice(i + 1);
-            }
-        }
-        onExited: musicRetry.start()
+        property var acc: []
+        stdout: SplitParser { onRead: l => { if (l.trim()) wpList.acc.push(l.trim()); } }
+        onStarted: acc = []
+        onExited: { root.wallpapers = acc; acc = []; }
     }
-    Timer { id: musicRetry; interval: 5000; onTriggered: musicProc.running = true }
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/vendi/wallpaper"
+        watchChanges: true
+        onLoaded: root.currentWall = text().trim()
+        onFileChanged: reload()
+    }
+
+    // ── notifications (we ARE the daemon) ────────────────────────────────────
+    // toasts: live queue shown in the right notch (newest first served).
+    // notifHistory: plain snapshots for the control center (safe after the
+    // client withdraws the notification).
+    property var toasts: []
+    property var notifHistory: []
+
+    NotificationServer {
+        id: notifServer
+        bodySupported: true
+        actionsSupported: true
+        imageSupported: true
+        onNotification: notif => {
+            notif.tracked = true;
+            const t = {
+                app:     notif.appName || "notification",
+                summary: notif.summary || "",
+                body:    (notif.body || "").replace(/<[^>]*>/g, ""),
+                icon:    notif.appIcon || "",
+                image:   notif.image || "",
+                n:       notif,
+            };
+            root.toasts = root.toasts.concat([t]);
+            toastTimer.restart();
+            const when = Qt.formatDateTime(new Date(), "HH:mm");
+            root.notifHistory = [{ app: t.app, summary: t.summary, when: when }]
+                .concat(root.notifHistory).slice(0, 30);
+        }
+    }
+    Timer {
+        id: toastTimer
+        interval: 5500
+        repeat: true
+        running: root.toasts.length > 0
+        onTriggered: root.shiftToast(true)
+    }
+    function shiftToast(expire) {
+        if (!toasts.length) return;
+        const t = toasts[0];
+        try { expire ? t.n.expire() : t.n.dismiss(); } catch (e) {}
+        toasts = toasts.slice(1);
+    }
+
+    // ── 1s heartbeat: clocks, media progress, active player ─────────────────
+    Timer {
+        interval: 1000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: {
+            root.player = root.pickPlayer();
+            root.musicProgress = (root.player && root.player.length > 0)
+                ? Math.max(0, Math.min(1, root.player.position / root.player.length)) : 0;
+        }
+    }
 
     // ── the bar ──────────────────────────────────────────────────────────────
     Variants {
@@ -208,12 +324,29 @@ ShellRoot {
             function toggleCenter() { centerOpen = !centerOpen; if (centerOpen) rightOpen = false; }
             function toggleRight()  { rightOpen = !rightOpen;  if (rightOpen) centerOpen = false; }
 
-            // notch dimensions, all springy
+            // right notch mode: control wins, then toasts, then volume OSD
+            readonly property string rightMode:
+                rightOpen ? "control"
+                : root.toasts.length > 0 ? "toast"
+                : root.osdShow ? "osd"
+                : "idle"
+
+            // notch dimensions, all springy. Idle notches grow a hair on
+            // hover — the island invites the click.
             property real lw: leftRow.implicitWidth + root.pad * 2
-            property real cw: centerOpen ? 470 : centerRow.implicitWidth + root.pad * 2
-            property real rw: rightOpen ? 400 : rightRow.implicitWidth + root.pad * 2
-            property real ch: centerOpen ? 332 : root.barH
-            property real rh: rightOpen ? 296 : root.barH
+            property real cw: centerOpen ? 480
+                : centerRow.implicitWidth + root.pad * 2 + (centerHover.hovered ? 10 : 0)
+            property real rw: rightMode === "control" ? 400
+                : rightMode === "toast" ? 380
+                : rightMode === "osd" ? 270
+                : rightRow.implicitWidth + root.pad * 2 + (rightHover.hovered ? 10 : 0)
+            property real ch: centerOpen ? 462 : root.barH
+            property real rh: rightMode === "control"
+                    ? 312 + (root.notifHistory.length > 0
+                             ? 30 + Math.min(root.notifHistory.length, 3) * 22 : 0)
+                : rightMode === "toast"
+                    ? Math.max(root.barH, toastCol.implicitHeight + root.stripH + 26)
+                : root.barH
             Behavior on lw { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
             Behavior on cw { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
             Behavior on rw { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
@@ -369,7 +502,7 @@ ShellRoot {
                 }
             }
 
-            // ── center notch collapsed row: clock · date ────────────────────
+            // ── center notch collapsed row: clock · date · weather ──────────
             RowLayout {
                 id: centerRow
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -380,7 +513,10 @@ ShellRoot {
                 Behavior on opacity { NumberAnimation { duration: 140 } }
                 Mono { id: clockT; font.bold: true; font.pixelSize: 14 }
                 Mono { id: dateT; color: root.dim }
+                Sep { visible: root.weather !== "" }
+                Mono { text: root.weather; visible: root.weather !== ""; color: root.dim }
                 TapHandler { onTapped: panelWin.toggleCenter() }
+                HoverHandler { id: centerHover; cursorShape: Qt.PointingHandCursor }
             }
             Timer {
                 interval: 1000; running: true; repeat: true; triggeredOnStart: true
@@ -410,7 +546,12 @@ ShellRoot {
                 property int monthOff: 0
                 Connections {
                     target: panelWin
-                    function onCenterOpenChanged() { if (panelWin.centerOpen) dashboard.monthOff = 0; }
+                    function onCenterOpenChanged() {
+                        if (panelWin.centerOpen) {
+                            dashboard.monthOff = 0;
+                            wpList.running = true;   // rescan the library
+                        }
+                    }
                 }
 
                 ColumnLayout {
@@ -426,6 +567,7 @@ ShellRoot {
                             Mono { id: bigDate; color: root.dim }
                         }
                         Item { Layout.fillWidth: true }
+                        Mono { text: root.weather; visible: root.weather !== ""; color: root.dim }
                         Mono {
                             text: "󰅖"
                             color: root.dim
@@ -517,34 +659,131 @@ ShellRoot {
 
                     Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
 
-                    // media controls
+                    // wallpaper picker — the library at ~/Pictures/Wallpapers
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 14
-                        Mono {
-                            text: root.musicStatus.length > 0
-                                  ? (root.musicTrack.length > 36 ? root.musicTrack.slice(0, 36) + "…" : root.musicTrack)
-                                  : "nothing playing"
-                            color: root.dim
+                        Mono { text: "Wallpapers"; font.bold: true; color: root.accent }
+                        Item { Layout.fillWidth: true }
+                        Glyph {
+                            text: "󰒝"; font.pixelSize: 14
+                            visible: root.wallpapers.length > 1
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: Quickshell.execDetached(["vendi-ctl", "wallpaper", "random"])
+                            }
+                        }
+                    }
+                    ListView {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 56
+                        orientation: ListView.Horizontal
+                        spacing: 8
+                        clip: true
+                        visible: root.wallpapers.length > 0
+                        model: root.wallpapers
+                        delegate: Item {
+                            id: wpThumb
+                            required property var modelData
+                            width: 96
+                            height: 54
+                            ClippingRectangle {
+                                anchors.fill: parent
+                                radius: 9
+                                color: Qt.rgba(1, 1, 1, 0.05)
+                                Image {
+                                    anchors.fill: parent
+                                    source: "file://" + wpThumb.modelData
+                                    fillMode: Image.PreserveAspectCrop
+                                    sourceSize.width: 192
+                                    asynchronous: true
+                                }
+                            }
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: 9
+                                color: "transparent"
+                                border.width: 2
+                                border.color: wpThumb.modelData === root.currentWall
+                                    ? root.accent : Qt.rgba(1, 1, 1, 0.10)
+                                Behavior on border.color { ColorAnimation { duration: 150 } }
+                            }
+                            TapHandler {
+                                onTapped: Quickshell.execDetached(
+                                    ["vendi-ctl", "wallpaper", wpThumb.modelData])
+                            }
+                            HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        }
+                    }
+                    Mono {
+                        visible: root.wallpapers.length === 0
+                        text: "drop images in ~/Pictures/Wallpapers"
+                        color: root.dim
+                    }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
+
+                    // media — album art, track, controls, progress
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        ClippingRectangle {
+                            Layout.preferredWidth: 40
+                            Layout.preferredHeight: 40
+                            radius: 8
+                            color: Qt.rgba(1, 1, 1, 0.05)
+                            visible: (root.player?.trackArtUrl ?? "") !== ""
+                            Image {
+                                anchors.fill: parent
+                                source: root.player?.trackArtUrl ?? ""
+                                fillMode: Image.PreserveAspectCrop
+                                sourceSize.width: 80
+                                asynchronous: true
+                            }
+                        }
+                        ColumnLayout {
                             Layout.fillWidth: true
+                            spacing: 3
+                            Mono {
+                                text: root.musicTrack !== ""
+                                      ? (root.musicTrack.length > 34 ? root.musicTrack.slice(0, 34) + "…" : root.musicTrack)
+                                      : "nothing playing"
+                                color: root.musicTrack !== "" ? root.fg : root.dim
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 3
+                                radius: 1.5
+                                color: Qt.rgba(1, 1, 1, 0.10)
+                                visible: root.musicTrack !== ""
+                                Rectangle {
+                                    width: parent.width * root.musicProgress
+                                    height: parent.height
+                                    radius: 1.5
+                                    color: root.accent
+                                    Behavior on width { NumberAnimation { duration: 500 } }
+                                }
+                            }
                         }
                         Glyph {
                             text: "󰒮"; font.pixelSize: 15
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: Quickshell.execDetached(["playerctl", "previous"]) }
+                                        onClicked: root.player?.previous() }
                         }
                         Glyph {
-                            text: root.musicStatus === "Playing" ? "󰏤" : "󰐊"
+                            text: root.musicPlaying ? "󰏤" : "󰐊"
                             color: root.accent; font.pixelSize: 16
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: Quickshell.execDetached(["playerctl", "play-pause"]) }
+                                        onClicked: root.player?.togglePlaying() }
                         }
                         Glyph {
                             text: "󰒭"; font.pixelSize: 15
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: Quickshell.execDetached(["playerctl", "next"]) }
+                                        onClicked: root.player?.next() }
                         }
                     }
+
+                    Item { Layout.fillHeight: true }
                 }
             }
 
@@ -556,14 +795,15 @@ ShellRoot {
                 y: root.stripH
                 height: root.barH - root.stripH
                 spacing: 12
-                opacity: panelWin.rightOpen ? 0 : 1
+                opacity: panelWin.rightMode === "idle" ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: 140 } }
+                HoverHandler { id: rightHover }
 
                 RowLayout {
                     spacing: 8
-                    visible: root.musicStatus.length > 0
+                    visible: root.musicTrack !== ""
                     Mono {
-                        text: root.musicStatus === "Playing" ? "󰐊" : "󰏤"
+                        text: root.musicPlaying ? "󰐊" : "󰏤"
                         color: root.accent
                         font.pixelSize: 13
                     }
@@ -571,15 +811,33 @@ ShellRoot {
                         text: root.musicTrack.length > 26 ? root.musicTrack.slice(0, 26) + "…" : root.musicTrack
                         color: root.dim
                     }
-                    TapHandler { onTapped: Quickshell.execDetached(["playerctl", "play-pause"]) }
+                    TapHandler { onTapped: root.player?.togglePlaying() }
                 }
-                Sep { visible: root.musicStatus.length > 0 }
+                Sep { visible: root.musicTrack !== "" }
+
+                // system tray (icons only; click = activate)
+                RowLayout {
+                    spacing: 8
+                    visible: SystemTray.items.values.length > 0
+                    Repeater {
+                        model: SystemTray.items
+                        IconImage {
+                            required property var modelData
+                            implicitSize: 16
+                            source: modelData.icon
+                            Layout.alignment: Qt.AlignVCenter
+                            TapHandler { onTapped: modelData.activate() }
+                            HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        }
+                    }
+                }
+                Sep { visible: SystemTray.items.values.length > 0 }
 
                 RowLayout {
                     spacing: 6
-                    Glyph { text: "󰻠"; color: root.cpu > 85 ? "#f38ba8" : root.dim }
+                    Glyph { text: "󰻠"; color: root.cpu > 85 ? root.alert : root.dim }
                     Mono { text: Math.round(root.cpu) + "%" }
-                    Glyph { text: "󰍛"; color: root.mem > 85 ? "#f38ba8" : root.dim }
+                    Glyph { text: "󰍛"; color: root.mem > 85 ? root.alert : root.dim }
                     Mono { text: Math.round(root.mem) + "%" }
                     Glyph { text: root.netIcon }
                     Mono {
@@ -589,7 +847,12 @@ ShellRoot {
                     Mono {
                         visible: root.hasBattery
                         text: (root.charging ? "󰂄" : "󰁾") + " " + root.battery + "%"
-                        color: root.battery <= 20 && !root.charging ? "#f38ba8" : root.fg
+                        color: root.battery <= 20 && !root.charging ? root.alert : root.fg
+                    }
+                    Mono {
+                        visible: root.notifHistory.length > 0
+                        text: "󰂚 " + root.notifHistory.length
+                        color: root.dim
                     }
                     TapHandler { onTapped: panelWin.toggleRight() }
                 }
@@ -603,6 +866,145 @@ ShellRoot {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: Quickshell.execDetached(["vendi-menu", "power"])
+                    }
+                }
+            }
+
+            // ── volume OSD (transient bulge of the right notch) ─────────────
+            RowLayout {
+                id: osdRow
+                anchors.right: parent.right
+                anchors.rightMargin: root.pad
+                y: root.stripH
+                height: root.barH - root.stripH
+                spacing: 10
+                visible: opacity > 0
+                opacity: panelWin.rightMode === "osd" ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 140 } }
+
+                Glyph {
+                    text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
+                    color: root.muted ? root.dim : root.accent
+                    font.pixelSize: 15
+                }
+                Rectangle {
+                    Layout.preferredWidth: 150
+                    height: 6
+                    radius: 3
+                    color: Qt.rgba(1, 1, 1, 0.10)
+                    Rectangle {
+                        width: parent.width * Math.max(0, root.volume) / 100
+                        height: parent.height
+                        radius: 3
+                        color: root.muted ? root.dim : root.accent
+                        Behavior on width { NumberAnimation { duration: 100 } }
+                    }
+                }
+                Mono { text: root.muted ? "muted" : root.volume + "%"; Layout.preferredWidth: 44 }
+            }
+
+            // ── notification toast (right notch swells around it) ───────────
+            Item {
+                id: toastBox
+                x: panelWin.width - panelWin.rw
+                y: root.stripH
+                width: panelWin.rw
+                height: panelWin.rh - root.stripH
+                clip: true
+                visible: opacity > 0
+                opacity: panelWin.rightMode === "toast" ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 160 } }
+                property var t: root.toasts.length > 0 ? root.toasts[0] : null
+
+                ColumnLayout {
+                    id: toastCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 14
+                    spacing: 6
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        IconImage {
+                            visible: (toastBox.t?.icon ?? "") !== "" || (toastBox.t?.image ?? "") !== ""
+                            implicitSize: 22
+                            source: toastBox.t
+                                ? (toastBox.t.image !== "" ? toastBox.t.image
+                                   : Quickshell.iconPath(toastBox.t.icon, true))
+                                : ""
+                        }
+                        Glyph {
+                            visible: (toastBox.t?.icon ?? "") === "" && (toastBox.t?.image ?? "") === ""
+                            text: "󰂚"; color: root.accent; font.pixelSize: 15
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 1
+                            Mono {
+                                Layout.fillWidth: true
+                                text: toastBox.t?.summary ?? ""
+                                font.bold: true
+                                elide: Text.ElideRight
+                            }
+                            Mono {
+                                text: toastBox.t?.app ?? ""
+                                color: root.dim
+                                font.pixelSize: 10
+                            }
+                        }
+                        Mono {
+                            visible: root.toasts.length > 1
+                            text: "+" + (root.toasts.length - 1)
+                            color: root.accent
+                            font.pixelSize: 11
+                        }
+                        Mono {
+                            text: "󰅖"
+                            color: root.dim
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.shiftToast(false)
+                            }
+                        }
+                    }
+                    Mono {
+                        Layout.fillWidth: true
+                        visible: (toastBox.t?.body ?? "") !== ""
+                        text: toastBox.t?.body ?? ""
+                        color: root.dim
+                        wrapMode: Text.Wrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
+                    }
+                    RowLayout {
+                        visible: (toastBox.t?.n?.actions?.length ?? 0) > 0
+                        spacing: 8
+                        Repeater {
+                            model: toastBox.t?.n?.actions ?? []
+                            Rectangle {
+                                required property var modelData
+                                implicitWidth: actionLbl.implicitWidth + 20
+                                implicitHeight: 22
+                                radius: 11
+                                color: actHover.hovered ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.07)
+                                HoverHandler { id: actHover; cursorShape: Qt.PointingHandCursor }
+                                Mono {
+                                    id: actionLbl
+                                    anchors.centerIn: parent
+                                    text: parent.modelData.text || "open"
+                                    font.pixelSize: 10
+                                }
+                                TapHandler {
+                                    onTapped: {
+                                        try { parent.modelData.invoke(); } catch (e) {}
+                                        root.toasts = root.toasts.slice(1);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -640,7 +1042,7 @@ ShellRoot {
                         }
                     }
 
-                    // volume slider
+                    // volume slider — writes straight to the pipewire node
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 10
@@ -650,10 +1052,7 @@ ShellRoot {
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    Quickshell.execDetached(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
-                                    ccVolRefresh.start();
-                                }
+                                onClicked: { if (root.sinkAudio) root.sinkAudio.muted = !root.sinkAudio.muted; }
                             }
                         }
                         Rectangle {
@@ -674,18 +1073,14 @@ ShellRoot {
                                 anchors.margins: -6
                                 cursorShape: Qt.PointingHandCursor
                                 function setVol(mx) {
-                                    const pct = Math.round(Math.max(0, Math.min(1, mx / volTrack.width)) * 100);
-                                    root.volume = pct;
-                                    Quickshell.execDetached(["wpctl", "set-volume", "-l", "1.0",
-                                        "@DEFAULT_AUDIO_SINK@", pct + "%"]);
+                                    root.setVolume(Math.round(
+                                        Math.max(0, Math.min(1, mx / volTrack.width)) * 100));
                                 }
                                 onPressed: m => setVol(m.x - 6)
                                 onPositionChanged: m => { if (pressed) setVol(m.x - 6) }
-                                onReleased: ccVolRefresh.start()
                             }
                         }
                         Mono { text: (root.volume < 0 ? "—" : root.volume + "%"); Layout.preferredWidth: 38 }
-                        Timer { id: ccVolRefresh; interval: 150; onTriggered: volProc.running = true }
                     }
 
                     // cpu / mem bars
@@ -701,7 +1096,7 @@ ShellRoot {
                                 Rectangle {
                                     width: parent.width * root.cpu / 100
                                     height: parent.height; radius: 4
-                                    color: root.cpu > 85 ? "#f38ba8" : root.accent
+                                    color: root.cpu > 85 ? root.alert : root.accent
                                     Behavior on width { NumberAnimation { duration: 300 } }
                                 }
                             }
@@ -716,11 +1111,49 @@ ShellRoot {
                                 Rectangle {
                                     width: parent.width * root.mem / 100
                                     height: parent.height; radius: 4
-                                    color: root.mem > 85 ? "#f38ba8" : root.accent
+                                    color: root.mem > 85 ? root.alert : root.accent
                                     Behavior on width { NumberAnimation { duration: 300 } }
                                 }
                             }
                             Mono { text: Math.round(root.mem) + "%"; Layout.preferredWidth: 38 }
+                        }
+                    }
+
+                    // notification history
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+                        visible: root.notifHistory.length > 0
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Mono { text: "Notifications"; font.bold: true; color: root.accent; font.pixelSize: 11 }
+                            Item { Layout.fillWidth: true }
+                            Mono {
+                                text: "clear"
+                                color: root.dim
+                                font.pixelSize: 10
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.notifHistory = []
+                                }
+                            }
+                        }
+                        Repeater {
+                            model: root.notifHistory.slice(0, 3)
+                            RowLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Mono { text: modelData.when; color: root.dim; font.pixelSize: 10 }
+                                Mono {
+                                    Layout.fillWidth: true
+                                    text: modelData.app + " · " + modelData.summary
+                                    color: root.fg
+                                    font.pixelSize: 11
+                                    elide: Text.ElideRight
+                                }
+                            }
                         }
                     }
 

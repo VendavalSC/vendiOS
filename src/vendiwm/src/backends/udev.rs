@@ -415,6 +415,7 @@ fn build_state(
         overview:               false,
         overview_t:             std::time::Instant::now(),
         screenshot:             None,
+        wallpaper_gen:          0,
         vlock: false,
         vlock_input: String::new(),
         vlock_fail: None,
@@ -493,6 +494,8 @@ pub struct SurfaceState {
     pub compositor: GbmDrmCompositor,
     /// Output-sized wallpaper (user image or the built-in gradient).
     pub wallpaper:  MemoryRenderBuffer,
+    /// Matches state.wallpaper_gen when `wallpaper` is current.
+    pub wallpaper_gen: u64,
     /// Which connector drives this surface (hotplug bookkeeping).
     pub connector:  connector::Handle,
     /// The mode we set — a different preferred mode on rescan means the
@@ -740,6 +743,7 @@ fn connect_connector(
         output,
         compositor,
         wallpaper,
+        wallpaper_gen: state.wallpaper_gen,
         connector: connector.handle(),
         mode: drm_mode,
         global,
@@ -907,6 +911,19 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let closing_anims = &mut device.closing_anims;
     let surface  = device.surfaces.get_mut(&crtc)
         .ok_or_else(|| anyhow::anyhow!("surface not found"))?;
+
+    // Wallpaper changed over IPC: rebuild this output's buffer once.
+    if surface.wallpaper_gen != state.wallpaper_gen {
+        let mode_size = surface.mode.size();
+        surface.wallpaper = crate::render::wallpaper_buffer(
+            mode_size.0 as i32,
+            mode_size.1 as i32,
+            state.config.theme.wallpaper.as_deref(),
+            state.config.theme.background,
+            state.config.theme.accent,
+        );
+        surface.wallpaper_gen = state.wallpaper_gen;
+    }
 
     // This output's place in the global layout: every element position below
     // is global-logical and must be shifted into output-local space.

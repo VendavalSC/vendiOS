@@ -658,6 +658,8 @@ step_install() {
     sys_install_wm "$CFG_USER"
     mkdir -p "/mnt/home/${CFG_USER}/.config/vendi"
     echo "$CFG_BAR" > "/mnt/home/${CFG_USER}/.config/vendi/bar"
+    # Wallpaper library — vendi-ctl wallpaper / the bar's picker read this.
+    mkdir -p "/mnt/home/${CFG_USER}/Pictures/Wallpapers"
     _ok 11 "Desktop configured"
 
     # ── 16. AUR helper ────────────────────────────────────────

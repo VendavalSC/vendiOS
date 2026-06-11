@@ -259,6 +259,12 @@ impl Config {
             if let Some(v) = t.blur    { theme.blur = v; }
         }
 
+        // Runtime wallpaper switches (vendi-ctl wallpaper / the bar's picker)
+        // persist to ~/.config/vendi/wallpaper — the strongest override.
+        if let Some(p) = read_wallpaper_override() {
+            theme.wallpaper = Some(p);
+        }
+
         Ok(Self { keybinds, keybinds_pretty, theme })
     }
 }
@@ -287,6 +293,21 @@ fn read_user_config() -> Result<Option<String>> {
         Ok(text)  => Ok(Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e)   => Err(anyhow::Error::new(e).context(format!("read {}", path.display()))),
+    }
+}
+
+/// ~/.config/vendi/wallpaper: one line, the path of the last wallpaper set
+/// at runtime. Missing/empty/stale paths are ignored.
+fn read_wallpaper_override() -> Option<String> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let text = std::fs::read_to_string(base.join("vendi/wallpaper")).ok()?;
+    let p = text.trim();
+    if !p.is_empty() && std::path::Path::new(p).is_file() {
+        Some(p.to_string())
+    } else {
+        None
     }
 }
 

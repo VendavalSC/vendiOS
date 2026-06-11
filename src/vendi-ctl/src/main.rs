@@ -37,6 +37,7 @@ fn main() -> Result<()> {
         "move"             => move_cmd(&args[1..]),
         "subscribe"        => subscribe_cmd(&args[1..]),
         "bar"              => bar_cmd(&args[1..]),
+        "wallpaper"        => wallpaper_cmd(&args[1..]),
         cmd => { eprintln!("unknown command: {cmd}\n"); print_usage(); std::process::exit(2); }
     }
 }
@@ -56,6 +57,9 @@ Usage:
   vendi-ctl move <window-id> <ws-id>    move window to a workspace
   vendi-ctl subscribe <event>           stream events (window, workspace)
   vendi-ctl bar title                   stream focused-title JSON (waybar exec)
+  vendi-ctl wallpaper <path>            set the wallpaper (persists)
+  vendi-ctl wallpaper random|next       pick from ~/Pictures/Wallpapers
+  vendi-ctl wallpaper list              list ~/Pictures/Wallpapers (* = active)
 
 Reads $VENDIWM_SOCK or falls back to $XDG_RUNTIME_DIR/vendiwm-1.ipc.sock."#);
 }
@@ -171,6 +175,80 @@ fn move_cmd(args: &[String]) -> Result<()> {
     let win: u32 = args[0].parse().context("window id")?;
     let ws:  u32 = args[1].parse().context("workspace id")?;
     ipc_call(json!({"cmd": "move", "window": win, "to_workspace": ws}))
+}
+
+// ── wallpaper ────────────────────────────────────────────────────────────────
+
+/// The wallpaper library: ~/Pictures/Wallpapers (png/jpg/jpeg/webp), sorted.
+fn wallpaper_dir() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
+    Ok(PathBuf::from(home).join("Pictures/Wallpapers"))
+}
+
+fn wallpaper_library() -> Result<Vec<PathBuf>> {
+    let dir = wallpaper_dir()?;
+    let mut out: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd.flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp"))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    out.sort();
+    Ok(out)
+}
+
+/// The active wallpaper as persisted by the compositor.
+fn wallpaper_current() -> Option<String> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let text = std::fs::read_to_string(base.join("vendi/wallpaper")).ok()?;
+    let p = text.trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+fn wallpaper_cmd(args: &[String]) -> Result<()> {
+    let arg = args.first().map(String::as_str)
+        .ok_or_else(|| anyhow::anyhow!("wallpaper: usage: wallpaper <path|random|next|list>"))?;
+    let path = match arg {
+        "list" => {
+            let cur = wallpaper_current();
+            for p in wallpaper_library()? {
+                let mark = if Some(p.to_string_lossy().as_ref()) == cur.as_deref() { "*" } else { " " };
+                println!("{mark} {}", p.display());
+            }
+            return Ok(());
+        }
+        "random" => {
+            let lib = wallpaper_library()?;
+            if lib.is_empty() { bail!("no images in {}", wallpaper_dir()?.display()); }
+            // Avoid a rand dependency: nanos are plenty for "shuffle my desk".
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?.subsec_nanos() as usize;
+            lib[n % lib.len()].clone()
+        }
+        "next" => {
+            let lib = wallpaper_library()?;
+            if lib.is_empty() { bail!("no images in {}", wallpaper_dir()?.display()); }
+            let cur = wallpaper_current();
+            let idx = cur.as_deref()
+                .and_then(|c| lib.iter().position(|p| p.to_string_lossy() == c))
+                .map(|i| (i + 1) % lib.len())
+                .unwrap_or(0);
+            lib[idx].clone()
+        }
+        p => {
+            let p = PathBuf::from(p);
+            p.canonicalize().with_context(|| format!("wallpaper: {}", p.display()))?
+        }
+    };
+    ipc_call(json!({"cmd": "wallpaper", "path": path.to_string_lossy()}))
 }
 
 // ── waybar exec adapters ─────────────────────────────────────────────────────

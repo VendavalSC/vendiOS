@@ -116,6 +116,9 @@ pub struct State {
     // One-shot screenshot request from IPC: render the next frame to this
     // PNG path (the backend services and clears it).
     pub screenshot:            Option<String>,
+    // Bumped whenever theme.wallpaper changes at runtime (IPC). Each output
+    // surface keeps its own copy and rebuilds its buffer when it lags.
+    pub wallpaper_gen:         u64,
     /// vendi-lock — the native lock screen (distinct from the
     /// ext-session-lock fields above, which serve external lockers like
     /// swaylock): while active, rendering shows only the lock screen and
