@@ -99,6 +99,8 @@ pub struct State {
 
     // Active Super+drag of a floating window (move or resize).
     pub drag:                  Option<Drag>,
+    // Just-released drag: the renderer eases the pick-up scale back down.
+    pub drag_release:          Option<(Window, std::time::Instant)>,
 
     // In-flight touchpad swipe: (finger count, accumulated dx, dy).
     // 3 fingers horizontal = workspace switch; 4 fingers vertical = menus.
@@ -147,6 +149,11 @@ pub struct State {
     // backend pairs these with its per-frame texture stash and plays a
     // fade-and-shrink. The surface is gone by now — only the texture lives.
     pub closing:               Vec<(u32, Rectangle<i32, Logical>)>,
+
+    // Last rendered geometry per window (protocol id) — the close ghost's
+    // fallback when a client unmaps before destroying (Firefox does), at
+    // which point the space no longer knows where the window was.
+    pub last_geos:             HashMap<u32, Rectangle<i32, Logical>>,
 
     // Compiled keybinds + future settings, loaded at startup from KDL.
     pub config:                Config,
@@ -255,8 +262,7 @@ impl CompositorHandler for State {
             // Title-change detection → IPC event for the bar.
             if let Some(toplevel) = window.toplevel() {
                 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
-                use smithay::reexports::wayland_server::Resource;
-                let id = toplevel.wl_surface().id().protocol_id();
+                let id = window_id(&window);
                 let title = with_states(toplevel.wl_surface(), |states| {
                     states.data_map.get::<XdgToplevelSurfaceData>()
                         .and_then(|d| d.lock().ok().and_then(|a| a.title.clone()))
@@ -338,6 +344,17 @@ impl ShmHandler for State {
     fn shm_state(&self) -> &ShmState { &self.shm_state }
 }
 
+/// Compositor-assigned unique window id. wl_surface protocol ids are only
+/// unique within one client connection — two apps can both be "surface 27" —
+/// so every per-window map (focus fades, texture stash, IPC) keys off this.
+pub fn window_id(window: &smithay::desktop::Window) -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    struct WindowId(u32);
+    window.user_data().insert_if_missing(|| WindowId(NEXT.fetch_add(1, Ordering::Relaxed)));
+    window.user_data().get::<WindowId>().unwrap().0
+}
+
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -347,8 +364,8 @@ impl XdgShellHandler for State {
         // the size — otherwise the client draws at its default size and we
         // get a half-filled tile until the next round-trip.
         surface.with_pending_state(|s| { s.states.set(xdg_toplevel::State::Activated); });
-        let id = smithay::reexports::wayland_server::Resource::id(surface.wl_surface()).protocol_id();
         let window = Window::new_wayland_window(surface);
+        let id = window_id(&window);
         self.workspaces.active().tree.insert(window.clone());
         self.workspaces.active().focus_floating = None;
         self.open_anims.push((window.clone(), None));
@@ -363,19 +380,22 @@ impl XdgShellHandler for State {
         tracing::info!("new toplevel inserted");
     }
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        let id = smithay::reexports::wayland_server::Resource::id(surface.wl_surface()).protocol_id();
         let window = self.workspaces.all_windows().into_iter()
             .find(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false));
+        let id = window.as_ref().map(window_id).unwrap_or(0);
         if let Some(window) = window {
             // Last on-screen rect, captured before unmap — the close
             // animation plays a fading ghost there.
-            if let Some(geo) = self.space.element_geometry(&window) {
+            let geo = self.space.element_geometry(&window)
+                .or_else(|| self.last_geos.get(&id).copied());
+            if let Some(geo) = geo {
                 self.closing.push((id, geo));
             }
             self.workspaces.remove_window(&window);
             self.space.unmap_elem(&window);
         }
         self.window_titles.remove(&id);
+        self.last_geos.remove(&id);
         self.rule_checked.remove(&id);
         self.pending_ipc_events.push(crate::ipc::Event::WindowClosed { id });
         self.relayout();
@@ -650,12 +670,9 @@ impl State {
         }
         if let Some(window) = &focused {
             self.space.raise_element(window, true);
-            if let Some(s) = &surf {
-                use smithay::reexports::wayland_server::Resource;
-                let id = s.id().protocol_id();
-                let title = self.window_titles.get(&id).cloned().unwrap_or_default();
-                self.pending_ipc_events.push(crate::ipc::Event::WindowFocused { id, title });
-            }
+            let id = window_id(window);
+            let title = self.window_titles.get(&id).cloned().unwrap_or_default();
+            self.pending_ipc_events.push(crate::ipc::Event::WindowFocused { id, title });
         } else {
             self.pending_ipc_events.push(crate::ipc::Event::WindowFocused { id: 0, title: String::new() });
         }
@@ -884,12 +901,10 @@ impl State {
         self.update_keyboard_focus();
     }
 
-    /// Focus a window by protocol id (IPC). Switches workspace if needed.
+    /// Focus a window by its compositor id (IPC). Switches workspace if needed.
     pub fn focus_window_by_id(&mut self, id: u32) -> bool {
-        use smithay::reexports::wayland_server::Resource;
-        let target = self.workspaces.all_windows().into_iter().find(|w| {
-            w.wl_surface().map(|s| s.id().protocol_id() == id).unwrap_or(false)
-        });
+        let target = self.workspaces.all_windows().into_iter()
+            .find(|w| window_id(w) == id);
         let Some(window) = target else { return false };
         if let Some(ws_id) = self.workspaces.find_workspace(&window) {
             if ws_id != self.workspaces.active_id() {
@@ -1081,16 +1096,19 @@ impl State {
         let k = panels.len() as i32;
         if k == 0 { return out; }
 
-        let margin_x = geo.size.w / 14;
-        let top      = geo.size.h / 9;
-        let bottom   = geo.size.h / 14;
+        // Margins shrink when there are few panels — a 2-workspace overview
+        // wants big panels, a 6-workspace one needs breathing room.
+        let (mx_div, top_div, bot_div) = if k <= 3 { (26, 14, 22) } else { (14, 9, 14) };
+        let margin_x = geo.size.w / mx_div;
+        let top      = geo.size.h / top_div;
+        let bottom   = geo.size.h / bot_div;
         let area = Rectangle::<i32, Logical>::new(
             (geo.loc.x + margin_x, geo.loc.y + top).into(),
             (geo.size.w - margin_x * 2, geo.size.h - top - bottom).into(),
         );
         let cols = (k as f64).sqrt().ceil() as i32;
         let rows = (k + cols - 1) / cols;
-        let gap  = 36;
+        let gap  = if k <= 3 { 28 } else { 36 };
         let slot_w = ((area.size.w - gap * (cols - 1)) / cols).max(1);
         let slot_h = ((area.size.h - gap * (rows - 1)) / rows).max(1);
         // Panels mirror the output's aspect so their content scales uniformly.

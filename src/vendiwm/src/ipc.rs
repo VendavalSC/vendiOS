@@ -253,13 +253,8 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
         Request::Close { window } => {
             let target = match window {
                 None => state.focused_window(),
-                Some(id) => {
-                    use smithay::reexports::wayland_server::Resource;
-                    use smithay::wayland::seat::WaylandFocus;
-                    state.workspaces.all_windows().into_iter().find(|w| {
-                        w.wl_surface().map(|s| s.id().protocol_id() == id).unwrap_or(false)
-                    })
-                }
+                Some(id) => state.workspaces.all_windows().into_iter()
+                    .find(|w| crate::state::window_id(w) == id),
             };
             match target.and_then(|w| w.toplevel().cloned()) {
                 Some(t) => { t.send_close(); Response::Ok { ok: true } }
@@ -267,15 +262,12 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
             }
         }
         Request::ListWindows => {
-            use smithay::reexports::wayland_server::Resource;
             use smithay::wayland::compositor::with_states;
-            use smithay::wayland::seat::WaylandFocus;
             use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
             let mut out = Vec::new();
             let focused_win = state.focused_window();
             for w in state.workspaces.all_windows() {
-                let surf  = w.wl_surface();
-                let id    = surf.as_ref().map(|s| s.id().protocol_id()).unwrap_or(0);
+                let id = crate::state::window_id(&w);
                 let title = if let Some(t) = w.toplevel() {
                     with_states(t.wl_surface(), |states| {
                         states.data_map.get::<XdgToplevelSurfaceData>()

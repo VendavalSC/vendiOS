@@ -85,6 +85,8 @@ smithay::backend::renderer::element::render_elements! {
     pub OutputRenderElements<=GlesRenderer>;
     Layer=WaylandSurfaceRenderElement<GlesRenderer>,
     Memory=MemoryRenderBufferRenderElement<GlesRenderer>,
+    // Wallpaper, rescalable so workspace switches can zoom-settle it.
+    Wallpaper=RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
     // Two rescale layers: inner = layout morph (non-uniform, anchored at the
     // window's top-left), outer = open/drag scale (uniform, anchored center).
     Window=RelocateRenderElement<RescaleRenderElement<RescaleRenderElement<crate::render::RoundedElement>>>,
@@ -408,6 +410,7 @@ fn build_state(
         window_titles:          Default::default(),
         rule_checked:           Default::default(),
         drag:                   None,
+        drag_release:           None,
         swipe:                  None,
         overview:               false,
         overview_t:             std::time::Instant::now(),
@@ -420,6 +423,7 @@ fn build_state(
         ws_anim:                None,
         geo_anims:              Vec::new(),
         closing:                Vec::new(),
+        last_geos: HashMap::new(),
         config,
         pointer_location:       (0.0, 0.0).into(),
         pending_dmabuf_imports: Vec::new(),
@@ -459,9 +463,21 @@ pub struct DeviceState {
         smithay::backend::renderer::gles::GlesTexture,
         smithay::backend::renderer::gles::GlesTexture,
     )>,
-    /// Last-frame texture of every mapped window, keyed by protocol id —
-    /// surfaces die before we can animate a close, so this keeps the pixels.
-    pub tex_stash:    HashMap<u32, smithay::backend::renderer::gles::GlesTexture>,
+    /// Snapshot of every mapped window for the close ghost, keyed by window
+    /// id: (previous copy, current copy, time of current copy). Owned blits,
+    /// refreshed every ~300ms. Two generations because clients commit junk
+    /// on their way out — Firefox's final buffer is fully transparent — so
+    /// the ghost prefers the previous, pre-teardown snapshot.
+    pub tex_stash:    HashMap<u32, (
+        Option<smithay::backend::renderer::gles::GlesTexture>,
+        smithay::backend::renderer::gles::GlesTexture,
+        std::time::Instant,
+    )>,
+    /// Per-window focus-ring blend (0 = inactive color, 1 = accent), eased
+    /// toward its target by wall-clock time (renders aren't evenly spaced).
+    pub focus_anim:   HashMap<u32, f32>,
+    /// When the previous frame was rendered — the dt for the easing above.
+    pub last_tick:    std::time::Instant,
     /// In-flight close animations: stable element id, ghost texture, the
     /// window's final rect, start time.
     pub closing_anims: Vec<(
@@ -562,6 +578,8 @@ impl UdevData {
             blur_prog,
             blur_texs: None,
             tex_stash: HashMap::new(),
+            focus_anim: HashMap::new(),
+            last_tick: std::time::Instant::now(),
             closing_anims: Vec::new(),
         };
         Ok((dev, notifier))
@@ -832,6 +850,44 @@ fn clamp_pointer(state: &mut State) {
 /// Render one frame for `crtc` on `node`. Gathers elements from the space,
 /// asks the DrmCompositor to compose them, and queues the frame for the next
 /// VBlank.
+/// Blit a (possibly client-owned) texture into a fresh one the compositor
+/// owns — used to keep close-ghost pixels alive past the client's buffer.
+fn copy_texture(
+    renderer: &mut GlesRenderer,
+    src: &smithay::backend::renderer::gles::GlesTexture,
+) -> Option<smithay::backend::renderer::gles::GlesTexture> {
+    use smithay::backend::renderer::{Bind, Frame, Offscreen, Renderer as _, Texture};
+    let size = src.size();
+    if size.w <= 0 || size.h <= 0 { return None; }
+    let mut dst: smithay::backend::renderer::gles::GlesTexture = renderer
+        .create_buffer(smithay::backend::allocator::Fourcc::Abgr8888, size)
+        .map_err(|e| tracing::warn!(?e, "copy_texture: create_buffer")).ok()?;
+    {
+        let phys = smithay::utils::Size::<i32, smithay::utils::Physical>::from((size.w, size.h));
+        let full = smithay::utils::Rectangle::from_size(phys);
+        let mut fb = renderer.bind(&mut dst)
+            .map_err(|e| tracing::warn!(?e, "copy_texture: bind")).ok()?;
+        let mut frame = renderer.render(&mut fb, phys, Transform::Normal)
+            .map_err(|e| tracing::warn!(?e, "copy_texture: render")).ok()?;
+        frame.render_texture_from_to(
+            src,
+            smithay::utils::Rectangle::from_size(size).to_f64(),
+            full,
+            &[full],
+            &[],
+            Transform::Normal,
+            1.0,
+            None,
+            &[],
+        ).map_err(|e| tracing::warn!(?e, "copy_texture: blit")).ok()?;
+        // Block until the blit lands — the source may die right after.
+        frame.finish()
+            .map_err(|e| tracing::warn!(?e, "copy_texture: finish")).ok()?
+            .wait().ok()?;
+    }
+    Some(dst)
+}
+
 fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Result<()> {
     let UdevApp { state, udev, .. } = app;
     let device = udev.drm_devices.get_mut(&node)
@@ -846,6 +902,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let blur_prog    = device.blur_prog.clone();
     let blur_texs     = &mut device.blur_texs;
     let tex_stash     = &mut device.tex_stash;
+    let focus_anim    = &mut device.focus_anim;
+    let last_tick     = &mut device.last_tick;
     let closing_anims = &mut device.closing_anims;
     let surface  = device.surfaces.get_mut(&crtc)
         .ok_or_else(|| anyhow::anyhow!("surface not found"))?;
@@ -924,6 +982,13 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         1.0 + C3 * (t - 1.0).powi(3) + C1 * (t - 1.0).powi(2)
     }
     let now = std::time::Instant::now();
+    // Wall-clock step for exponential fades: renders are not evenly spaced
+    // (the tick path can run far faster than vblank), so per-frame constants
+    // would make fade speed depend on load.
+    let dt = now.duration_since(*last_tick).as_secs_f32().min(0.1);
+    *last_tick = now;
+    // ~63% of the remaining distance per 70ms; visually settled in ~250ms.
+    let fade_k = 1.0 - (-dt / 0.070).exp();
     state.open_anims.retain(|(w, t)| {
         smithay::utils::IsAlive::alive(w)
             && t.map(|t| (now.duration_since(t).as_secs_f32() * 1000.0) < OPEN_MS)
@@ -948,12 +1013,15 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     };
     // Close animations: pair windows that died since last frame with their
     // stashed textures; the ghosts fade + shrink in place.
-    const CLOSE_MS: f32 = 180.0;
+    const CLOSE_MS: f32 = 200.0;
     closing_anims.retain(|(_, _, _, t)| {
         (now.duration_since(*t).as_secs_f32() * 1000.0) < CLOSE_MS
     });
     for (id, geo) in state.closing.drain(..) {
-        if let Some(tex) = tex_stash.remove(&id) {
+        if let Some((prev, cur, _)) = tex_stash.remove(&id) {
+            // Clients repaint blank/transparent on their way out; the
+            // previous snapshot is the window as the user last saw it.
+            let tex = prev.unwrap_or(cur);
             closing_anims.push((
                 smithay::backend::renderer::element::Id::new(),
                 tex,
@@ -987,9 +1055,22 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let ov_e = ease_out(
         (now.duration_since(state.overview_t).as_secs_f32() * 1000.0 / OVERVIEW_MS).min(1.0),
     );
-    let wallpaper_alpha = if locked { 0.30 } else if state.overview { 1.0 - 0.55 * ov_e } else { 0.45 + 0.55 * ov_e };
+    let mut wallpaper_alpha = if locked { 0.30 } else if state.overview { 1.0 - 0.55 * ov_e } else { 0.45 + 0.55 * ov_e };
+    // Workspace switches dim the wallpaper through the transition so even a
+    // switch between empty desks reads as motion.
+    if let Some(p) = ws_progress.filter(|p| *p < 1.0) {
+        let e = ease_out(p);
+        wallpaper_alpha *= 0.72 + 0.28 * (2.0 * (e - 0.5)).abs();
+    }
 
+    if state.drag_release.as_ref()
+        .map(|(_, t)| (now.duration_since(*t).as_secs_f32() * 1000.0) >= DRAG_MS)
+        .unwrap_or(false)
+    {
+        state.drag_release = None;
+    }
     let anims_active = state.ws_anim.is_some()
+        || state.drag_release.is_some()
         || state.vlock_fail.map(|t| now.duration_since(t).as_secs_f32() < 1.0).unwrap_or(false)
         || !state.open_anims.is_empty()
         || !state.geo_anims.is_empty()
@@ -1116,15 +1197,24 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
 
         // Stash this frame's texture so a close next frame can ghost it.
         if let Some(surf) = window.wl_surface() {
-            use smithay::reexports::wayland_server::Resource;
-            let wid = surf.id().protocol_id();
+            let wid = crate::state::window_id(window);
             live_ids.push(wid);
+            state.last_geos.insert(wid, geo);
             let tex = smithay::backend::renderer::utils::with_renderer_surface_state(
                 &surf,
                 |s| s.texture(ctx.clone()).cloned(),
             ).flatten();
             if let Some(tex) = tex {
-                tex_stash.insert(wid, tex);
+                let due = !matches!(
+                    tex_stash.get(&wid),
+                    Some((_, _, t)) if now.duration_since(*t).as_millis() < 300
+                );
+                if due {
+                    if let Some(copy) = copy_texture(renderer, &tex) {
+                        let prev = tex_stash.remove(&wid).map(|(_, cur, _)| cur);
+                        tex_stash.insert(wid, (prev, copy, now));
+                    }
+                }
             }
         }
 
@@ -1148,13 +1238,20 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             .and_then(|(_, t)| *t)
             .map(|t| (now.duration_since(t).as_secs_f32() * 1000.0 / OPEN_MS).min(1.0));
         let alpha = ws_alpha * open_t.map(ease_out).unwrap_or(1.0);
-        // Super+drag pick-up: ease in a slight grow while the grab holds.
+        // Super+drag pick-up: ease in a slight grow while the grab holds,
+        // and ease it back out after release (put-down).
         let drag_scale: f64 = state.drag.as_ref()
             .filter(|d| &d.window == window && !d.resize)
             .map(|d| {
                 let e = ease_out((now.duration_since(d.started).as_secs_f32() * 1000.0 / DRAG_MS).min(1.0));
                 1.0 + 0.02 * e as f64
             })
+            .or_else(|| state.drag_release.as_ref()
+                .filter(|(w, _)| w == window)
+                .map(|(_, t)| {
+                    let e = ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / DRAG_MS).min(1.0));
+                    1.0 + 0.02 * (1.0 - e as f64)
+                }))
             .unwrap_or(1.0);
         let scale_anim: f64 = ws_scale
             * open_t.map(|t| 0.90 + 0.10 * ease_out_back(t) as f64).unwrap_or(1.0)
@@ -1195,7 +1292,25 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         if !is_fullscreen {
             let win_surf = window.wl_surface();
             let focused = matches!((&focused_surf, &win_surf), (Some(f), Some(s)) if **s == *f);
-            let c = if focused { theme.accent } else { theme.inactive };
+            // Fade the ring between inactive and accent instead of snapping.
+            let c = {
+                let wid = crate::state::window_id(window);
+                let target: f32 = if focused { 1.0 } else { 0.0 };
+                let f = focus_anim.entry(wid).or_insert(target);
+                *f += (target - *f) * fade_k;
+                if (*f - target).abs() > 0.01 {
+                    state.pending_redraw = true;
+                } else {
+                    *f = target;
+                }
+                let t = *f;
+                [
+                    theme.inactive[0] + (theme.accent[0] - theme.inactive[0]) * t,
+                    theme.inactive[1] + (theme.accent[1] - theme.inactive[1]) * t,
+                    theme.inactive[2] + (theme.accent[2] - theme.inactive[2]) * t,
+                    theme.inactive[3] + (theme.accent[3] - theme.inactive[3]) * t,
+                ]
+            };
             let area = smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
                 (target.loc.x - border_w, target.loc.y - border_w).into(),
                 (target.size.w + border_w * 2, target.size.h + border_w * 2).into(),
@@ -1250,9 +1365,17 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         }
     }
 
-    // Drop stashed textures for windows that no longer exist (their close
-    // ghosts, if any, were taken out of the stash above).
-    tex_stash.retain(|id, _| live_ids.contains(id));
+    // Drop stashed textures only when the window is truly gone (their close
+    // ghosts, if any, were taken out of the stash above). Unmapped-but-alive
+    // windows (hidden workspaces, clients that unmap before destroying —
+    // Firefox does) keep theirs so the close ghost still has pixels.
+    {
+        let alive_ids: Vec<u32> = state.workspaces.all_windows().iter()
+            .map(crate::state::window_id)
+            .collect();
+        tex_stash.retain(|id, _| alive_ids.contains(id) || live_ids.contains(id));
+        focus_anim.retain(|id, _| alive_ids.contains(id));
+    }
 
     // Overview extras: thumbnails of windows on hidden workspaces (they're
     // unmapped, so the loop above never sees them) and a ring around every
@@ -1369,7 +1492,10 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         }
     }
 
-    // Wallpaper — the very back of the stack. Dimmed in overview.
+    // Wallpaper — the very back of the stack. Dimmed in overview. During a
+    // workspace switch it zooms out from 103% and settles, so even a switch
+    // to an empty desk visibly moves (the alpha dip alone vanishes on dark
+    // wallpapers — near-black toward near-black).
     if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
         renderer,
         (0.0, 0.0),
@@ -1379,7 +1505,19 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         None,
         Kind::Unspecified,
     ) {
-        elements.push(OutputRenderElements::Memory(elem));
+        let zoom = match ws_progress.filter(|p| *p < 1.0) {
+            Some(p) => 1.03 - 0.03 * ease_out(p) as f64,
+            None => 1.0,
+        };
+        let osize = state.space.output_geometry(&surface.output)
+            .map(|g| g.size)
+            .unwrap_or_else(|| (1, 1).into());
+        let center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
+            osize.w / 2, osize.h / 2,
+        ));
+        elements.push(OutputRenderElements::Wallpaper(
+            RescaleRenderElement::from_element(elem, center, zoom),
+        ));
     }
 
     // ── frosted glass ────────────────────────────────────────────────────────
@@ -1731,6 +1869,13 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             let Some(geo) = state.space.output_geometry(&output) else { return };
             let pos = event.position_transformed(geo.size);
             state.pointer_location = pos + geo.loc.to_f64();
+            // Super+drag in progress: route motion into the drag, not the
+            // client (QEMU and touchscreens deliver absolute motion — without
+            // this, drags only worked on real mice).
+            if state.drag.is_some() {
+                state.drag_update();
+                return;
+            }
             let location = state.pointer_location;
             let under = state.surface_under(location).map(|(s, p)| (s.into(), p));
             pointer.motion(state, under, &MotionEvent {
@@ -1750,9 +1895,15 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             const BTN_LEFT:  u32 = 0x110;
             const BTN_RIGHT: u32 = 0x111;
 
-            // End an in-flight Super+drag on any release.
+            // End an in-flight Super+drag on any release; the pick-up scale
+            // eases back down where the window landed.
             if bstate == smithay::backend::input::ButtonState::Released && state.drag.is_some() {
-                state.drag = None;
+                if let Some(drag) = state.drag.take() {
+                    if !drag.resize {
+                        state.drag_release = Some((drag.window, std::time::Instant::now()));
+                    }
+                }
+                state.pending_redraw = true;
                 return;
             }
 
