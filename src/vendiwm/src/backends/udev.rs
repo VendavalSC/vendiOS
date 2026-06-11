@@ -971,7 +971,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // fades + settles. Eased with cubic ease-out; while anything is in
     // flight we keep pending_redraw set so the loop renders every tick.
     const OPEN_MS:  f32 = 260.0;
-    const WS_MS:    f32 = 220.0;
+    const WS_MS:    f32 = 300.0;
     const MORPH_MS: f32 = 230.0;
     const DRAG_MS:  f32 = 120.0;
     fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t).powi(3) }
@@ -1506,7 +1506,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         Kind::Unspecified,
     ) {
         let zoom = match ws_progress.filter(|p| *p < 1.0) {
-            Some(p) => 1.03 - 0.03 * ease_out(p) as f64,
+            Some(p) => 1.05 - 0.05 * ease_out(p) as f64,
             None => 1.0,
         };
         let osize = state.space.output_geometry(&surface.output)

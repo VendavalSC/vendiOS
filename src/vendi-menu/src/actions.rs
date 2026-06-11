@@ -61,6 +61,8 @@ fn root_menu() -> Rc<MenuDef> {
     let settings = MenuDef {
         title: "Settings",
         items: vec![
+            sh("\u{f035b}", "Bar: minimal", "sh -c 'mkdir -p ~/.config/vendi; echo classic > ~/.config/vendi/bar; pkill -x vendiwm'"),
+            sh("\u{f035c}", "Bar: pro",     "sh -c 'mkdir -p ~/.config/vendi; echo pro > ~/.config/vendi/bar; pkill -x vendiwm'"),
             sh("\u{f0493}", "WM config",  format!("{FLOAT_TERM} sh -c 'mkdir -p ~/.config/vendi && ${{EDITOR:-vim}} ~/.config/vendi/vendiwm.kdl'")),
             sh("\u{f035b}", "Bar style",  format!("{FLOAT_TERM} sh -c 'mkdir -p ~/.config/vendi && ${{EDITOR:-vim}} ~/.config/vendi/vendibar.css'")),
             sh("\u{f0450}", "Reload session", "pkill -x vendiwm"),

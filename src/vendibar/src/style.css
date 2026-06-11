@@ -40,8 +40,16 @@ window {
   transition: color 150ms ease;
 }
 .workspaces button.occupied { color: #a6adc8; }   /* Subtext0 */
-.workspaces button.active   { color: #cba6f7; }   /* Mauve    */
+.workspaces button.active {
+  color: #cba6f7;            /* Mauve */
+  animation: ws-pop 240ms ease-out;
+}
 .workspaces button:hover    { color: #f5c2e7; }   /* Pink     */
+/* Workspace switch: the incoming number drops in and settles. */
+@keyframes ws-pop {
+  0%   { margin-top: -7px; opacity: 0.2; }
+  100% { margin-top: 0;    opacity: 1; }
+}
 
 .title {
   color: #7f849c;            /* Overlay1 — present but quiet */

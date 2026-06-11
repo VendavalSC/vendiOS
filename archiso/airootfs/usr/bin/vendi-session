@@ -33,13 +33,20 @@ spawn_desktop() {
     export WAYLAND_DISPLAY="$(basename "$sock")"
     # vendiwm binds its IPC socket adjacent to the wayland socket.
     export VENDIWM_SOCK="${sock_dir}/${WAYLAND_DISPLAY}.ipc.sock"
-    # vendibar — GTK4 layer-shell status bar. Cairo renderer: the bar is a
-    # 34px strip, software rendering is free and dodges EGL landmines in VMs.
+    # Status bar — ~/.config/vendi/bar picks the flavor:
+    #   classic (default)  GTK4 vendibar, minimal macOS-style
+    #   pro                quickshell island bar (vendibar-pro)
     # Retry loop: a stale wayland socket file from a previous session can
     # make the wait above return before the compositor actually listens.
+    local bar_choice
+    bar_choice=$(cat "$HOME/.config/vendi/bar" 2>/dev/null || echo classic)
     (
         for _ in $(seq 1 15); do
-            GSK_RENDERER=cairo vendibar >>"$LOG" 2>&1 && break
+            if [[ "$bar_choice" == "pro" ]] && command -v quickshell >/dev/null; then
+                quickshell -c vendibar-pro >>"$LOG" 2>&1 && break
+            else
+                GSK_RENDERER=cairo vendibar >>"$LOG" 2>&1 && break
+            fi
             sleep 1
         done
     ) &

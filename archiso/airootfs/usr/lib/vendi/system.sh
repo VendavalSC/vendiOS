@@ -17,7 +17,7 @@ BASE_PKGS=(
     openssh reflector
     pipewire pipewire-audio pipewire-alsa pipewire-pulse wireplumber
     hyprland xdg-desktop-portal-hyprland xdg-desktop-portal-gtk
-    waybar wofi mako foot alacritty
+    waybar wofi mako foot alacritty quickshell
     brightnessctl playerctl grim slurp wl-clipboard swaylock
     polkit-kde-agent qt5-wayland qt6-wayland
     gtk3 gtk4 gtk4-layer-shell

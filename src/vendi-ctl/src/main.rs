@@ -32,6 +32,7 @@ fn main() -> Result<()> {
         "list-windows"     => ipc_call(json!({"cmd": "list-windows"})),
         "list-workspaces"  => ipc_call(json!({"cmd": "list-workspaces"})),
         "lock"             => ipc_call(json!({"cmd": "lock"})),
+        "workspace"        => workspace_cmd(&args[1..]),
         "split"            => split_cmd(&args[1..]),
         "move"             => move_cmd(&args[1..]),
         "subscribe"        => subscribe_cmd(&args[1..]),
@@ -50,6 +51,7 @@ Usage:
   vendi-ctl list-windows                snapshot of windows
   vendi-ctl list-workspaces             snapshot of workspaces
   vendi-ctl lock                        lock the session (vendi-lock)
+  vendi-ctl workspace <id>              switch to a workspace
   vendi-ctl split horizontal|vertical   set next-split direction
   vendi-ctl move <window-id> <ws-id>    move window to a workspace
   vendi-ctl subscribe <event>           stream events (window, workspace)
@@ -150,6 +152,12 @@ fn close_cmd(args: &[String]) -> Result<()> {
     let mut req = json!({"cmd": "close"});
     if let Some(id) = id { req["window"] = json!(id); }
     ipc_call(req)
+}
+
+fn workspace_cmd(args: &[String]) -> Result<()> {
+    let id: u32 = args.first().ok_or_else(|| anyhow::anyhow!("workspace: missing id"))?
+        .parse().context("workspace id must be a number")?;
+    ipc_call(json!({"cmd": "workspace", "id": id}))
 }
 
 fn split_cmd(args: &[String]) -> Result<()> {

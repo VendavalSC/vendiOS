@@ -316,8 +316,12 @@ window { background: transparent; }
   transition: color 150ms ease;
 }
 .workspaces button.occupied { color: #${P[subtext0]}; }
-.workspaces button.active   { color: #${a}; }
+.workspaces button.active   { color: #${a}; animation: ws-pop 240ms ease-out; }
 .workspaces button:hover    { color: #${P[pink]}; }
+@keyframes ws-pop {
+  0%   { margin-top: -7px; opacity: 0.2; }
+  100% { margin-top: 0;    opacity: 1; }
+}
 .title { color: #${P[overlay1]}; transition: opacity 130ms ease; }
 .title.swap { opacity: 0; }
 .clock { color: #${P[text]}; font-weight: 600; }

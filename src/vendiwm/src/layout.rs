@@ -230,7 +230,10 @@ impl Tree {
                 break;
             }
         }
-        let Some(depth) = depth_match else { return };
+        let Some(depth) = depth_match else {
+            tracing::debug!(?axis, "resize: no split along the focus path runs this axis");
+            return;
+        };
 
         // Re-walk mutably and apply the ratio change at that depth.
         let mut node = self.root.as_mut().unwrap();

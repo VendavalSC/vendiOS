@@ -839,6 +839,27 @@ impl State {
 
     pub fn resize_dir(&mut self, dir: crate::input::Dir) {
         use crate::input::Dir;
+        // Focused floating window: grow/shrink the rect directly.
+        if let Some(focused) = self.focused_window() {
+            let ws = self.workspaces.active();
+            if let Some(entry) = ws.floating.iter_mut().find(|(w, _)| w == &focused) {
+                const STEP: i32 = 48;
+                match dir {
+                    Dir::Right => entry.1.size.w += STEP,
+                    Dir::Left  => entry.1.size.w = (entry.1.size.w - STEP).max(160),
+                    Dir::Down  => entry.1.size.h += STEP,
+                    Dir::Up    => entry.1.size.h = (entry.1.size.h - STEP).max(120),
+                }
+                let (window, rect) = (entry.0.clone(), entry.1);
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
+                    toplevel.send_pending_configure();
+                }
+                self.space.map_element(window, rect.loc, true);
+                self.pending_redraw = true;
+                return;
+            }
+        }
         let delta = match dir { Dir::Right | Dir::Down => 0.04, Dir::Left | Dir::Up => -0.04 };
         self.workspaces.active().tree.resize_focused(dir.axis(), delta);
         self.relayout();
