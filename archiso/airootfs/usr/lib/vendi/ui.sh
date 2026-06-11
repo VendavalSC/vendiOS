@@ -142,9 +142,10 @@ ui_panel_draw() {
     _at 3 $x
     printf "${_BG_MAUVE}%*s${R}" "$w" ''
 
-    # Rows 4-5: base padding
+    # Rows 4-5: base padding; row 4 carries the step-dots indicator
     _at 4 $x; printf "${BG_BASE}%*s${R}" "$w" ''
     _at 5 $x; printf "${BG_BASE}%*s${R}" "$w" ''
+    ui_step_dots "$step" "$total"
 
     # Content rows 6 … UI_CONTENT_BOT
     local r
@@ -167,13 +168,78 @@ ui_redraw() {
     ui_panel_draw "$_UI_STEP" "$_UI_TOTAL" "$_UI_TITLE"
 }
 
+# ── shard logo ────────────────────────────────────────────────────────────────
+# The vendi shard (block-element art with embedded 24-bit colors). Each line
+# carries only FG escapes until a trailing reset, so painting BG_BASE first
+# keeps the panel background behind the glyphs. Prints at <start_row>,
+# centered; echoes nothing if the art is missing (safe on weird media).
+ui_shard() {
+    local start_row=$1 art=/usr/share/vendios/shard.txt
+    [[ -r "$art" ]] || return 0
+    local row=$start_row line clean w
+    while IFS= read -r line; do
+        clean=$(printf '%b' "$line" | sed 's/\x1b\[[0-9;]*m//g')
+        w=${#clean}
+        _at "$row" $(( UI_X + (UI_W - w) / 2 ))
+        printf '%s%b%s' "$BG_BASE" "$line" "$R"
+        (( row++ ))
+    done < "$art"
+}
+
+# ── step dots ─────────────────────────────────────────────────────────────────
+# One mark per step, centered on panel row 4: done = accent, current = bright
+# block, future = dim dot. cp437-safe glyphs only (■ and ·).
+ui_step_dots() {
+    local step=$1 total=$2
+    local dots='' i
+    for (( i=1; i<=total; i++ )); do
+        if (( i < step ));  then dots+="${FG_ACCENT}■${R}${BG_BASE} "
+        elif (( i == step )); then dots+="${BOLD}${FG_WHITE}■${R}${BG_BASE} "
+        else dots+="${FG_DIM}·${R}${BG_BASE} "
+        fi
+    done
+    local w=$(( total * 2 - 1 ))
+    _at 4 $(( UI_X + (UI_W - w) / 2 ))
+    printf "${BG_BASE}%b${R}" "$dots"
+}
+
+# ── box ───────────────────────────────────────────────────────────────────────
+# Single-line box (cp437-safe) inside the panel: ui_box <row> <height> [title]
+ui_box() {
+    local row=$1 h=$2 title=${3:-}
+    local sx=$(( UI_X+3 )) bw=$(( UI_W-6 ))
+    # (tr is byte-based and mangles multibyte '─' — build the run by hand)
+    local horiz='' i
+    for (( i=0; i<bw-2; i++ )); do horiz+='─'; done
+    _at "$row" $sx; printf "${BG_BASE}${FG_DIM}┌%s┐${R}" "$horiz"
+    if [[ -n "$title" ]]; then
+        _at "$row" $(( sx+3 ))
+        printf "${BG_BASE}${FG_DIM} ${BOLD}${FG_ACCENT}%s${R}${BG_BASE}${FG_DIM} ${R}" "$title"
+    fi
+    local r
+    for (( r=row+1; r<row+h-1; r++ )); do
+        _at "$r" $sx;               printf "${BG_BASE}${FG_DIM}│${R}"
+        _at "$r" $(( sx+bw-1 ));    printf "${BG_BASE}${FG_DIM}│${R}"
+    done
+    _at $(( row+h-1 )) $sx; printf "${BG_BASE}${FG_DIM}└%s┘${R}" "$horiz"
+}
+
 # ── content helpers ───────────────────────────────────────────────────────────
+# Text drawn over the panel must keep BG_BASE alive across the resets inside
+# the caller's string, or every printed cell drops to the terminal-default
+# background (dark halo boxes around text).
+_bgkeep() {
+    local text=$1
+    text="${text//$'\e[0m'/$'\e[0m'${BG_BASE}}"
+    printf '%s%b%s' "$BG_BASE" "$text" "$R"
+}
+
 # ui_pline <row_offset_from_6> <text_with_colors>
 ui_pline() {
     local offset=$1; shift
     local row=$(( 6 + offset ))
     _at "$row" $(( UI_X + 3 ))
-    printf '%b' "$*"
+    _bgkeep "$*"
 }
 
 # ui_center_text <row_offset> <text> (centers in panel)
@@ -183,7 +249,7 @@ ui_center_text() {
     local clean; clean=$(printf '%b' "$text" | sed 's/\x1b\[[0-9;]*m//g')
     local pad=$(( (UI_W - ${#clean}) / 2 ))
     _at "$row" $(( UI_X + pad ))
-    printf '%b' "$text"
+    _bgkeep "$text"
 }
 
 # ── key hints bar ─────────────────────────────────────────────────────────────
@@ -192,9 +258,13 @@ ui_hints() {
     _at "$row" $(( UI_X + 3 ))
     local sep=''
     for h in "$@"; do
-        local key="${h%%:*}" desc="${h#*:}"
         printf '%s' "$sep"
-        printf "${BG_MANTLE}${BOLD}${FG_ACCENT}${key}${R}${BG_MANTLE}${FG_DIM} ${desc}${R}"
+        if [[ "$h" == *:* ]]; then
+            local key="${h%%:*}" desc="${h#*:}"
+            printf "${BG_MANTLE}${BOLD}${FG_ACCENT}${key}${R}${BG_MANTLE}${FG_DIM} ${desc}${R}"
+        else
+            printf "${BG_MANTLE}${FG_DIM}${h}${R}"
+        fi
         sep="${BG_MANTLE}${FG_DIM}  ·  ${R}"
     done
 }
@@ -219,7 +289,7 @@ ui_menu() {
             _at "$row" $(( UI_X+3 )); printf "${BG_SEL}${FG_ACCENT}${BOLD}> ${FG_WHITE}${items[$idx]}${R}"
         else
             _fill "$row" $UI_X $UI_W
-            _at "$row" $(( UI_X+3 )); printf "${FG_DIM}  ${FG_WHITE}${items[$idx]}${R}"
+            _at "$row" $(( UI_X+3 )); printf "${BG_BASE}${FG_DIM}  ${FG_WHITE}${items[$idx]}${R}${BG_BASE}"
         fi
     }
 
@@ -234,7 +304,7 @@ ui_menu() {
                     _at "$row" $(( UI_X+3 )); printf "${BG_SEL}${FG_ACCENT}${BOLD}> ${FG_WHITE}${items[$idx]}${R}"
                 else
                     _fill "$row" $UI_X $UI_W
-                    _at "$row" $(( UI_X+3 )); printf "${FG_DIM}  ${FG_WHITE}${items[$idx]}${R}"
+                    _at "$row" $(( UI_X+3 )); printf "${BG_BASE}${FG_DIM}  ${FG_WHITE}${items[$idx]}${R}${BG_BASE}"
                 fi
             else
                 _fill "$row" $UI_X $UI_W
@@ -242,7 +312,7 @@ ui_menu() {
         done
         if [[ $count -gt $visible ]]; then
             _at $(( 7+visible+1 )) $(( UI_X+3 ))
-            printf "${FG_DIM}$(( cursor+1 )) / ${count}${R}     "
+            printf "${BG_BASE}${FG_DIM}$(( cursor+1 )) / ${count}${R}${BG_BASE}     "
         fi
     }
 
@@ -296,7 +366,7 @@ ui_search_menu() {
     # search input field (Surface0 band with Surface1 underline)
     _sbox() {
         local sx=$(( UI_X+3 )) sw=$(( UI_W-8 ))
-        _at 7 $sx; printf "${FG_DIM}Search${R}"
+        _at 7 $sx; printf "${BG_BASE}${FG_DIM}Search${R}${BG_BASE}"
         _at 8 $sx; printf "${BG_SURFACE0}%*s${R}" "$sw" ''
         _at 8 $sx; printf "${BG_SURFACE0} ${FG_WHITE}${query}${FG_ACCENT}_ ${R}"
         _at 9 $sx; printf "${BG_SURFACE1}%*s${R}" "$sw" ''
@@ -311,7 +381,7 @@ ui_search_menu() {
             _at "$row" $(( UI_X+3 )); printf "${BG_SEL}${FG_ACCENT}${BOLD}> ${FG_WHITE}${items_r[$idx]}${R}"
         else
             _fill "$row" $UI_X $UI_W
-            _at "$row" $(( UI_X+3 )); printf "${FG_DIM}  ${FG_WHITE}${items_r[$idx]}${R}"
+            _at "$row" $(( UI_X+3 )); printf "${BG_BASE}${FG_DIM}  ${FG_WHITE}${items_r[$idx]}${R}${BG_BASE}"
         fi
     }
 
@@ -326,13 +396,13 @@ ui_search_menu() {
                     _at "$row" $(( UI_X+3 )); printf "${BG_SEL}${FG_ACCENT}${BOLD}> ${FG_WHITE}${items_r[$idx]}${R}"
                 else
                     _fill "$row" $UI_X $UI_W
-                    _at "$row" $(( UI_X+3 )); printf "${FG_DIM}  ${FG_WHITE}${items_r[$idx]}${R}"
+                    _at "$row" $(( UI_X+3 )); printf "${BG_BASE}${FG_DIM}  ${FG_WHITE}${items_r[$idx]}${R}${BG_BASE}"
                 fi
             else
                 _fill "$row" $UI_X $UI_W
             fi
         done
-        [[ $cnt -eq 0 ]] && { _at 12 $(( UI_X+3 )); printf "${FG_DIM}no matches      ${R}"; }
+        [[ $cnt -eq 0 ]] && { _at 12 $(( UI_X+3 )); printf "${BG_BASE}${FG_DIM}no matches      ${R}${BG_BASE}"; }
     }
 
     # build initial filtered list
@@ -397,7 +467,7 @@ ui_input() {
         ui_hints "Enter:confirm" "Esc:back"
 
         local sx=$(( UI_X+3 )) sw=$(( UI_W-6 ))
-        _at 8 $sx; printf "${FG_SUBTEXT}${prompt}${R}"
+        _at 8 $sx; printf "${BG_BASE}${FG_SUBTEXT}${prompt}${R}${BG_BASE}"
         _at 10 $sx; printf "${BG_SURFACE1}%*s${R}" "$sw" ''
         _at 11 $sx; printf "${BG_SURFACE0}%*s${R}" "$sw" ''
         _at 11 $sx; printf "${BG_SURFACE0} ${FG_WHITE}${value}${FG_ACCENT}_ ${R}"
@@ -423,8 +493,8 @@ ui_password() {
         local v=$1 label=$2
         local sx=$(( UI_X+3 )) sw=$(( UI_W-6 ))
         local stars=''; local n=${#v}; while (( n-- > 0 )); do stars+='*'; done
-        _at 8 $sx; printf "${FG_SUBTEXT}${prompt}${R}"
-        _at 10 $sx; printf "${FG_DIM}${label}${R}"
+        _at 8 $sx; printf "${BG_BASE}${FG_SUBTEXT}${prompt}${R}${BG_BASE}"
+        _at 10 $sx; printf "${BG_BASE}${FG_DIM}${label}${R}${BG_BASE}"
         _at 11 $sx; printf "${BG_SURFACE1}%*s${R}" "$sw" ''
         _at 12 $sx; printf "${BG_SURFACE0}%*s${R}" "$sw" ''
         _at 12 $sx; printf "${BG_SURFACE0} ${FG_ACCENT}${stars}_ ${R}"
@@ -459,7 +529,7 @@ ui_password() {
                                 return 0
                             else
                                 local sx=$(( UI_X+3 ))
-                                _at 15 $sx; printf "${FG_RED}Passwords do not match — try again${R}"
+                                _at 15 $sx; printf "${BG_BASE}${FG_RED}Passwords do not match — try again${R}${BG_BASE}"
                                 sleep 1.2; cv=''
                             fi ;;
                         $'\x7f'|$'\b') cv="${cv%?}" ;;
@@ -483,13 +553,13 @@ ui_confirm() {
         ui_hints "Left/Right:choose" "Enter:confirm" "Esc:back"
 
         local sx=$(( UI_X+3 ))
-        _at 8 $sx; printf "${FG_WHITE}${msg}${R}"
+        _at 8 $sx; printf "${BG_BASE}${FG_WHITE}${msg}${R}${BG_BASE}"
 
         _at 11 $sx
         if [[ $sel -eq 0 ]]; then
             printf "${BG_SEL}${BOLD}${FG_WHITE}  Yes  ${R}   ${FG_DIM}  No  ${R}"
         else
-            printf "${FG_DIM}  Yes  ${R}   ${BG_SEL}${BOLD}${FG_WHITE}  No  ${R}"
+            printf "${BG_BASE}${FG_DIM}  Yes  ${R}${BG_BASE}   ${BG_SEL}${BOLD}${FG_WHITE}  No  ${R}${BG_BASE}"
         fi
 
         local key; IFS= read -rsn1 key
@@ -516,11 +586,12 @@ ui_progress() {
     local filled=$(( pct*bw/100 ))
     local empty=$(( bw - filled ))
 
-    _at "$row" $sx; printf "${FG_SUBTEXT}${label}${R}"
+    _at "$row" $sx
+    printf "${BG_BASE}${FG_SUBTEXT}%s%*s${R}" "$label" $(( UI_W-6-${#label} )) ''
     _at $(( row+1 )) $sx
     printf "${_BG_MAUVE}%*s${R}" "$filled" ''
     printf "${BG_SURFACE0}%*s${R}" "$empty" ''
-    printf "  ${BOLD}${FG_WHITE}${pct}%%${R}"
+    printf "${BG_BASE}  ${BOLD}${FG_WHITE}${pct}%%${R}"
 }
 
 # ── spinner ───────────────────────────────────────────────────────────────────
@@ -529,7 +600,7 @@ _SI=0
 ui_spin() {
     local offset=$1 label=$2
     _at $(( 6+offset )) $(( UI_X+3 ))
-    printf "${FG_ACCENT}${_SP[$_SI]}${R}  ${FG_DIM}${label}${R}"
+    printf "${BG_BASE}${FG_ACCENT}${_SP[$_SI]}${R}${BG_BASE}  ${FG_DIM}${label}${R}${BG_BASE}"
     _SI=$(( (_SI+1)%10 ))
 }
 
@@ -558,7 +629,7 @@ ui_disk_bar() {
 
     # header: disk path + size
     _at $(( 6+offset )) $sx
-    printf "${FG_SUBTEXT}${disk}${R}  ${FG_WHITE}$(lsblk -dno SIZE "$disk" 2>/dev/null)${R}"
+    printf "${BG_BASE}${FG_SUBTEXT}${disk}${R}${BG_BASE}  ${FG_WHITE}$(lsblk -dno SIZE "$disk" 2>/dev/null)${R}${BG_BASE}"
 
     local n=${#parts[@]}
     _at $(( 7+offset )) $sx
@@ -566,7 +637,7 @@ ui_disk_bar() {
     if [[ $n -eq 0 ]]; then
         # whole disk free
         printf "${_BG_GREEN}%*s${R}" "$bar_w" ''
-        _at $(( 8+offset )) $sx; printf "${FG_GREEN}free space${R}"
+        _at $(( 8+offset )) $sx; printf "${BG_BASE}${FG_GREEN}free space${R}${BG_BASE}"
         _at $(( 9+offset )) $sx
         printf "${_BG_GREEN}   ${R}${FG_GREEN} Free${R}"
         return
@@ -596,7 +667,7 @@ ui_disk_bar() {
         local lbl="${pname##*/}"
         local lpad=$(( seg_w*i + seg_w/2 - ${#lbl}/2 ))
         _at $(( 8+offset )) $(( sx+lpad ))
-        printf "${FG_DIM}${lbl}${R}"
+        printf "${BG_BASE}${FG_DIM}${lbl}${R}${BG_BASE}"
     done
 
     # color legend using colored squares (filled spaces)

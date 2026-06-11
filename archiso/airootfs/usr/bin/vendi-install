@@ -48,30 +48,25 @@ step_welcome() {
     ui_panel_draw 1 "$TOTAL" "Welcome"
     ui_hints "Enter:begin" "Ctrl+C:quit"
 
-    local sx=$(( UI_X+3 ))
-    ui_center_text 1 "${BOLD}${FG_ACCENT}vendiOS${R}"
-    ui_center_text 2 "${FG_DIM}Minimal · Modern · Yours${R}"
+    # The shard, then the name under it — the boot logo carried into the
+    # installer.
+    ui_shard 7
+    ui_center_text 12 "${BOLD}${FG_ACCENT}vendiOS${R}"
+    ui_center_text 13 "${FG_DIM}Minimal · Modern · Yours${R}"
 
-    _at 10 $sx; printf "${FG_DIM}---------------------------------------${R}"
-    _at 12 $sx; printf "${FG_WHITE}This installer will set up vendiOS on your machine.${R}"
-    _at 13 $sx; printf "${FG_DIM}Estimated time: 5–15 minutes depending on your connection.${R}"
-    _at 15 $sx; printf "${FG_DIM}What you'll configure:${R}"
-    _at 16 $sx; printf "${FG_DIM}  ${FG_ACCENT}·${FG_DIM} Locale, timezone & keyboard${R}"
-    _at 17 $sx; printf "${FG_DIM}  ${FG_ACCENT}·${FG_DIM} Disk & partitioning${R}"
-    _at 18 $sx; printf "${FG_DIM}  ${FG_ACCENT}·${FG_DIM} User account${R}"
-    _at 19 $sx; printf "${FG_DIM}  ${FG_ACCENT}·${FG_DIM} Base system + Limine bootloader${R}"
+    ui_center_text 16 "${FG_WHITE}This installer sets up vendiOS on your machine in 5–15 minutes.${R}"
+    ui_center_text 17 "${FG_DIM}Locale · Disk & encryption · User · Limine bootloader${R}"
 
     # network status
     local net_ok=0
     ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && net_ok=1 || true
-    _at 21 $sx
     if [[ $net_ok -eq 1 ]]; then
-        printf "${FG_GREEN}● Network connected${R}"
+        ui_center_text 20 "${FG_GREEN}● Network connected${R}"
     else
-        printf "${FG_RED}● No network — connect with nmtui before continuing${R}"
+        ui_center_text 20 "${FG_RED}● No network — connect with nmtui before continuing${R}"
     fi
 
-    _at 23 $sx; printf "${BOLD}${FG_ACCENT}Press Enter to begin.${R}"
+    ui_center_text 22 "${BOLD}${FG_ACCENT}Press Enter to begin${R}"
     local k; IFS= read -rsn1 k; return 0
 }
 
@@ -253,13 +248,13 @@ step_partmode() {
                 local c=$FG_WHITE
                 [[ $i -eq 1 && $has_free -eq 0 ]] && c=$FG_DIM
                 _at "$row" $(( UI_X+3 ))
-                printf "${FG_DIM}   ${c}${opts[$i]}${R}"
+                printf "${BG_BASE}${FG_DIM}   ${c}${opts[$i]}${R}${BG_BASE}"
             fi
         done
 
         [[ $has_free -eq 0 ]] && {
             _at $(( UI_ROWS-5 )) $(( UI_X+3 ))
-            printf "${FG_DIM}No free space >= 8 GiB detected for dual-boot${R}"
+            printf "${BG_BASE}${FG_DIM}No free space >= 8 GiB detected for dual-boot${R}${BG_BASE}"
         }
 
         local key; IFS= read -rsn1 key
@@ -316,9 +311,9 @@ step_filesystem() {
                 _fill "$base_row" $(( UI_X+1 )) $(( UI_W-2 ))
                 _fill $(( base_row+1 )) $(( UI_X+1 )) $(( UI_W-2 ))
                 _at "$base_row" $(( UI_X+3 ))
-                printf "${FG_DIM}  ${opts[$i]}${R}"
+                printf "${BG_BASE}${FG_DIM}  ${opts[$i]}${R}${BG_BASE}"
                 _at $(( base_row+1 )) $(( UI_X+6 ))
-                printf "${FG_DIM}${descs[$i]}${R}"
+                printf "${BG_BASE}${FG_DIM}${descs[$i]}${R}${BG_BASE}"
             fi
         done
 
@@ -432,7 +427,9 @@ step_confirm() {
     local sx=$(( UI_X+3 ))
     local pad=12
 
-    _row() { _at $(( 6+$1 )) $sx; printf "${FG_DIM}%-${pad}s${R}${BOLD}${FG_WHITE}%s${R}" "$2" "$3"; }
+    # Boxed summary — everything the install step is about to act on.
+    ui_box 7 15 "Installation summary"
+    _row() { _at $(( 7+$1 )) $(( sx+3 )); printf "${BG_BASE}${FG_DIM}%-${pad}s${R}${BG_BASE}${BOLD}${FG_WHITE}%s${R}" "$2" "$3"; }
     _row 1  "Locale"     "$CFG_LOCALE"
     _row 2  "Timezone"   "$CFG_TIMEZONE"
     _row 3  "Keyboard"   "$CFG_KEYMAP"
@@ -446,10 +443,16 @@ step_confirm() {
     _row 11 "Swap"       "$( [[ $CFG_SWAP -eq 1 ]] && echo "${CFG_SWAP_SIZE} GiB swapfile" || echo 'none' )"
     _row 12 "AUR helper" "$( [[ $CFG_AUR -eq 1 ]] && echo 'yay' || echo 'none' )"
 
-    _at $(( 6+13 )) $sx
-    printf "${FG_DIM}--------------------------------------------------${R}"
-    _at $(( 6+14 )) $sx
-    printf "${BOLD}${FG_ACCENT}Press Enter to start installation.${R}"
+    # Full-disk installs get an unmissable warning band before the point of
+    # no return.
+    if [[ $CFG_MODE == full ]]; then
+        local warn=" ALL DATA ON ${CFG_DISK} WILL BE ERASED "
+        local wpad=$(( (UI_W - 6 - ${#warn}) / 2 ))
+        _at 23 $sx; printf "${_BG_RED}%*s${R}" $(( UI_W-6 )) ''
+        _at 23 $(( sx + wpad )); printf "${_BG_RED}${BOLD}\e[38;2;17;17;27m%s${R}" "$warn"
+    fi
+    _at 25 $sx
+    printf "${BG_BASE}${BOLD}${FG_ACCENT}Press Enter to start installation.${R}"
 
     while true; do
         local k; IFS= read -rsn1 k
@@ -473,13 +476,27 @@ step_install() {
         _at $(( UI_CONTENT_BOT-2 )) $(( UI_X+3 ))
         printf "${BG_BASE}%*s${R}" $(( UI_W-6 )) ''
         _at $(( UI_CONTENT_BOT-2 )) $(( UI_X+3 ))
-        printf "${FG_DIM}${msg}${R}"
+        printf "${BG_BASE}${FG_DIM}${msg}${R}"
     }
-    _ok()  { _at $(( 6+$1 )) $(( UI_X+3 )); printf "${FG_GREEN}✓ ${R}${FG_DIM}${2}${R}"; }
+    _ok()  { _at $(( 6+$1 )) $(( UI_X+3 )); printf "${BG_BASE}${FG_GREEN}✓ ${R}${BG_BASE}${FG_SUBTEXT}${2}${R}"; }
 
     ui_clear
     ui_panel_draw 12 "$TOTAL" "Installing vendiOS"
     ui_hints "please wait — do not interrupt"
+
+    # The whole checklist up front, dimmed; each _ok below turns a line
+    # green as the install advances. Offsets match the _ok calls.
+    local -a stage_off=(4 5 6 7 8 9 10 11 12)
+    local -a stage_lbl=(
+        "Disk partitioned" "Partitions formatted" "Filesystems mounted"
+        "Mirrors updated" "Base system installed" "Initramfs built"
+        "Users created" "Desktop configured" "Limine installed"
+    )
+    local si
+    for si in "${!stage_off[@]}"; do
+        _at $(( 6+stage_off[si] )) $(( UI_X+3 ))
+        printf "${BG_BASE}${FG_DIM}· %s${R}" "${stage_lbl[si]}"
+    done
 
     # ── 1. disk prep ──────────────────────────────────────────
     _status 5 "Preparing disk"
@@ -665,12 +682,12 @@ step_done() {
     # big check
     ui_center_text 2 "${FG_GREEN}${BOLD}  ✓ vendiOS installed successfully  ${R}"
 
-    _at 11 $sx; printf "${FG_DIM}Machine:${R}  ${BOLD}${FG_WHITE}${CFG_HOSTNAME}${R}"
-    _at 12 $sx; printf "${FG_DIM}User:    ${R}  ${BOLD}${FG_WHITE}${CFG_USER}${R}"
-    _at 13 $sx; printf "${FG_DIM}Disk:    ${R}  ${FG_WHITE}${CFG_DISK}${R}"
-    _at 14 $sx; printf "${FG_DIM}FS:      ${R}  ${FG_WHITE}${CFG_FS}${R}"
-    _at 16 $sx; printf "${FG_DIM}Remove the installation media before rebooting.${R}"
-    _at 18 $sx; printf "${BOLD}${FG_ACCENT}Enter${R}${FG_DIM} reboot  ${R}${BOLD}${FG_ACCENT}Esc${R}${FG_DIM} drop to shell  ${R}${BOLD}${FG_ACCENT}L${R}${FG_DIM} view install log${R}"
+    _at 11 $sx; printf "${BG_BASE}${FG_DIM}Machine:${R}${BG_BASE}  ${BOLD}${FG_WHITE}${CFG_HOSTNAME}${R}${BG_BASE}"
+    _at 12 $sx; printf "${BG_BASE}${FG_DIM}User:    ${R}${BG_BASE}  ${BOLD}${FG_WHITE}${CFG_USER}${R}${BG_BASE}"
+    _at 13 $sx; printf "${BG_BASE}${FG_DIM}Disk:    ${R}${BG_BASE}  ${FG_WHITE}${CFG_DISK}${R}${BG_BASE}"
+    _at 14 $sx; printf "${BG_BASE}${FG_DIM}FS:      ${R}${BG_BASE}  ${FG_WHITE}${CFG_FS}${R}${BG_BASE}"
+    _at 16 $sx; printf "${BG_BASE}${FG_DIM}Remove the installation media before rebooting.${R}${BG_BASE}"
+    _at 18 $sx; printf "${BG_BASE}${BOLD}${FG_ACCENT}Enter${R}${BG_BASE}${FG_DIM} reboot  ${R}${BG_BASE}${BOLD}${FG_ACCENT}Esc${R}${BG_BASE}${FG_DIM} drop to shell  ${R}${BG_BASE}${BOLD}${FG_ACCENT}L${R}${BG_BASE}${FG_DIM} view install log${R}"
 
     while true; do
         local k; IFS= read -rsn1 k
