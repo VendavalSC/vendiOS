@@ -246,6 +246,11 @@ impl Tree {
             // Trade ratio with the next sibling (or previous if we're last).
             let j = if i + 1 < ratios.len() { i + 1 } else { i.wrapping_sub(1) };
             if j >= ratios.len() || i == j { return; }
+            // Arrow = the direction the shared edge moves. Growing ratio[i]
+            // pushes the edge shared with the NEXT sibling; when we trade
+            // with the PREVIOUS one (focused pane is last), the same arrow
+            // must move that edge the opposite way.
+            let delta = if j < i { -delta } else { delta };
             const MIN: f32 = 0.10;
             let d = delta.clamp(MIN - ratios[i], ratios[j] - MIN);
             ratios[i] += d;

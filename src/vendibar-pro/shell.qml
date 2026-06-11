@@ -1,12 +1,14 @@
-// vendibar Pro — the maximalist vendiOS bar (quickshell/QML).
+// vendibar Pro — seamless notch bar for vendiOS (quickshell/QML).
 //
-// Counterpart to the minimal GTK vendibar: floating widget islands over the
-// wallpaper. Theme accent comes live from ~/.config/vendi/theme-state;
-// compositor state over vendi-ctl. Run: quickshell -c vendibar-pro
+// One continuous silhouette hugging the top edge: a thin strip across the
+// screen with three notches flowing out of it (concave fillets, rounded
+// bottoms), Dynamic-Island style. Notch widths track their content and
+// morph smoothly. Theme accent follows ~/.config/vendi/theme-state live;
+// compositor state over vendi-ctl.    Run: quickshell -c vendibar-pro
 //
-// Islands, left → right:
-//   [ shard · workspaces · title ]   [ clock · date ]   [ music ] [ cpu mem ] [ vol net bat ] [ power ]
-
+//   ┌────────────────────────────────────────────────────────────────┐  ← strip
+//   ╰── shard · ws · title ──╯  ╰── clock · date ──╯  ╰── status ────╯
+//
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -16,13 +18,19 @@ import QtQuick.Layouts
 ShellRoot {
     id: root
 
-    // ── theme ───────────────────────────────────────────────────────────────
-    property color accent:  "#cba6f7"
-    property color island:  Qt.rgba(0.085, 0.085, 0.13, 0.88)
-    property color islandHi: Qt.rgba(0.13, 0.13, 0.19, 0.92)
-    property color fg:      "#cdd6f4"
-    property color dim:     "#6c7086"
-    property string mono:   "JetBrainsMonoNL Nerd Font"
+    // ── theme ────────────────────────────────────────────────────────────────
+    property color accent: "#cba6f7"
+    property color panel:  Qt.rgba(0.043, 0.043, 0.071, 0.94)   // #0b0b12
+    property color fg:     "#cdd6f4"
+    property color dim:    "#717189"
+    property string mono:  "JetBrainsMonoNL Nerd Font"
+
+    // geometry
+    readonly property int stripH: 3      // the edge strip between notches
+    readonly property int barH:   38     // notch height including strip
+    readonly property int fillet: 12     // concave curve into the strip
+    readonly property int bcr:    15     // notch bottom corner radius
+    readonly property int pad:    18     // notch content side padding
 
     FileView {
         path: Quickshell.env("HOME") + "/.config/vendi/theme-state"
@@ -65,7 +73,6 @@ ShellRoot {
     }
     Timer { id: subRetry; interval: 2000; onTriggered: wmSub.running = true }
 
-    // Initial snapshot (subscribe only streams changes).
     Process {
         id: wsSnap
         command: ["vendi-ctl", "list-workspaces"]
@@ -133,7 +140,6 @@ ShellRoot {
             }
         }
     }
-
     Process {
         id: netProc
         property bool found: false
@@ -189,41 +195,94 @@ ShellRoot {
     Variants {
         model: Quickshell.screens
         PanelWindow {
-            id: panel
+            id: panelWin
             required property var modelData
             screen: modelData
             anchors { top: true; left: true; right: true }
-            implicitHeight: 42
+            implicitHeight: root.barH
             color: "transparent"
             WlrLayershell.namespace: "vendibar-pro"
 
-            // reusable island chrome
-            component Island: Rectangle {
-                default property alias content: inner.data
-                property bool hover: false
-                width: inner.width + 26
-                height: 30
-                radius: 15
-                color: hover ? root.islandHi : root.island
-                border.width: 1
-                border.color: Qt.rgba(1, 1, 1, 0.07)
-                Behavior on color { ColorAnimation { duration: 140 } }
-                RowLayout { id: inner; anchors.centerIn: parent; spacing: 10 }
-                HoverHandler { onHoveredChanged: parent.hover = hovered }
+            // animated notch widths, driven by content
+            property real lw: leftRow.implicitWidth  + root.pad * 2
+            property real cw: centerRow.implicitWidth + root.pad * 2
+            property real rw: rightRow.implicitWidth + root.pad * 2
+            Behavior on lw { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            Behavior on cw { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            Behavior on rw { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            onLwChanged: silhouette.requestPaint()
+            onCwChanged: silhouette.requestPaint()
+            onRwChanged: silhouette.requestPaint()
+
+            // ── the silhouette: strip + three seamless notches ──────────────
+            Canvas {
+                id: silhouette
+                anchors.fill: parent
+                Connections {
+                    target: root
+                    function onPanelChanged() { silhouette.requestPaint() }
+                }
+                onPaint: {
+                    const ctx = getContext("2d");
+                    const w = width, H = height;
+                    const s = root.stripH, r = root.fillet, b = root.bcr;
+                    const lw = panelWin.lw, cw = panelWin.cw, rw = panelWin.rw;
+                    const cx = (w - cw) / 2;
+                    const rx = w - rw;
+                    ctx.reset();
+                    ctx.beginPath();
+                    ctx.moveTo(0, 0);
+                    // left notch — flush with the screen corner
+                    ctx.lineTo(0, H - b);
+                    ctx.arcTo(0, H, b, H, b);
+                    ctx.lineTo(lw - b, H);
+                    ctx.arcTo(lw, H, lw, H - b, b);
+                    ctx.lineTo(lw, s + r);
+                    ctx.arc(lw + r, s + r, r, Math.PI, Math.PI * 1.5, false);
+                    // strip to center notch
+                    ctx.lineTo(cx - r, s);
+                    ctx.arc(cx - r, s + r, r, -Math.PI / 2, 0, false);
+                    ctx.lineTo(cx, H - b);
+                    ctx.arcTo(cx, H, cx + b, H, b);
+                    ctx.lineTo(cx + cw - b, H);
+                    ctx.arcTo(cx + cw, H, cx + cw, H - b, b);
+                    ctx.lineTo(cx + cw, s + r);
+                    ctx.arc(cx + cw + r, s + r, r, Math.PI, Math.PI * 1.5, false);
+                    // strip to right notch — flush with the right corner
+                    ctx.lineTo(rx - r, s);
+                    ctx.arc(rx - r, s + r, r, -Math.PI / 2, 0, false);
+                    ctx.lineTo(rx, H - b);
+                    ctx.arcTo(rx, H, rx + b, H, b);
+                    ctx.lineTo(w - b, H);
+                    ctx.arcTo(w, H, w, H - b, b);
+                    ctx.lineTo(w, 0);
+                    ctx.closePath();
+                    ctx.fillStyle = root.panel;
+                    ctx.fill();
+                }
             }
+
             component Mono: Text {
                 color: root.fg
                 font.family: root.mono
                 font.pixelSize: 12
+                verticalAlignment: Text.AlignVCenter
+            }
+            component Sep: Rectangle {
+                width: 1
+                Layout.preferredHeight: 14
+                color: Qt.rgba(1, 1, 1, 0.10)
             }
 
-            // ── left: shard · workspaces · title ────────────────────────────
-            Island {
-                anchors.left: parent.left
-                anchors.leftMargin: 10
-                anchors.verticalCenter: parent.verticalCenter
+            // ── left notch: shard · workspaces · title ──────────────────────
+            RowLayout {
+                id: leftRow
+                x: root.pad
+                height: parent.height - root.stripH
+                y: root.stripH
+                spacing: 12
 
-                Mono { text: "󰜁"; color: root.accent; font.pixelSize: 16 }
+                Mono { text: "󰜁"; color: root.accent; font.pixelSize: 17 }
 
                 RowLayout {
                     spacing: 5
@@ -232,18 +291,19 @@ ShellRoot {
                         Rectangle {
                             required property var modelData
                             property bool current: modelData.id === root.activeWs
-                            width: current ? 28 : 18
-                            height: 18
-                            radius: 9
+                            Layout.alignment: Qt.AlignVCenter
+                            width: current ? 30 : 19
+                            height: 19
+                            radius: 9.5
                             color: current ? root.accent
-                                 : modelData.windows > 0 ? Qt.rgba(1, 1, 1, 0.12)
-                                 : "transparent"
-                            Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
-                            Behavior on color { ColorAnimation { duration: 140 } }
+                                 : modelData.windows > 0 ? Qt.rgba(1, 1, 1, 0.14)
+                                 : Qt.rgba(1, 1, 1, 0.05)
+                            Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutBack } }
+                            Behavior on color { ColorAnimation { duration: 150 } }
                             Mono {
                                 anchors.centerIn: parent
                                 text: parent.modelData.id
-                                color: parent.current ? "#11111b" : root.dim
+                                color: parent.current ? "#0b0b12" : root.dim
                                 font.pixelSize: 11
                                 font.bold: parent.current
                             }
@@ -257,19 +317,22 @@ ShellRoot {
                     }
                 }
 
-                Rectangle { width: 1; height: 14; color: Qt.rgba(1, 1, 1, 0.1); visible: root.title.length > 0 }
+                Sep { visible: root.title.length > 0 }
                 Mono {
-                    text: root.title.length > 44 ? root.title.slice(0, 44) + "…" : root.title
+                    text: root.title.length > 42 ? root.title.slice(0, 42) + "…" : root.title
                     visible: root.title.length > 0
                     color: root.dim
                 }
             }
 
-            // ── center: clock + date ────────────────────────────────────────
-            Island {
+            // ── center notch: clock · date ──────────────────────────────────
+            RowLayout {
+                id: centerRow
                 anchors.horizontalCenter: parent.horizontalCenter
-                anchors.verticalCenter: parent.verticalCenter
-                Mono { id: clockT; font.bold: true; font.pixelSize: 13 }
+                height: parent.height - root.stripH
+                y: root.stripH
+                spacing: 10
+                Mono { id: clockT; font.bold: true; font.pixelSize: 14 }
                 Mono { id: dateT; color: root.dim }
                 Timer {
                     interval: 1000; running: true; repeat: true; triggeredOnStart: true
@@ -281,15 +344,18 @@ ShellRoot {
                 }
             }
 
-            // ── right: islands row ──────────────────────────────────────────
+            // ── right notch: music · stats · vol/net/bat · power ────────────
             RowLayout {
+                id: rightRow
                 anchors.right: parent.right
-                anchors.rightMargin: 10
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: 8
+                anchors.rightMargin: root.pad
+                height: parent.height - root.stripH
+                y: root.stripH
+                spacing: 12
 
-                // music — hidden when no player
-                Island {
+                // music — collapses away when nothing plays
+                RowLayout {
+                    spacing: 8
                     visible: root.musicStatus.length > 0
                     Mono {
                         text: root.musicStatus === "Playing" ? "󰐊" : "󰏤"
@@ -297,79 +363,73 @@ ShellRoot {
                         font.pixelSize: 13
                     }
                     Mono {
-                        text: root.musicTrack.length > 34 ? root.musicTrack.slice(0, 34) + "…" : root.musicTrack
+                        text: root.musicTrack.length > 30 ? root.musicTrack.slice(0, 30) + "…" : root.musicTrack
                         color: root.dim
                     }
-                    TapHandler {
-                        onTapped: Quickshell.execDetached(["playerctl", "play-pause"])
+                    TapHandler { onTapped: Quickshell.execDetached(["playerctl", "play-pause"]) }
+                }
+                Sep { visible: root.musicStatus.length > 0 }
+
+                Mono { text: "󰻠"; color: root.cpu > 85 ? "#f38ba8" : root.dim; font.pixelSize: 13 }
+                Mono { text: Math.round(root.cpu) + "%" }
+                Mono { text: "󰍛"; color: root.mem > 85 ? "#f38ba8" : root.dim; font.pixelSize: 13 }
+                Mono { text: Math.round(root.mem) + "%" }
+
+                Sep {}
+
+                Mono {
+                    text: (root.muted ? "󰝟" : root.volume > 50 ? "󰕾" : root.volume > 0 ? "󰖀" : "󰕿")
+                          + " " + (root.volume < 0 ? "—" : root.volume + "%")
+                    color: root.muted ? root.dim : root.fg
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onClicked: ev => {
+                            if (ev.button === Qt.RightButton)
+                                Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"]);
+                            else
+                                Quickshell.execDetached(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
+                            volRefresh.start();
+                        }
+                        onWheel: w => {
+                            Quickshell.execDetached(["wpctl", "set-volume", "-l", "1.0",
+                                "@DEFAULT_AUDIO_SINK@", w.angleDelta.y > 0 ? "2%+" : "2%-"]);
+                            volRefresh.start();
+                        }
+                    }
+                    Timer { id: volRefresh; interval: 120; onTriggered: volProc.running = true }
+                }
+
+                Mono {
+                    text: root.netIcon
+                    font.pixelSize: 13
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: Quickshell.execDetached(
+                            ["alacritty", "--class", "vendi-float", "-e", "vendi", "wifi"])
                     }
                 }
 
-                // cpu · mem
-                Island {
-                    Mono { text: "󰻠"; color: root.cpu > 85 ? "#f38ba8" : root.dim; font.pixelSize: 13 }
-                    Mono { text: Math.round(root.cpu) + "%" }
-                    Mono { text: "󰍛"; color: root.mem > 85 ? "#f38ba8" : root.dim; font.pixelSize: 13 }
-                    Mono { text: Math.round(root.mem) + "%" }
+                Mono {
+                    visible: root.hasBattery
+                    text: (root.charging ? "󰂄" : root.battery > 80 ? "󰁹"
+                          : root.battery > 50 ? "󰁾" : root.battery > 20 ? "󰁻" : "󰁺")
+                          + " " + root.battery + "%"
+                    color: root.battery <= 20 && !root.charging ? "#f38ba8" : root.fg
                 }
 
-                // volume · network · battery
-                Island {
-                    Mono {
-                        text: (root.muted ? "󰝟" : root.volume > 50 ? "󰕾" : root.volume > 0 ? "󰖀" : "󰕿")
-                              + "  " + (root.volume < 0 ? "—" : root.volume + "%")
-                        color: root.muted ? root.dim : root.fg
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                            onClicked: ev => {
-                                if (ev.button === Qt.RightButton)
-                                    Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"]);
-                                else
-                                    Quickshell.execDetached(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
-                                volRefresh.start();
-                            }
-                            onWheel: w => {
-                                Quickshell.execDetached(["wpctl", "set-volume", "-l", "1.0",
-                                    "@DEFAULT_AUDIO_SINK@", w.angleDelta.y > 0 ? "2%+" : "2%-"]);
-                                volRefresh.start();
-                            }
-                        }
-                        Timer { id: volRefresh; interval: 120; onTriggered: volProc.running = true }
-                    }
+                Sep {}
 
-                    Mono {
-                        text: root.netIcon
-                        font.pixelSize: 13
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: Quickshell.execDetached(
-                                ["alacritty", "--class", "vendi-float", "-e", "vendi", "wifi"])
-                        }
-                    }
-
-                    Mono {
-                        visible: root.hasBattery
-                        text: (root.charging ? "󰂄" : root.battery > 80 ? "󰁹"
-                              : root.battery > 50 ? "󰁾" : root.battery > 20 ? "󰁻" : "󰁺")
-                              + "  " + root.battery + "%"
-                        color: root.battery <= 20 && !root.charging ? "#f38ba8" : root.fg
-                    }
-                }
-
-                // power
-                Island {
-                    Mono {
-                        text: "󰐥"
-                        color: root.accent
-                        font.pixelSize: 14
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: Quickshell.execDetached(["vendi-menu", "power"])
-                        }
+                Mono {
+                    text: "󰐥"
+                    color: root.accent
+                    font.pixelSize: 14
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: Quickshell.execDetached(["vendi-menu", "power"])
                     }
                 }
             }

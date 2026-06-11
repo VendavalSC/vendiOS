@@ -15,7 +15,7 @@ mod keys;
 
 use gtk4 as gtk;
 use gtk::{gdk, glib, prelude::*};
-use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 const APP_ID:    &str = "os.vendi.menu";
 const WIDTH:     i32  = 680;
@@ -83,8 +83,16 @@ fn build_ui(app: &gtk::Application) {
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("vendi-menu"));
     window.set_keyboard_mode(KeyboardMode::Exclusive);
-    // No anchors: layer-shell centers the surface on the output, and it
-    // stays centered as the results panel grows and shrinks.
+    // Optical center: mathematical center reads too low (Spotlight sits at
+    // roughly a third of the screen). Anchor top at ~30% of monitor height;
+    // results then grow downward without the pill jumping around.
+    window.set_anchor(Edge::Top, true);
+    let margin = gdk::Display::default()
+        .and_then(|d| d.monitors().item(0))
+        .and_then(|m| m.downcast::<gdk::Monitor>().ok())
+        .map(|m| (m.geometry().height() as f64 * 0.30) as i32)
+        .unwrap_or(300);
+    window.set_margin(Edge::Top, margin);
     window.set_default_width(WIDTH);
     window.add_css_class("menu");
 
