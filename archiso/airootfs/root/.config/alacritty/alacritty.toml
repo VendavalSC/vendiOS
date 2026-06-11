@@ -2,7 +2,7 @@
 # Catppuccin Mocha + Mauve accent, JetBrains Mono Nerd Font.
 
 [window]
-opacity = 1.0
+opacity = 0.9
 padding = { x = 14, y = 12 }
 dynamic_padding = true
 decorations = "None"

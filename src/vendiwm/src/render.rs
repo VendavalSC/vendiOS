@@ -14,7 +14,7 @@ use smithay::{
         renderer::{
             element::{
                 Element, Id, Kind, RenderElement, UnderlyingStorage,
-                memory::MemoryRenderBuffer,
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 surface::WaylandSurfaceRenderElement,
                 texture::TextureRenderElement,
             },
@@ -144,6 +144,51 @@ void main() {
     float inner = smoothstep(-thickness - 0.5, -thickness + 1.0, d);
     float a = color.a * outer * inner * alpha;
     gl_FragColor = vec4(color.rgb * a, a);
+}
+"#;
+
+/// Circular reveal (texture shader): the sampled color is kept inside a
+/// growing circle and discarded outside — the new wallpaper "blooms" over
+/// the old one from the point where the switch happened.
+pub const REVEAL_FRAG: &str = r#"#version 100
+//_DEFINES
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision mediump float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+uniform vec2 size;
+uniform vec2 center;
+uniform float reveal;
+
+void main() {
+    vec4 color = texture2D(tex, v_coords);
+#if defined(NO_ALPHA_MULTIPLIER)
+    color.a = 1.0;
+#endif
+    float d = length(v_coords * size - center) - reveal;
+    // ~2.5px feathered rim so the edge reads soft while it sweeps.
+    float mask = 1.0 - smoothstep(-2.5, 2.5, d);
+    color *= alpha * mask;
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        color = vec4(0.0, 0.3, 0.0, 0.2) + color * 0.8;
+#endif
+    gl_FragColor = color;
 }
 "#;
 
@@ -321,6 +366,78 @@ impl RenderElement<GlesRenderer> for RoundedElement {
 
     fn underlying_storage(&self, _renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
         // Refuse direct scanout: the corners only exist when the shader runs.
+        None
+    }
+}
+
+/// Wraps the incoming wallpaper and draws it through the circular-reveal
+/// shader: only the disc of radius `reveal` around `center` (element-local
+/// px) survives. Drawn over the outgoing wallpaper, radius eased to the far
+/// corner — the swww-style bloom.
+pub struct RevealElement {
+    inner:   MemoryRenderBufferRenderElement<GlesRenderer>,
+    program: GlesTexProgram,
+    center:  (f32, f32),
+    reveal:  f32,
+}
+
+impl RevealElement {
+    pub fn new(
+        inner: MemoryRenderBufferRenderElement<GlesRenderer>,
+        program: GlesTexProgram,
+        center: (f32, f32),
+        reveal: f32,
+    ) -> Self {
+        Self { inner, program, center, reveal }
+    }
+}
+
+impl Element for RevealElement {
+    fn id(&self) -> &Id { self.inner.id() }
+    fn current_commit(&self) -> CommitCounter { self.inner.current_commit() }
+    fn location(&self, scale: Scale<f64>) -> Point<i32, Physical> { self.inner.location(scale) }
+    fn src(&self) -> Rectangle<f64, BufferCoords> { self.inner.src() }
+    fn transform(&self) -> Transform { self.inner.transform() }
+    fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> { self.inner.geometry(scale) }
+    fn damage_since(&self, scale: Scale<f64>, _commit: Option<CommitCounter>) -> DamageSet<i32, Physical> {
+        // The mask moves every frame of the transition — damage everything.
+        DamageSet::from_slice(&[Rectangle::from_size(self.geometry(scale).size)])
+    }
+    fn opaque_regions(&self, _scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        // Transparent outside the disc by construction.
+        OpaqueRegions::default()
+    }
+    fn alpha(&self) -> f32 { self.inner.alpha() }
+    fn kind(&self) -> Kind { self.inner.kind() }
+}
+
+impl RenderElement<GlesRenderer> for RevealElement {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        src: Rectangle<f64, BufferCoords>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        cache: Option<&smithay::utils::user_data::UserDataMap>,
+    ) -> Result<(), GlesError> {
+        frame.override_default_tex_program(
+            self.program.clone(),
+            vec![
+                Uniform::new("size", (dst.size.w as f32, dst.size.h as f32)),
+                Uniform::new("center", self.center),
+                Uniform::new("reveal", self.reveal),
+            ],
+        );
+        let res = RenderElement::<GlesRenderer>::draw(
+            &self.inner, frame, src, dst, damage, opaque_regions, cache,
+        );
+        frame.clear_tex_program_override();
+        res
+    }
+
+    fn underlying_storage(&self, _renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
+        // The disc only exists when the shader runs — never scan out.
         None
     }
 }

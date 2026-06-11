@@ -95,6 +95,8 @@ smithay::backend::renderer::element::render_elements! {
     Texture=smithay::backend::renderer::element::texture::TextureRenderElement<smithay::backend::renderer::gles::GlesTexture>,
     // Frosted-glass patches behind overlay surfaces (vendi-menu).
     Blur=crate::render::BlurElement,
+    // Incoming wallpaper drawn through a growing circular mask (swap reveal).
+    Reveal=crate::render::RevealElement,
 }
 
 type FrameElement = OutputRenderElements;
@@ -458,6 +460,8 @@ pub struct DeviceState {
     pub border_prog:  GlesPixelProgram,
     /// Separable gaussian blur pass (frosted glass behind vendi-menu).
     pub blur_prog:    GlesTexProgram,
+    /// Circular wallpaper-reveal shader (wallpaper switch transition).
+    pub reveal_prog:  GlesTexProgram,
     /// Ping-pong offscreen targets for the blur, at 1/4 output size.
     /// Recreated whenever the output size changes.
     pub blur_texs:    Option<(
@@ -496,6 +500,9 @@ pub struct SurfaceState {
     pub wallpaper:  MemoryRenderBuffer,
     /// Matches state.wallpaper_gen when `wallpaper` is current.
     pub wallpaper_gen: u64,
+    /// Outgoing wallpaper during a switch: (buffer, started, reveal center
+    /// in output-local logical px). The new one blooms over it.
+    pub old_wallpaper: Option<(MemoryRenderBuffer, std::time::Instant, (f32, f32))>,
     /// Which connector drives this surface (hotplug bookkeeping).
     pub connector:  connector::Handle,
     /// The mode we set — a different preferred mode on rescan means the
@@ -551,6 +558,14 @@ impl UdevData {
             crate::render::BLUR_FRAG,
             &[UniformName::new("dir", UniformType::_2f)],
         ).map_err(|e| anyhow::anyhow!("compile blur shader: {e:?}"))?;
+        let reveal_prog = renderer.compile_custom_texture_shader(
+            crate::render::REVEAL_FRAG,
+            &[
+                UniformName::new("size",   UniformType::_2f),
+                UniformName::new("center", UniformType::_2f),
+                UniformName::new("reveal", UniformType::_1f),
+            ],
+        ).map_err(|e| anyhow::anyhow!("compile reveal shader: {e:?}"))?;
 
         // 5. Enumerate connectors so we can log + later create surfaces.
         let resources = drm.resource_handles()
@@ -579,6 +594,7 @@ impl UdevData {
             rounded_prog,
             border_prog,
             blur_prog,
+            reveal_prog,
             blur_texs: None,
             tex_stash: HashMap::new(),
             focus_anim: HashMap::new(),
@@ -744,6 +760,7 @@ fn connect_connector(
         compositor,
         wallpaper,
         wallpaper_gen: state.wallpaper_gen,
+        old_wallpaper: None,
         connector: connector.handle(),
         mode: drm_mode,
         global,
@@ -904,6 +921,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let rounded_prog = device.rounded_prog.clone();
     let border_prog  = device.border_prog.clone();
     let blur_prog    = device.blur_prog.clone();
+    let reveal_prog  = device.reveal_prog.clone();
     let blur_texs     = &mut device.blur_texs;
     let tex_stash     = &mut device.tex_stash;
     let focus_anim    = &mut device.focus_anim;
@@ -912,16 +930,25 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let surface  = device.surfaces.get_mut(&crtc)
         .ok_or_else(|| anyhow::anyhow!("surface not found"))?;
 
-    // Wallpaper changed over IPC: rebuild this output's buffer once.
+    // Wallpaper changed over IPC: rebuild this output's buffer once, keep
+    // the old one around for the bloom transition (reveal grows out of the
+    // pointer — that's where the user clicked the thumbnail).
     if surface.wallpaper_gen != state.wallpaper_gen {
         let mode_size = surface.mode.size();
-        surface.wallpaper = crate::render::wallpaper_buffer(
+        let fresh = crate::render::wallpaper_buffer(
             mode_size.0 as i32,
             mode_size.1 as i32,
             state.config.theme.wallpaper.as_deref(),
             state.config.theme.background,
             state.config.theme.accent,
         );
+        let out_geo = state.space.output_geometry(&surface.output).unwrap_or_default();
+        let cx = (state.pointer_location.x - out_geo.loc.x as f64)
+            .clamp(0.0, out_geo.size.w as f64) as f32;
+        let cy = (state.pointer_location.y - out_geo.loc.y as f64)
+            .clamp(0.0, out_geo.size.h as f64) as f32;
+        let old = std::mem::replace(&mut surface.wallpaper, fresh);
+        surface.old_wallpaper = Some((old, std::time::Instant::now(), (cx, cy)));
         surface.wallpaper_gen = state.wallpaper_gen;
     }
 
@@ -1513,7 +1540,49 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // workspace switch it zooms out from 103% and settles, so even a switch
     // to an empty desk visibly moves (the alpha dip alone vanishes on dark
     // wallpapers — near-black toward near-black).
-    if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
+    //
+    // Wallpaper switch: the new image blooms over the old one — a feathered
+    // disc growing from the switch point until it swallows the far corner.
+    const REVEAL_MS: f32 = 700.0;
+    let reveal = surface.old_wallpaper.as_ref().and_then(|(_, t0, c)| {
+        let p = t0.elapsed().as_millis() as f32 / REVEAL_MS;
+        (p < 1.0).then_some((ease_out(p), *c))
+    });
+    if reveal.is_none() { surface.old_wallpaper = None; } else { state.pending_redraw = true; }
+
+    if let Some((p, (cx, cy))) = reveal {
+        // Radius that reaches the farthest screen corner from the center.
+        let osize = state.space.output_geometry(&surface.output)
+            .map(|g| g.size)
+            .unwrap_or_else(|| (1, 1).into());
+        let far_x = cx.max(osize.w as f32 - cx);
+        let far_y = cy.max(osize.h as f32 - cy);
+        let max_r = (far_x * far_x + far_y * far_y).sqrt();
+        if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            (0.0, 0.0),
+            &surface.wallpaper,
+            Some(wallpaper_alpha),
+            None,
+            None,
+            Kind::Unspecified,
+        ) {
+            elements.push(OutputRenderElements::Reveal(crate::render::RevealElement::new(
+                elem,
+                reveal_prog.clone(),
+                (cx, cy),
+                p * max_r,
+            )));
+        }
+        // The outgoing wallpaper sits underneath, untouched.
+        if let Some((old, ..)) = &surface.old_wallpaper {
+            if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
+                renderer, (0.0, 0.0), old, Some(wallpaper_alpha), None, None, Kind::Unspecified,
+            ) {
+                elements.push(OutputRenderElements::Memory(elem));
+            }
+        }
+    } else if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
         renderer,
         (0.0, 0.0),
         &surface.wallpaper,
