@@ -29,6 +29,27 @@ import QtQuick.Layouts
 ShellRoot {
     id: root
 
+    // Lock-screen handshake (vendilock drives this over IPC):
+    //   hide   — left/right notches melt into the strip (animated); the
+    //            center notch stays put, ready to become the lock blob.
+    //   vanish — everything disappears instantly; the lock surface draws
+    //            its blob exactly where the center notch was (seamless swap).
+    //   restore — chrome returns, gliding down from the top edge.
+    property bool modulesHidden: false
+    property real centerW: 236
+    property bool chromeGone: false
+    signal chromeReturn()
+    IpcHandler {
+        target: "panel"
+        function hide(): void { root.modulesHidden = true; }
+        function vanish(): void { root.chromeGone = true; }
+        function centerWidth(): string { return String(Math.round(root.centerW)); }
+        function restore(): void {
+            root.modulesHidden = false;
+            if (root.chromeGone) { root.chromeGone = false; root.chromeReturn(); }
+        }
+    }
+
     // ── theme ────────────────────────────────────────────────────────────────
     property color accent: "#cba6f7"
     property color panel:  Qt.rgba(0.043, 0.043, 0.071, 0.96)   // #0b0b12
@@ -364,10 +385,12 @@ ShellRoot {
 
             // notch dimensions, all springy. Idle notches grow a hair on
             // hover — the island invites the click.
-            property real lw: leftRow.implicitWidth + root.pad * 2
+            property real lw: root.modulesHidden ? 0
+                : leftRow.implicitWidth + root.pad * 2
             property real cw: centerOpen ? 480
                 : centerRow.implicitWidth + root.pad * 2 + (centerHover.hovered ? 10 : 0)
-            property real rw: rightMode === "control" ? 400
+            property real rw: root.modulesHidden ? 0
+                : rightMode === "control" ? 400
                 : rightMode === "power" ? 240
                 : rightMode === "toast" ? 380
                 : rightMode === "osd" ? 270
@@ -386,7 +409,8 @@ ShellRoot {
             Behavior on ch { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
             Behavior on rh { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
             onLwChanged: silhouette.requestPaint()
-            onCwChanged: silhouette.requestPaint()
+            onCwChanged: { silhouette.requestPaint(); root.centerW = cw; }
+            Component.onCompleted: root.centerW = cw
             onRwChanged: silhouette.requestPaint()
             onChChanged: silhouette.requestPaint()
             onRhChanged: silhouette.requestPaint()
@@ -420,6 +444,25 @@ ShellRoot {
                     panelWin.rightOpen = false;
                     panelWin.powerOpen = false;
                 }
+            }
+
+            // ── chrome: every visual, sliding as one piece ──────────────────
+            // vendilock hides the bar through this — the whole silhouette
+            // (and its contents) glides off the top edge and back.
+            Item {
+            id: chrome
+            anchors.fill: parent
+            visible: !root.chromeGone
+            transform: Translate { id: chromeSlide; y: 0 }
+            Connections {
+                target: root
+                function onChromeReturn() { chromeDrop.restart(); }
+            }
+            NumberAnimation {
+                id: chromeDrop
+                target: chromeSlide; property: "y"
+                from: -(root.barH + 30); to: 0
+                duration: 340; easing.type: Easing.OutCubic
             }
 
             // ── silhouette ──────────────────────────────────────────────────
@@ -495,6 +538,8 @@ ShellRoot {
                 y: root.stripH
                 height: root.barH - root.stripH
                 spacing: 12
+                opacity: root.modulesHidden ? 0 : 1
+                Behavior on opacity { NumberAnimation { duration: 200 } }
 
                 Mono { text: "󰜁"; color: root.accent; font.pixelSize: 17 }
 
@@ -884,6 +929,8 @@ ShellRoot {
             // ── right notch collapsed row ───────────────────────────────────
             RowLayout {
                 id: rightRow
+                opacity: root.modulesHidden ? 0 : 1
+                Behavior on opacity { NumberAnimation { duration: 200 } }
                 anchors.right: parent.right
                 anchors.rightMargin: root.pad
                 y: root.stripH
@@ -1366,6 +1413,7 @@ ShellRoot {
 
                     Item { Layout.fillHeight: true }
                 }
+            }
             }
         }
     }

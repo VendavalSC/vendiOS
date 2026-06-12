@@ -1,50 +1,38 @@
 // vendilock — the vendiOS lock screen (quickshell + ext-session-lock).
 //
-// The bar's center notch comes alive. On lock it stretches, detaches and
-// swims to the middle of the screen as a wobbling blob (satellite circles
-// keep its outline undulating — it's a blob, not a perfect circle) showing
-// only the time in white. The wallpaper behind is blurred, never darkened.
-// On unlock the blob flashes to the theme accent, dips, then shoots off the
-// top of the screen shrinking as it goes — and the notch slides back down
-// from above, docking exactly where the bar's real notch lives.
+// The desktop never disappears: the compositor freezes it and blurs it in
+// place (vendiwm lock backdrop), so windows stay visible — just frosted.
+// The bar melts its side modules first (over IPC); the center notch stays
+// put and the lock blob takes its exact place in a seamless swap, then
+// swells, lets go, and settles mid-screen as a living blob — wobbling,
+// telling only the time, leaning toward the mouse when you come near. On
+// unlock it dips, shoots off the top while shrinking, the blur melts away,
+// and the whole bar glides back down from the edge.
 //
-// Typing pulses the blob; wrong passwords shake it. `vendi-ctl lock`.
+// Typing pulses the blob; wrong passwords shake it. `vendi-ctl lock`,
+// bound to super+escape.
 
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Services.Pam
 import QtQuick
-import QtQuick.Effects
 
 ShellRoot {
     id: root
 
-    // Must match vendibar-pro's center notch.
-    readonly property int notchW: 236
+    // Matches vendibar-pro's center notch; the real width is fetched from
+    // the bar over IPC so the blob swap is pixel-perfect.
+    property int notchW: 236
     readonly property int notchH: 38
     readonly property int notchR: 15
-    readonly property color notchColor: "#0b0b12"
+    readonly property color blobColor: "#0b0b12"
     readonly property int circleD: 210
 
-    property color accent: "#cba6f7"
-    property string wallpaper: ""
     property string password: ""
     property bool authenticating: false
     property bool failed: false
     property bool unlocking: false
-
-    FileView {
-        path: Quickshell.env("HOME") + "/.config/vendi/theme-state"
-        onLoaded: {
-            const m = /ACCENT_HEX=([0-9a-fA-F]{6})/.exec(text());
-            if (m) root.accent = "#" + m[1];
-        }
-    }
-    FileView {
-        path: Quickshell.env("HOME") + "/.config/vendi/wallpaper"
-        onLoaded: root.wallpaper = text().trim()
-    }
 
     SystemClock { id: sysClock; precision: SystemClock.Seconds }
 
@@ -71,17 +59,37 @@ ShellRoot {
         pam.start();
     }
 
+    function barCall(fn) {
+        Quickshell.execDetached(["quickshell", "-c", "vendibar-pro", "ipc", "call", "panel", fn]);
+    }
+
+    // Act one: the bar melts its side modules (the center notch stays put),
+    // then everything swaps out at once as the lock blob takes the notch's
+    // exact place.
+    Process {
+        id: widthProbe
+        command: ["quickshell", "-c", "vendibar-pro", "ipc", "call", "panel", "centerWidth"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const w = parseInt(text);
+                if (w > 60 && w < 800) root.notchW = w;
+            }
+        }
+    }
+    Component.onCompleted: { barCall("hide"); widthProbe.running = true; vanishTimer.start(); }
+    Timer { id: vanishTimer; interval: 380; onTriggered: { barCall("vanish"); lockTimer.start(); } }
+    Timer { id: lockTimer; interval: 70; onTriggered: lock.locked = true }
+    // Give the unlock request a beat to flush before exiting.
     Timer { id: quitTimer; interval: 150; onTriggered: Qt.quit() }
-    Timer { id: dockTimer; interval: 60;  onTriggered: lock.locked = false }
 
     WlSessionLock {
         id: lock
-        locked: true
-        onLockedChanged: if (!locked) quitTimer.start()
+        locked: false
+        onLockedChanged: if (!locked) { quitTimer.start(); }
 
         WlSessionLockSurface {
             id: surf
-            color: "#11111b"
+            color: "transparent"
 
             readonly property real notchX: (width - root.notchW) / 2
             readonly property real circleX: (width - root.circleD) / 2
@@ -111,36 +119,40 @@ ShellRoot {
                 }
             }
 
-            // ── backdrop: blurred wallpaper, never darkened ────────────────
-            Image {
-                id: wall
+            // Mouse tracking for the blob's curiosity.
+            MouseArea {
+                id: mouse
                 anchors.fill: parent
-                source: root.wallpaper ? "file://" + root.wallpaper : ""
-                fillMode: Image.PreserveAspectCrop
-                visible: root.wallpaper !== ""
-            }
-            MultiEffect {
-                id: blurFx
-                anchors.fill: parent
-                source: wall
-                visible: root.wallpaper !== ""
-                blurEnabled: true
-                blurMax: 48
-                blur: 0
+                hoverEnabled: true
+                acceptedButtons: Qt.NoButton
             }
 
             // ── the blob ───────────────────────────────────────────────────
             Item {
                 id: blob
                 x: surf.notchX
-                y: -root.notchR
+                y: -root.notchR                      // docked: it IS the notch
                 width: root.notchW
                 height: root.notchH + root.notchR
                 property real shapeRadius: root.notchR
-                // 0 → docked notch shape, 1 → full blob (drives satellites/text).
+                // 0 → notch silhouette, 1 → full blob (satellites + clock).
                 property real blobness: 0
 
+                // Lean toward a nearby pointer — curious, never clingy.
+                readonly property real cx: x + width / 2
+                readonly property real cy: y + height / 2
+                readonly property real mdx: mouse.mouseX - cx
+                readonly property real mdy: mouse.mouseY - cy
+                readonly property real mdist: Math.sqrt(mdx * mdx + mdy * mdy)
+                readonly property real pull: blobness >= 1 && !root.unlocking
+                    ? Math.max(0, 1 - mdist / 320) : 0
                 transform: [
+                    Translate {
+                        x: blob.mdist > 1 ? blob.mdx / blob.mdist * blob.pull * 14 : 0
+                        y: blob.mdist > 1 ? blob.mdy / blob.mdist * blob.pull * 14 : 0
+                        Behavior on x { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
+                        Behavior on y { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
+                    },
                     Scale {
                         id: stretch
                         origin.x: blob.width / 2; origin.y: blob.height / 2
@@ -154,62 +166,62 @@ ShellRoot {
                     id: body
                     anchors.fill: parent
                     radius: blob.shapeRadius
-                    color: root.notchColor
+                    color: root.blobColor
                 }
                 // Satellites: same-color circles drifting around the center —
-                // their union with the body makes the outline undulate.
+                // their union with the body keeps the outline undulating.
                 Item {
                     id: sats
                     anchors.fill: parent
                     opacity: blob.blobness
-                    // Slow orbit keeps the silhouette moving forever.
                     RotationAnimation on rotation {
-                        from: 0; to: 360; duration: 11000
+                        from: 0; to: 360; duration: 9000
                         loops: Animation.Infinite
                         running: blob.blobness > 0.2 && !root.unlocking
                     }
-                    // Breathing offset so the bulges swell and sink.
+                    // Two breathing phases, different periods — the shape
+                    // never repeats exactly.
                     property real wob: 0
+                    property real wob2: 0
                     SequentialAnimation on wob {
                         loops: Animation.Infinite
                         running: blob.blobness > 0.2 && !root.unlocking
-                        NumberAnimation { to: 1; duration: 1700; easing.type: Easing.InOutSine }
-                        NumberAnimation { to: 0; duration: 1700; easing.type: Easing.InOutSine }
+                        NumberAnimation { to: 1; duration: 1500; easing.type: Easing.InOutSine }
+                        NumberAnimation { to: 0; duration: 1500; easing.type: Easing.InOutSine }
+                    }
+                    SequentialAnimation on wob2 {
+                        loops: Animation.Infinite
+                        running: blob.blobness > 0.2 && !root.unlocking
+                        NumberAnimation { to: 1; duration: 2300; easing.type: Easing.InOutSine }
+                        NumberAnimation { to: 0; duration: 2300; easing.type: Easing.InOutSine }
                     }
                     Repeater {
                         model: [
-                            { ang: 0.0,  rad: 0.42, off: 0.105 },
-                            { ang: 2.1,  rad: 0.38, off: 0.140 },
-                            { ang: 4.2,  rad: 0.40, off: 0.120 },
+                            { ang: 0.0, rad: 0.42, off: 0.105, w: 1 },
+                            { ang: 2.1, rad: 0.37, off: 0.140, w: -1 },
+                            { ang: 4.2, rad: 0.40, off: 0.120, w: 1 },
+                            { ang: 5.4, rad: 0.34, off: 0.150, w: -1 },
                         ]
                         Rectangle {
-                            property real bulge: modelData.off + sats.wob * 0.035
-                            width: blob.width * modelData.rad * 2
+                            property real bulge: modelData.off + (modelData.w > 0 ? sats.wob : sats.wob2) * 0.04
+                            property real breathe: modelData.rad + (modelData.w > 0 ? sats.wob2 : sats.wob) * 0.025
+                            width: blob.width * breathe * 2
                             height: width
                             radius: width / 2
-                            color: body.color   // follows the accent wash on unlock
+                            color: body.color
                             x: blob.width / 2 + Math.cos(modelData.ang) * blob.width * bulge - width / 2
                             y: blob.height / 2 + Math.sin(modelData.ang) * blob.height * bulge - height / 2
                         }
                     }
                 }
-                // Idle breathing of the whole body — alive even when still.
+                // Idle drift: the settled blob floats a few px, forever.
+                // (No alwaysRunToEnd — flyup must own y the moment it starts.)
                 SequentialAnimation {
                     loops: Animation.Infinite
-                    running: blob.blobness > 0.9 && !root.authenticating && !root.unlocking
-                    alwaysRunToEnd: true
-                    ParallelAnimation {
-                        NumberAnimation { target: stretch; property: "xScale"; to: 1.015; duration: 1900; easing.type: Easing.InOutSine }
-                        NumberAnimation { target: stretch; property: "yScale"; to: 0.985; duration: 1900; easing.type: Easing.InOutSine }
-                    }
-                    ParallelAnimation {
-                        NumberAnimation { target: stretch; property: "xScale"; to: 0.985; duration: 1900; easing.type: Easing.InOutSine }
-                        NumberAnimation { target: stretch; property: "yScale"; to: 1.015; duration: 1900; easing.type: Easing.InOutSine }
-                    }
-                    ParallelAnimation {
-                        NumberAnimation { target: stretch; property: "xScale"; to: 1.0; duration: 1900; easing.type: Easing.InOutSine }
-                        NumberAnimation { target: stretch; property: "yScale"; to: 1.0; duration: 1900; easing.type: Easing.InOutSine }
-                    }
+                    running: blob.blobness >= 1 && !root.authenticating && !root.unlocking
+                    NumberAnimation { target: blob; property: "y"; to: surf.circleY - 7; duration: 2400; easing.type: Easing.InOutSine }
+                    NumberAnimation { target: blob; property: "y"; to: surf.circleY + 5; duration: 2400; easing.type: Easing.InOutSine }
+                    NumberAnimation { target: blob; property: "y"; to: surf.circleY;     duration: 2400; easing.type: Easing.InOutSine }
                 }
 
                 // The time. White. Nothing else.
@@ -261,85 +273,58 @@ ShellRoot {
                 }
             }
 
-            // ── unlock, act two: the notch slides back in from above ───────
-            Rectangle {
-                id: topNotch
-                x: surf.notchX
-                y: -(root.notchH + root.notchR + 24)   // parked off-screen
-                width: root.notchW
-                height: root.notchH + root.notchR
-                radius: root.notchR
-                color: root.notchColor
-            }
-
             // ── choreography ───────────────────────────────────────────────
-            // Lock-in: anticipation stretch, then detach + travel with
-            // squash & stretch; blur rises underneath.
+            // Lock-in: the notch silhouette drips back down from the top
+            // edge, stretching as it falls, and rounds out into the blob.
             SequentialAnimation {
                 id: detachAnim
-                // Anticipation: the notch swells downward first.
-                NumberAnimation { target: blob; property: "height"; to: root.notchH + root.notchR + 12; duration: 130; easing.type: Easing.OutQuad }
+                // A beat of stillness — the notch is just the notch…
+                PauseAnimation { duration: 160 }
+                // …then it swells…
+                NumberAnimation { target: blob; property: "height"; to: root.notchH + root.notchR + 14; duration: 140; easing.type: Easing.OutQuad }
+                // …then lets go.
                 ParallelAnimation {
-                    // Travel + morph.
-                    NumberAnimation { target: blob; property: "y"; to: surf.circleY; duration: 760; easing.type: Easing.OutBack; easing.overshoot: 0.7 }
-                    NumberAnimation { target: blob; property: "x"; to: surf.circleX; duration: 640; easing.type: Easing.InOutCubic }
-                    NumberAnimation { target: blob; property: "width";  to: root.circleD; duration: 640; easing.type: Easing.InOutCubic }
-                    NumberAnimation { target: blob; property: "height"; to: root.circleD; duration: 640; easing.type: Easing.InOutCubic }
-                    NumberAnimation { target: blob; property: "shapeRadius"; to: root.circleD / 2; duration: 640; easing.type: Easing.InOutCubic }
-                    NumberAnimation { target: blurFx; property: "blur"; to: 1; duration: 700; easing.type: Easing.InOutCubic }
-                    NumberAnimation { target: blob; property: "blobness"; to: 1; duration: 760; easing.type: Easing.InCubic }
-                    // Squash & stretch while falling.
+                    NumberAnimation { target: blob; property: "y"; to: surf.circleY; duration: 800; easing.type: Easing.OutBack; easing.overshoot: 0.8 }
+                    NumberAnimation { target: blob; property: "x"; to: surf.circleX; duration: 680; easing.type: Easing.InOutCubic }
+                    NumberAnimation { target: blob; property: "width";  to: root.circleD; duration: 680; easing.type: Easing.InOutCubic }
+                    NumberAnimation { target: blob; property: "height"; to: root.circleD; duration: 680; easing.type: Easing.InOutCubic }
+                    NumberAnimation { target: blob; property: "shapeRadius"; to: root.circleD / 2; duration: 680; easing.type: Easing.InOutCubic }
+                    NumberAnimation { target: blob; property: "blobness"; to: 1; duration: 800; easing.type: Easing.InCubic }
                     SequentialAnimation {
                         ParallelAnimation {
-                            NumberAnimation { target: stretch; property: "yScale"; to: 1.14; duration: 260; easing.type: Easing.OutQuad }
-                            NumberAnimation { target: stretch; property: "xScale"; to: 0.90; duration: 260; easing.type: Easing.OutQuad }
+                            NumberAnimation { target: stretch; property: "yScale"; to: 1.16; duration: 280; easing.type: Easing.OutQuad }
+                            NumberAnimation { target: stretch; property: "xScale"; to: 0.88; duration: 280; easing.type: Easing.OutQuad }
                         }
                         ParallelAnimation {
-                            NumberAnimation { target: stretch; property: "yScale"; to: 1.0; duration: 420; easing.type: Easing.OutBack; easing.overshoot: 2.2 }
-                            NumberAnimation { target: stretch; property: "xScale"; to: 1.0; duration: 420; easing.type: Easing.OutBack; easing.overshoot: 2.2 }
+                            NumberAnimation { target: stretch; property: "yScale"; to: 1.0; duration: 480; easing.type: Easing.OutBack; easing.overshoot: 2.4 }
+                            NumberAnimation { target: stretch; property: "xScale"; to: 1.0; duration: 480; easing.type: Easing.OutBack; easing.overshoot: 2.4 }
                         }
                     }
                 }
             }
 
-            // Unlock, act one: accent wash, dip, then fly off the top while
-            // shrinking; the blur melts at the same time.
+            // Unlock: dip with a squish, then shoot off the top while
+            // shrinking. The compositor melts the blur underneath; the bar
+            // slides back in on its own.
             SequentialAnimation {
                 id: flyupAnim
-                // Color + anticipation dip.
                 ParallelAnimation {
-                    ColorAnimation { target: body; property: "color"; to: root.accent; duration: 260 }
-                    // Satellites collapse fast so the wash is one clean shape.
                     NumberAnimation { target: blob; property: "blobness"; to: 0; duration: 170 }
-                    NumberAnimation { target: blob; property: "y"; to: surf.circleY + 26; duration: 200; easing.type: Easing.OutQuad }
+                    NumberAnimation { target: blob; property: "y"; to: surf.circleY + 30; duration: 210; easing.type: Easing.OutQuad }
                     ParallelAnimation {
-                        NumberAnimation { target: stretch; property: "yScale"; to: 0.88; duration: 200; easing.type: Easing.OutQuad }
-                        NumberAnimation { target: stretch; property: "xScale"; to: 1.10; duration: 200; easing.type: Easing.OutQuad }
+                        NumberAnimation { target: stretch; property: "yScale"; to: 0.85; duration: 210; easing.type: Easing.OutQuad }
+                        NumberAnimation { target: stretch; property: "xScale"; to: 1.12; duration: 210; easing.type: Easing.OutQuad }
                     }
                 }
-                // Launch.
                 ParallelAnimation {
-                    NumberAnimation { target: blob; property: "y"; to: -root.circleD - 80; duration: 480; easing.type: Easing.InCubic }
-                    NumberAnimation { target: blob; property: "scale"; to: 0.72; duration: 480; easing.type: Easing.InCubic }
+                    NumberAnimation { target: blob; property: "y"; to: -root.circleD - 100; duration: 470; easing.type: Easing.InCubic }
+                    NumberAnimation { target: blob; property: "scale"; to: 0.68; duration: 470; easing.type: Easing.InCubic }
                     ParallelAnimation {
-                        NumberAnimation { target: stretch; property: "yScale"; to: 1.18; duration: 300; easing.type: Easing.InQuad }
-                        NumberAnimation { target: stretch; property: "xScale"; to: 0.88; duration: 300; easing.type: Easing.InQuad }
+                        NumberAnimation { target: stretch; property: "yScale"; to: 1.22; duration: 320; easing.type: Easing.InQuad }
+                        NumberAnimation { target: stretch; property: "xScale"; to: 0.84; duration: 320; easing.type: Easing.InQuad }
                     }
-                    NumberAnimation { target: blurFx; property: "blur"; to: 0; duration: 620; easing.type: Easing.InOutCubic }
                 }
-                ScriptAction { script: notchInAnim.start() }
-            }
-
-            // Unlock, act two: the notch glides down from off-screen and docks.
-            SequentialAnimation {
-                id: notchInAnim
-                NumberAnimation {
-                    target: topNotch; property: "y"
-                    to: -root.notchR
-                    duration: 380
-                    easing.type: Easing.OutCubic
-                }
-                ScriptAction { script: dockTimer.start() }
+                ScriptAction { script: { lock.locked = false; root.barCall("restore"); } }
             }
 
             Connections {

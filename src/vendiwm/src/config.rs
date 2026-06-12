@@ -38,7 +38,7 @@ binds {
     bind "super+tab"           "focus-next"
     bind "super+shift+tab"     "focus-prev"
     bind "super+k"             "spawn vendi-menu keys"
-    bind "super+escape"        "lock"
+    bind "super+escape"        "spawn vendi-ctl lock"
     bind "super+left"          "focus-left"
     bind "super+right"         "focus-right"
     bind "super+up"            "focus-up"
