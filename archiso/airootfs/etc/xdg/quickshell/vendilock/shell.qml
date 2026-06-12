@@ -76,9 +76,12 @@ ShellRoot {
             }
         }
     }
-    Component.onCompleted: { barCall("hide"); widthProbe.running = true; vanishTimer.start(); }
-    Timer { id: vanishTimer; interval: 380; onTriggered: { barCall("vanish"); lockTimer.start(); } }
-    Timer { id: lockTimer; interval: 70; onTriggered: lock.locked = true }
+    // Lock FIRST (the blob maps docked over the live notch — the snapshot
+    // the compositor freezes excludes the bar layer, so no ghost and no
+    // gap); the bar's chrome vanish happens invisibly behind the lock.
+    Component.onCompleted: { barCall("hide"); widthProbe.running = true; lockTimer.start(); }
+    Timer { id: lockTimer; interval: 400; onTriggered: { lock.locked = true; vanishTimer.start(); } }
+    Timer { id: vanishTimer; interval: 350; onTriggered: barCall("vanish") }
     // Give the unlock request a beat to flush before exiting.
     Timer { id: quitTimer; interval: 150; onTriggered: Qt.quit() }
 
@@ -278,8 +281,9 @@ ShellRoot {
             // edge, stretching as it falls, and rounds out into the blob.
             SequentialAnimation {
                 id: detachAnim
-                // A beat of stillness — the notch is just the notch…
-                PauseAnimation { duration: 160 }
+                // A beat of stillness while the compositor's blur dissolves
+                // the frozen bar underneath — the notch is just the notch…
+                PauseAnimation { duration: 420 }
                 // …then it swells…
                 NumberAnimation { target: blob; property: "height"; to: root.notchH + root.notchR + 14; duration: 140; easing.type: Easing.OutQuad }
                 // …then lets go.

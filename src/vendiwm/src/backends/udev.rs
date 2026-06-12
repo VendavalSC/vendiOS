@@ -101,13 +101,16 @@ smithay::backend::renderer::element::render_elements! {
 
 type FrameElement = OutputRenderElements;
 
-/// Freeze the desktop for the session-lock backdrop: render `elements[skip..]`
-/// into a full-res texture, then downscale to quarter res and run six
-/// separable gaussian passes — returns (sharp, blurred).
+/// Freeze the desktop for the session-lock backdrop. The sharp texture
+/// renders `elements[skip_sharp..]` (bar included — the first locked frame
+/// must be pixel-identical to the live one); the blurred texture renders
+/// `elements[skip_blur..]` (bar excluded — no notch ghost once the blob
+/// detaches) at quarter res plus six separable gaussian passes.
 fn capture_lock_backdrop(
     renderer: &mut GlesRenderer,
     elements: &[FrameElement],
-    skip: usize,
+    skip_sharp: usize,
+    skip_blur: usize,
     bg: Color32F,
     out_size: smithay::utils::Size<i32, smithay::utils::Logical>,
     scale: smithay::utils::Scale<f64>,
@@ -126,7 +129,7 @@ fn capture_lock_backdrop(
         let mut frame = renderer.render(&mut fb, size_phys, Transform::Normal)
             .map_err(|e| anyhow::anyhow!("render: {e:?}"))?;
         frame.clear(bg, &[full]).map_err(|e| anyhow::anyhow!("clear: {e:?}"))?;
-        for elem in elements[skip..].iter().rev() {
+        for elem in elements[skip_sharp..].iter().rev() {
             let src = elem.src();
             let dst = elem.geometry(scale);
             let _ = RenderElement::<GlesRenderer>::draw(elem, &mut frame, src, dst, &[full], &[], None);
@@ -143,17 +146,21 @@ fn capture_lock_backdrop(
     let mut texb: GlesTexture = renderer
         .create_buffer(smithay::backend::allocator::Fourcc::Abgr8888, (qw, qh).into())
         .map_err(|e| anyhow::anyhow!("create blur b: {e:?}"))?;
-    // Downscale: the sharp frame squeezed into texa (does half the softening).
+    // Quarter-res scene pass, bar-free (does half the softening).
     {
         let mut fb = renderer.bind(&mut texa).map_err(|e| anyhow::anyhow!("bind: {e:?}"))?;
         let mut frame = renderer.render(&mut fb, qsize, Transform::Normal)
             .map_err(|e| anyhow::anyhow!("render: {e:?}"))?;
-        let elem = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
-            smithay::backend::renderer::element::Id::new(), ctx.clone(), (0.0, 0.0),
-            sharp.clone(), 1, Transform::Normal, Some(1.0), None, None, None, Kind::Unspecified,
-        );
-        let src = smithay::backend::renderer::element::Element::src(&elem);
-        let _ = RenderElement::<GlesRenderer>::draw(&elem, &mut frame, src, qfull, &[qfull], &[], None);
+        frame.clear(bg, &[qfull]).map_err(|e| anyhow::anyhow!("clear: {e:?}"))?;
+        for elem in elements[skip_blur..].iter().rev() {
+            let src = elem.src();
+            let dst = elem.geometry(scale);
+            let dst = smithay::utils::Rectangle::<i32, smithay::utils::Physical>::new(
+                (dst.loc.x / DOWN, dst.loc.y / DOWN).into(),
+                ((dst.size.w / DOWN).max(1), (dst.size.h / DOWN).max(1)).into(),
+            );
+            let _ = RenderElement::<GlesRenderer>::draw(elem, &mut frame, src, dst, &[qfull], &[], None);
+        }
         let _ = frame.finish().map_err(|e| anyhow::anyhow!("finish: {e:?}"))?;
     }
     let dirs: [(f32, f32); 6] = [
@@ -628,9 +635,11 @@ pub struct SurfaceState {
     /// in output-local logical px). The new one blooms over it.
     pub old_wallpaper: Option<(MemoryRenderBuffer, std::time::Instant, (f32, f32))>,
     /// ext-session-lock backdrop: the desktop frozen at lock time as
-    /// (sharp full-res, blurred quarter-res, crossfade start). The lock
-    /// surface sits on top of a sharp→blurred crossfade of these.
-    pub lock_backdrop: Option<(GlesTexture, GlesTexture, std::time::Instant)>,
+    /// (sharp full-res, blurred quarter-res, crossfade start). The start is
+    /// None until the client's lock surface actually maps — the sharp frame
+    /// (bar included, pixel-identical to the last live one) holds the screen
+    /// until the blob is there to take over the notch, so nothing flickers.
+    pub lock_backdrop: Option<(GlesTexture, GlesTexture, Option<std::time::Instant>)>,
     /// After unlock: the blurred backdrop melting away over the live desktop.
     pub lock_fade: Option<(GlesTexture, std::time::Instant)>,
     /// Which connector drives this surface (hotplug bookkeeping).
@@ -1216,6 +1225,10 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let theme = state.config.theme.clone();
     let mut upper_layer_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
     let mut lower_layer_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+    // Bar elements tracked apart: the session-lock snapshot excludes them,
+    // so the lock blob can replace the live center notch with no ghost
+    // left in the blurred backdrop (and no flicker at the swap).
+    let mut bar_layer_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
     // Logical rects that want a blurred-desktop slab behind them.
     let mut blur_rects: Vec<smithay::utils::Rectangle<i32, smithay::utils::Logical>> = Vec::new();
     // A fullscreen window hides the Top layer (the bar) — only Overlay
@@ -1240,7 +1253,12 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                 blur_rects.push(geo);
             }
             let phys_loc = geo.loc.to_physical_precise_round(scale);
-            upper_layer_elems.extend(
+            let sink = if layer.namespace().starts_with("vendibar") {
+                &mut bar_layer_elems
+            } else {
+                &mut upper_layer_elems
+            };
+            sink.extend(
                 smithay::backend::renderer::element::AsRenderElements::<GlesRenderer>::render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
                     layer, renderer, phys_loc, scale, 1.0,
                 ),
@@ -1284,6 +1302,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
 
     // Upper layers (Top/Overlay) → above windows but below the cursor.
     elements.extend(upper_layer_elems.into_iter().map(OutputRenderElements::Layer));
+    // The bar sits just below the other upper layers (menus cover it). The
+    // lock snapshot renders elements[after_bar..] — bar-free desktop, so the
+    // lock blob can replace the live center notch with no ghost behind it.
+    elements.extend(bar_layer_elems.into_iter().map(OutputRenderElements::Layer));
+    let after_bar = elements.len();
     // Everything pushed from here down is "the desktop" — the blur pass at
     // the bottom of this function re-renders elements[blur_mark..] into an
     // offscreen target, and the frosted patches are inserted at this index
@@ -1710,9 +1733,9 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             .unwrap_or_else(|| (1, 1).into());
         if surface.lock_backdrop.is_none() {
             let bg = Color32F::new(theme.background[0], theme.background[1], theme.background[2], 1.0);
-            match capture_lock_backdrop(renderer, &elements, after_cursor, bg, out_size, scale, &blur_prog) {
+            match capture_lock_backdrop(renderer, &elements, after_cursor, after_bar, bg, out_size, scale, &blur_prog) {
                 Ok((sharp, blurred)) => {
-                    surface.lock_backdrop = Some((sharp, blurred, std::time::Instant::now()));
+                    surface.lock_backdrop = Some((sharp, blurred, None));
                 }
                 Err(e) => tracing::warn!(?e, "lock backdrop capture failed"),
             }
@@ -1738,12 +1761,20 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                 .map(OutputRenderElements::Layer),
             );
         }
-        if let Some((sharp, blurred, t0)) = &surface.lock_backdrop {
+        if let Some((sharp, blurred, started)) = &mut surface.lock_backdrop {
+            // Hold the sharp frame until the blob has mapped, then blur in.
+            if started.is_none() && state.lock_surface.is_some() {
+                *started = Some(std::time::Instant::now());
+            }
             const BLUR_IN_MS: f32 = 650.0;
-            let t = (t0.elapsed().as_secs_f32() * 1000.0 / BLUR_IN_MS).min(1.0);
+            let t = started
+                .map(|t0| (t0.elapsed().as_secs_f32() * 1000.0 / BLUR_IN_MS).min(1.0))
+                .unwrap_or(0.0);
             let t = 1.0 - (1.0 - t).powi(3);
             if t < 1.0 {
-                state.pending_redraw = true;
+                if started.is_some() {
+                    state.pending_redraw = true;
+                }
                 let elem = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
                     smithay::backend::renderer::element::Id::new(), ctx.clone(), (0.0, 0.0),
                     sharp.clone(), 1, Transform::Normal, Some(1.0 - t), None, None, None, Kind::Unspecified,
