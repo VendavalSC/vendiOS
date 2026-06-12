@@ -194,7 +194,7 @@ cmd_info() {
 declare -A P
 A=
 
-THEMES="mocha latte gruvbox mono think"
+THEMES="mocha latte gruvbox mono think dynamic"
 
 _palette() {
     case "$1" in
@@ -238,6 +238,21 @@ _palette() {
         [blue]=5f87af [teal]=5fafaf [green]=53a653 [yellow]=d7a65f
         [red]=e2231a [pink]=c46a8c
     ) ;;
+    # Dynamic — extracted live from the current wallpaper by vendi-ctl.
+    dynamic)
+        local out k v
+        out=$(vendi-ctl palette 2>/dev/null) || {
+            _err "dynamic theme: palette extraction failed (is a wallpaper set?)"
+            return 1
+        }
+        A=
+        P=()
+        while IFS='=' read -r k v; do
+            [[ -n "$k" && -n "$v" ]] || continue
+            if [[ "$k" == A ]]; then A=$v; else P[$k]=$v; fi
+        done <<< "$out"
+        [[ -n "$A" && -n "${P[base]:-}" ]] || { _err "dynamic theme: bad palette"; return 1; }
+        ;;
     *) return 1 ;;
     esac
 }
@@ -590,6 +605,7 @@ _theme_desc() {
         gruvbox) echo "gruvbox dark — warm retro, orange accent" ;;
         mono)    echo "monochrome — pure black and white" ;;
         think)   echo "ThinkPad — matte black, TrackPoint red" ;;
+        dynamic) echo "generated from your current wallpaper" ;;
     esac
 }
 

@@ -2765,6 +2765,7 @@ name = "vendi-ctl"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "image",
  "serde",
  "serde_json",
 ]

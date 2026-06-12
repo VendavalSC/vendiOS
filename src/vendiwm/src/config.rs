@@ -26,10 +26,11 @@ binds {
     // shipped before the alacritty package was added.
     bind "super+return"        "spawn sh -c 'alacritty || foot'"
     bind "super+b"             "spawn firefox"
-    // vendi-menu — Spotlight-style launcher (GApplication: re-running it
-    // while open toggles it closed).
+    // Launchers: super+space picks the right one for the bar in use
+    // (quickshell spotlight on pro, vendi-menu on classic); super+d is
+    // always the GTK vendi-menu.
     bind "super+d"             "spawn vendi-menu"
-    bind "super+space"         "spawn vendi-menu"
+    bind "super+space"         "spawn vendi-launcher"
     bind "super+alt+space"     "spawn vendi-menu actions"
 
     // ── window management ──────────────────────────────────────

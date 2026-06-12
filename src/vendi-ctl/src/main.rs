@@ -39,6 +39,7 @@ fn main() -> Result<()> {
         "subscribe"        => subscribe_cmd(&args[1..]),
         "bar"              => bar_cmd(&args[1..]),
         "wallpaper"        => wallpaper_cmd(&args[1..]),
+        "palette"          => palette_cmd(&args[1..]),
         cmd => { eprintln!("unknown command: {cmd}\n"); print_usage(); std::process::exit(2); }
     }
 }
@@ -62,6 +63,7 @@ Usage:
   vendi-ctl wallpaper random|next       pick from ~/Pictures/Wallpapers
   vendi-ctl wallpaper list              list ~/Pictures/Wallpapers (* = active)
   vendi-ctl wallpaper default           clear back to the procedural gradient
+  vendi-ctl palette [image]             print a theme palette from an image
   vendi-ctl reload                      re-read vendiwm.kdl live (theme, binds)
 
 Reads $VENDIWM_SOCK or falls back to $XDG_RUNTIME_DIR/vendiwm-1.ipc.sock."#);
@@ -96,6 +98,8 @@ fn connect() -> Result<UnixStream> {
 }
 
 /// Send one request, print one response, exit non-zero on error response.
+/// VENDI_JSON=1 (or a trailing `json` arg routed here) skips the pretty
+/// printer — scripts and the quickshell launcher parse the raw line.
 fn ipc_call(request: Value) -> Result<()> {
     let mut stream = connect()?;
     let mut wire = serde_json::to_vec(&request)?;
@@ -116,6 +120,11 @@ fn ipc_call(request: Value) -> Result<()> {
     if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
         eprintln!("error: {err}");
         std::process::exit(1);
+    }
+
+    if std::env::var_os("VENDI_JSON").is_some() {
+        println!("{}", serde_json::to_string(&resp)?);
+        return Ok(());
     }
 
     // Pretty-print known shapes; fall through to raw JSON.
@@ -183,6 +192,146 @@ fn move_cmd(args: &[String]) -> Result<()> {
 // ── wallpaper ────────────────────────────────────────────────────────────────
 
 /// The wallpaper library: ~/Pictures/Wallpapers (png/jpg/jpeg/webp), sorted.
+// ── palette extraction (the Dynamic theme) ──────────────────────────────────
+//
+// `vendi-ctl palette [image]` prints shell-eval-able KEY=hex lines filling
+// the same semantic slots the static themes use. `vendi theme dynamic`
+// sources them. Defaults to the active wallpaper.
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let h = h.rem_euclid(360.0);
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (((r + m) * 255.0) as u8, ((g + m) * 255.0) as u8, ((b + m) * 255.0) as u8)
+}
+
+fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d < 1e-6 {
+        return (0.0, 0.0, l);
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if max == r {
+        60.0 * (((g - b) / d).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    (h, s, l)
+}
+
+fn hex(rgb: (u8, u8, u8)) -> String {
+    format!("{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2)
+}
+
+fn palette_cmd(args: &[String]) -> Result<()> {
+    let path = match args.first() {
+        Some(p) => p.clone(),
+        None => wallpaper_current()
+            .ok_or_else(|| anyhow::anyhow!("palette: no wallpaper set (and no image given)"))?,
+    };
+    let img = image::open(&path)
+        .with_context(|| format!("palette: decode {path}"))?
+        .thumbnail(96, 96)
+        .to_rgb8();
+
+    // Hue histogram (24 bins) over reasonably colorful, mid-lightness pixels.
+    // Each bin accumulates weight plus running color sums for averaging.
+    let mut bins = vec![(0.0f32, 0.0f32, 0.0f32, 0.0f32); 24]; // weight, r, g, b
+    let mut hue_x = 0.0f32; // average hue as a vector (circular mean)
+    let mut hue_y = 0.0f32;
+    for p in img.pixels() {
+        let (h, s, l) = rgb_to_hsl(p[0], p[1], p[2]);
+        if s > 0.18 && (0.18..=0.85).contains(&l) {
+            // Vibrancy: saturated and near mid lightness wins.
+            let w = s * (1.0 - (l - 0.55).abs() * 1.6).max(0.05);
+            let bin = ((h / 15.0) as usize).min(23);
+            bins[bin].0 += w;
+            bins[bin].1 += p[0] as f32 * w;
+            bins[bin].2 += p[1] as f32 * w;
+            bins[bin].3 += p[2] as f32 * w;
+            let rad = h.to_radians();
+            hue_x += rad.cos() * w;
+            hue_y += rad.sin() * w;
+        }
+    }
+
+    // Accent: the heaviest bin, normalized into a usable range.
+    let best = bins.iter().enumerate().max_by(|a, b| a.1.0.total_cmp(&b.1.0)).map(|(i, _)| i);
+    let (accent_h, accent_s) = match best.filter(|&i| bins[i].0 > 1.0) {
+        Some(i) => {
+            let (w, r, g, b) = bins[i];
+            let (h, s, _) = rgb_to_hsl((r / w) as u8, (g / w) as u8, (b / w) as u8);
+            (h, s.max(0.45))
+        }
+        // Grayscale image — fall back to a neutral lavender-white accent.
+        None => (240.0, 0.10),
+    };
+    let accent = hsl_to_rgb(accent_h, accent_s, 0.72);
+
+    // Theme base hue: circular mean of the image (falls back to accent hue).
+    let base_h = if hue_x.abs() + hue_y.abs() > 1e-3 {
+        hue_y.atan2(hue_x).to_degrees().rem_euclid(360.0)
+    } else {
+        accent_h
+    };
+
+    let mut out: Vec<(&str, String)> = Vec::new();
+    out.push(("A", hex(accent)));
+    out.push(("base",     hex(hsl_to_rgb(base_h, 0.16, 0.12))));
+    out.push(("mantle",   hex(hsl_to_rgb(base_h, 0.16, 0.09))));
+    out.push(("crust",    hex(hsl_to_rgb(base_h, 0.16, 0.06))));
+    out.push(("text",     hex(hsl_to_rgb(accent_h, 0.28, 0.88))));
+    out.push(("subtext1", hex(hsl_to_rgb(accent_h, 0.20, 0.78))));
+    out.push(("subtext0", hex(hsl_to_rgb(accent_h, 0.14, 0.66))));
+    out.push(("overlay1", hex(hsl_to_rgb(base_h, 0.10, 0.50))));
+    out.push(("surface2", hex(hsl_to_rgb(base_h, 0.13, 0.34))));
+    out.push(("surface1", hex(hsl_to_rgb(base_h, 0.14, 0.26))));
+    out.push(("surface0", hex(hsl_to_rgb(base_h, 0.15, 0.19))));
+
+    // ANSI-ish slots: nearest sufficiently-weighted bin to each hue target;
+    // synthesized from the target hue when the image has nothing there.
+    for (name, target) in [
+        ("blue", 220.0f32), ("teal", 175.0), ("green", 120.0),
+        ("yellow", 50.0), ("red", 5.0), ("pink", 325.0),
+    ] {
+        let tbin = ((target / 15.0) as usize).min(23);
+        // Look in the target bin ± 1 for real image color.
+        let found = [tbin, (tbin + 1) % 24, (tbin + 23) % 24].iter()
+            .filter(|&&i| bins[i].0 > 2.0)
+            .max_by(|&&a, &&b| bins[a].0.total_cmp(&bins[b].0))
+            .copied();
+        let rgb = match found {
+            Some(i) => {
+                let (w, r, g, b) = bins[i];
+                let (h, s, _) = rgb_to_hsl((r / w) as u8, (g / w) as u8, (b / w) as u8);
+                hsl_to_rgb(h, s.max(0.40), 0.70)
+            }
+            None => hsl_to_rgb(target, 0.50, 0.70),
+        };
+        out.push((name, hex(rgb)));
+    }
+
+    for (k, v) in out {
+        println!("{k}={v}");
+    }
+    Ok(())
+}
+
 /// Prefer the quickshell lock screen (vendilock, ext-session-lock); fall
 /// back to the compositor-native vendi-lock when quickshell is missing.
 fn lock_cmd() -> Result<()> {
@@ -274,7 +423,20 @@ fn wallpaper_cmd(args: &[String]) -> Result<()> {
             p.canonicalize().with_context(|| format!("wallpaper: {}", p.display()))?
         }
     };
-    ipc_call(json!({"cmd": "wallpaper", "path": path.to_string_lossy()}))
+    ipc_call(json!({"cmd": "wallpaper", "path": path.to_string_lossy()}))?;
+    // The Dynamic theme follows the wallpaper — regenerate it in the
+    // background after a switch.
+    let dynamic_active = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".config/vendi/theme-state"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.contains("THEME=dynamic"))
+        .unwrap_or(false);
+    if dynamic_active {
+        let _ = std::process::Command::new("sh")
+            .args(["-c", "vendi theme dynamic >/dev/null 2>&1"])
+            .spawn();
+    }
+    Ok(())
 }
 
 // ── waybar exec adapters ─────────────────────────────────────────────────────

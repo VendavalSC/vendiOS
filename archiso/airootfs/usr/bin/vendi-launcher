@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# vendi-launcher — launcher dispatch (super+space).
+# Pro bar: the quickshell spotlight inside vendibar-pro (instant toggle).
+# Classic bar (or no quickshell): vendi-menu.
+choice=$(cat "$HOME/.config/vendi/bar" 2>/dev/null || echo classic)
+if [[ "$choice" == "pro" ]] && command -v quickshell >/dev/null && pgrep -x quickshell >/dev/null; then
+    exec quickshell -c vendibar-pro ipc call launcher toggle
+fi
+exec vendi-menu

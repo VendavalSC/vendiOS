@@ -130,6 +130,7 @@ fn theme_menu() -> MenuDef {
         ("\u{f1b35}", "Gruvbox — warm retro",         "gruvbox"),
         ("\u{f0765}", "Mono — black & white",         "mono"),
         ("\u{f08c7}", "Think — ThinkPad black & red", "think"),
+        ("\u{f0e09}", "Dynamic — from your wallpaper", "dynamic"),
     ];
     MenuDef {
         title: "Theme",

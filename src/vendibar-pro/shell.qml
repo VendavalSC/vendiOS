@@ -39,6 +39,20 @@ ShellRoot {
     property real centerW: 236
     property bool chromeGone: false
     signal chromeReturn()
+    // Spotlight launcher (Launcher.qml) — instant open, super+space.
+    Launcher {
+        id: launcher
+        accent: root.accent
+        panel: root.panel
+        fg: root.fg
+        dim: root.dim
+        mono: root.mono
+    }
+    IpcHandler {
+        target: "launcher"
+        function toggle(): void { launcher.toggle(); }
+    }
+
     IpcHandler {
         target: "panel"
         function hide(): void { root.modulesHidden = true; }
@@ -56,6 +70,7 @@ ShellRoot {
     property color fg:     "#cdd6f4"
     property color dim:    "#717189"
     property color alert:  "#f38ba8"
+    property color good:   "#a6e3a1"
     property string mono:  "JetBrainsMonoNL Nerd Font"
 
     // geometry
@@ -189,6 +204,22 @@ ShellRoot {
     property int battery: {
         const p = batDev?.percentage ?? 0;
         return Math.round(p <= 1 ? p * 100 : p);
+    }
+    property int batWarned: 100   // lowest threshold already announced
+    onBatteryChanged: {
+        if (charging) { batWarned = 100; return; }
+        for (const th of [15, 5]) {
+            if (battery <= th && batWarned > th) {
+                batWarned = th;
+                root.toasts = root.toasts.concat([{
+                    app: "battery", icon: "", image: "", n: null,
+                    summary: battery <= 5 ? "Battery critical" : "Battery low",
+                    body: battery + "% remaining — plug in soon",
+                }]);
+                toastTimer.restart();
+                break;
+            }
+        }
     }
     property bool charging: batDev
         ? batDev.state === UPowerDeviceState.Charging
@@ -603,10 +634,61 @@ ShellRoot {
                 spacing: 10
                 opacity: panelWin.centerOpen ? 0 : 1
                 Behavior on opacity { NumberAnimation { duration: 140 } }
+                // media island, left wing: a tiny equalizer breathing with
+                // the music (apple style — art on the other wing).
+                Item {
+                    visible: root.musicPlaying
+                    implicitWidth: 20
+                    implicitHeight: 18
+                    Row {
+                        anchors.centerIn: parent
+                        spacing: 2
+                        Repeater {
+                            model: [0, 1, 2, 3]
+                            Rectangle {
+                                required property int modelData
+                                width: 3
+                                radius: 1.5
+                                color: root.accent
+                                height: 4
+                                anchors.verticalCenter: parent.verticalCenter
+                                SequentialAnimation on height {
+                                    running: root.musicPlaying
+                                    loops: Animation.Infinite
+                                    NumberAnimation { to: 14 - (modelData % 2) * 3; duration: 260 + modelData * 70; easing.type: Easing.InOutSine }
+                                    NumberAnimation { to: 5 + modelData;            duration: 300 + modelData * 50; easing.type: Easing.InOutSine }
+                                    NumberAnimation { to: 12 - modelData;           duration: 240 + modelData * 90; easing.type: Easing.InOutSine }
+                                    NumberAnimation { to: 4;                        duration: 280 + modelData * 60; easing.type: Easing.InOutSine }
+                                }
+                            }
+                        }
+                    }
+                }
                 Mono { id: clockT; font.bold: true; font.pixelSize: 14 }
                 Mono { id: dateT; color: root.dim }
                 Sep { visible: root.weather !== "" }
                 Mono { text: root.weather; visible: root.weather !== ""; color: root.dim }
+                // media island, right wing: the album art, rounded.
+                ClippingRectangle {
+                    visible: root.musicPlaying
+                    implicitWidth: 20
+                    implicitHeight: 20
+                    radius: 6
+                    color: Qt.rgba(1, 1, 1, 0.06)
+                    Image {
+                        anchors.fill: parent
+                        source: root.player?.trackArtUrl ?? ""
+                        fillMode: Image.PreserveAspectCrop
+                        asynchronous: true
+                    }
+                    Mono {
+                        anchors.centerIn: parent
+                        visible: !(root.player && root.player.trackArtUrl)
+                        text: "󰝚"
+                        font.pixelSize: 11
+                        color: root.accent
+                    }
+                }
                 TapHandler { onTapped: panelWin.toggleCenter() }
                 HoverHandler { id: centerHover; cursorShape: Qt.PointingHandCursor }
             }
@@ -939,32 +1021,16 @@ ShellRoot {
             // ── right notch collapsed row ───────────────────────────────────
             RowLayout {
                 id: rightRow
-                opacity: root.modulesHidden ? 0 : 1
-                Behavior on opacity { NumberAnimation { duration: 200 } }
                 anchors.right: parent.right
                 anchors.rightMargin: root.pad
                 y: root.stripH
                 height: root.barH - root.stripH
                 spacing: 12
-                opacity: panelWin.rightMode === "idle" ? 1 : 0
-                Behavior on opacity { NumberAnimation { duration: 140 } }
+                opacity: root.modulesHidden ? 0
+                       : panelWin.rightMode === "idle" ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 160 } }
                 HoverHandler { id: rightHover }
 
-                RowLayout {
-                    spacing: 8
-                    visible: root.musicTrack !== ""
-                    Mono {
-                        text: root.musicPlaying ? "󰐊" : "󰏤"
-                        color: root.accent
-                        font.pixelSize: 13
-                    }
-                    Mono {
-                        text: root.musicTrack.length > 26 ? root.musicTrack.slice(0, 26) + "…" : root.musicTrack
-                        color: root.dim
-                    }
-                    TapHandler { onTapped: root.player?.togglePlaying() }
-                }
-                Sep { visible: root.musicTrack !== "" }
 
                 // system tray (icons only; click = activate)
                 RowLayout {
@@ -994,11 +1060,27 @@ ShellRoot {
                         color: root.muted ? root.dim : root.fg
                         font.pixelSize: 14
                     }
-                    Glyph {
+                    RowLayout {
+                        spacing: 4
                         visible: root.hasBattery
-                        text: root.charging ? "󰂄" : "󰁾"
-                        color: root.battery <= 20 && !root.charging ? root.alert : root.fg
-                        font.pixelSize: 14
+                        Glyph {
+                            text: root.charging ? "󰂄"
+                                : root.battery > 90 ? "󰁹"
+                                : root.battery > 70 ? "󰂂"
+                                : root.battery > 50 ? "󰂁"
+                                : root.battery > 30 ? "󰁿"
+                                : root.battery > 15 ? "󰁽"
+                                : "󰁺"
+                            color: root.charging ? root.good
+                                 : root.battery <= 20 ? root.alert : root.fg
+                            font.pixelSize: 14
+                        }
+                        Mono {
+                            text: root.battery + "%"
+                            font.pixelSize: 11
+                            color: root.charging ? root.good
+                                 : root.battery <= 20 ? root.alert : root.dim
+                        }
                     }
                     Glyph {
                         text: root.notifHistory.length > 0 ? "󰂚" : "󰂜"
