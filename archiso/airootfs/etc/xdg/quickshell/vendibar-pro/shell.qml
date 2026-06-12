@@ -51,6 +51,7 @@ ShellRoot {
     IpcHandler {
         target: "launcher"
         function toggle(): void { launcher.toggle(); }
+        function actions(): void { launcher.actions(); }
     }
 
     IpcHandler {
@@ -512,7 +513,11 @@ ShellRoot {
                 onPaint: {
                     const ctx = getContext("2d");
                     const w = width;
-                    const s = root.stripH, r = root.fillet, b = root.bcr;
+                    const s = root.stripH, r = root.fillet;
+                    // Expanded panels round wider than the idle notches.
+                    const b  = root.bcr;
+                    const bc = panelWin.ch > root.barH + 10 ? 24 : root.bcr;
+                    const br = panelWin.rh > root.barH + 10 ? 24 : root.bcr;
                     const lw = panelWin.lw, cw = panelWin.cw, rw = panelWin.rw;
                     // Clamp the animated heights: the springy close (OutBack)
                     // undershoots below barH, which folds the path into a
@@ -535,22 +540,27 @@ ShellRoot {
                     // center notch
                     ctx.lineTo(cx - r, s);
                     ctx.arc(cx - r, s + r, r, -Math.PI / 2, 0, false);
-                    ctx.lineTo(cx, chh - b);
-                    ctx.arcTo(cx, chh, cx + b, chh, b);
-                    ctx.lineTo(cx + cw - b, chh);
-                    ctx.arcTo(cx + cw, chh, cx + cw, chh - b, b);
+                    ctx.lineTo(cx, chh - bc);
+                    ctx.arcTo(cx, chh, cx + bc, chh, bc);
+                    ctx.lineTo(cx + cw - bc, chh);
+                    ctx.arcTo(cx + cw, chh, cx + cw, chh - bc, bc);
                     ctx.lineTo(cx + cw, s + r);
                     ctx.arc(cx + cw + r, s + r, r, Math.PI, Math.PI * 1.5, false);
                     // right notch — flush with the right corner
                     ctx.lineTo(rx - r, s);
                     ctx.arc(rx - r, s + r, r, -Math.PI / 2, 0, false);
-                    ctx.lineTo(rx, rhh - b);
-                    ctx.arcTo(rx, rhh, rx + b, rhh, b);
+                    ctx.lineTo(rx, rhh - br);
+                    ctx.arcTo(rx, rhh, rx + br, rhh, br);
                     ctx.lineTo(w, rhh);
                     ctx.lineTo(w, 0);
                     ctx.closePath();
                     ctx.fillStyle = root.panel;
                     ctx.fill();
+                    // Rim light: a whisper of an edge so the silhouette
+                    // separates from dark wallpapers.
+                    ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
                 }
             }
 
@@ -1030,6 +1040,13 @@ ShellRoot {
                        : panelWin.rightMode === "idle" ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: 160 } }
                 HoverHandler { id: rightHover }
+                // Scroll anywhere on the corner cluster to nudge the volume.
+                WheelHandler {
+                    onWheel: event => {
+                        const step = event.angleDelta.y > 0 ? 5 : -5;
+                        root.setVolume(Math.max(0, Math.min(100, root.volume + step)));
+                    }
+                }
 
 
                 // system tray (icons only; click = activate)

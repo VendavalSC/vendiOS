@@ -634,6 +634,9 @@ pub struct SurfaceState {
     /// Outgoing wallpaper during a switch: (buffer, started, reveal center
     /// in output-local logical px). The new one blooms over it.
     pub old_wallpaper: Option<(MemoryRenderBuffer, std::time::Instant, (f32, f32))>,
+    /// What `wallpaper` was built from (None = gradient) — reveals only play
+    /// when this actually changes, not on every theme reload.
+    pub wallpaper_src: Option<String>,
     /// ext-session-lock backdrop: the desktop frozen at lock time as
     /// (sharp full-res, blurred quarter-res, crossfade start). The start is
     /// None until the client's lock surface actually maps — the sharp frame
@@ -900,6 +903,7 @@ fn connect_connector(
         wallpaper,
         wallpaper_gen: state.wallpaper_gen,
         old_wallpaper: None,
+        wallpaper_src: state.config.theme.wallpaper.clone(),
         lock_backdrop: None,
         lock_fade: None,
         connector: connector.handle(),
@@ -1083,13 +1087,22 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             state.config.theme.background,
             state.config.theme.accent,
         );
-        let out_geo = state.space.output_geometry(&surface.output).unwrap_or_default();
-        let cx = (state.pointer_location.x - out_geo.loc.x as f64)
-            .clamp(0.0, out_geo.size.w as f64) as f32;
-        let cy = (state.pointer_location.y - out_geo.loc.y as f64)
-            .clamp(0.0, out_geo.size.h as f64) as f32;
-        let old = std::mem::replace(&mut surface.wallpaper, fresh);
-        surface.old_wallpaper = Some((old, std::time::Instant::now(), (cx, cy)));
+        let new_src = state.config.theme.wallpaper.clone();
+        if new_src == surface.wallpaper_src {
+            // Same image — a theme reload (e.g. the Dynamic theme regenerating
+            // right after a wallpaper switch) rebuilt the buffer. Swap it in
+            // silently and leave any in-flight reveal alone.
+            surface.wallpaper = fresh;
+        } else {
+            let out_geo = state.space.output_geometry(&surface.output).unwrap_or_default();
+            let cx = (state.pointer_location.x - out_geo.loc.x as f64)
+                .clamp(0.0, out_geo.size.w as f64) as f32;
+            let cy = (state.pointer_location.y - out_geo.loc.y as f64)
+                .clamp(0.0, out_geo.size.h as f64) as f32;
+            let old = std::mem::replace(&mut surface.wallpaper, fresh);
+            surface.old_wallpaper = Some((old, std::time::Instant::now(), (cx, cy)));
+            surface.wallpaper_src = new_src;
+        }
         surface.wallpaper_gen = state.wallpaper_gen;
     }
 

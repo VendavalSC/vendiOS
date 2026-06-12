@@ -31,7 +31,7 @@ binds {
     // always the GTK vendi-menu.
     bind "super+d"             "spawn vendi-menu"
     bind "super+space"         "spawn vendi-launcher"
-    bind "super+alt+space"     "spawn vendi-menu actions"
+    bind "super+alt+space"     "spawn vendi-launcher actions"
 
     // ── window management ──────────────────────────────────────
     bind "super+q"             "close"
