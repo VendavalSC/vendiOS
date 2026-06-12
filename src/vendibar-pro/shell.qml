@@ -308,6 +308,9 @@ ShellRoot {
     // client withdraws the notification).
     property var toasts: []
     property var notifHistory: []
+    // Do Not Disturb: notifications still land in history, but no toast
+    // interrupts. Toggled from the control center.
+    property bool dnd: false
 
     NotificationServer {
         id: notifServer
@@ -324,8 +327,10 @@ ShellRoot {
                 image:   notif.image || "",
                 n:       notif,
             };
-            root.toasts = root.toasts.concat([t]);
-            toastTimer.restart();
+            if (!root.dnd) {
+                root.toasts = root.toasts.concat([t]);
+                toastTimer.restart();
+            }
             const when = Qt.formatDateTime(new Date(), "HH:mm");
             root.notifHistory = [{ app: t.app, summary: t.summary, when: when }]
                 .concat(root.notifHistory).slice(0, 30);
@@ -478,7 +483,12 @@ ShellRoot {
                     const w = width;
                     const s = root.stripH, r = root.fillet, b = root.bcr;
                     const lw = panelWin.lw, cw = panelWin.cw, rw = panelWin.rw;
-                    const lh = root.barH, chh = panelWin.ch, rhh = panelWin.rh;
+                    // Clamp the animated heights: the springy close (OutBack)
+                    // undershoots below barH, which folds the path into a
+                    // self-intersection and blanks the whole silhouette.
+                    const lh = root.barH;
+                    const chh = Math.max(lh, panelWin.ch);
+                    const rhh = Math.max(lh, panelWin.rh);
                     const cx = (w - cw) / 2;
                     const rx = w - rw;
                     ctx.reset();
@@ -1379,10 +1389,12 @@ ShellRoot {
                             property string glyph
                             property string label
                             property var run
+                            property bool active: false
                             Layout.fillWidth: true
                             height: 38
                             radius: 12
-                            color: qaHover.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                            color: active ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+                                 : qaHover.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
                             Behavior on color { ColorAnimation { duration: 120 } }
                             HoverHandler { id: qaHover }
                             RowLayout {
@@ -1404,6 +1416,12 @@ ShellRoot {
                         QuickAction {
                             glyph: "󰕾"; label: "Audio"
                             run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"])
+                        }
+                        QuickAction {
+                            glyph: root.dnd ? "󰂛" : "󰂚"
+                            label: root.dnd ? "Silenced" : "DND"
+                            active: root.dnd
+                            run: () => root.dnd = !root.dnd
                         }
                         QuickAction {
                             glyph: "󰐥"; label: "Power"
