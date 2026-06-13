@@ -198,6 +198,7 @@ limine_install() {
     # write limine.conf — same format for both BIOS and UEFI
     {
         echo "timeout: 0"
+        echo "quiet: yes"      # suppress Limine's "loading kernel…" boot chatter
         echo "serial: no"
         echo ""
         echo "/vendiOS"

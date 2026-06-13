@@ -84,11 +84,13 @@ sys_keymap() {
 
 sys_initramfs() {
     # Args: <fs> [encrypted=0|1]
-    # plymouth hook owns the framebuffer; the encrypt hook prompts for the
-    # LUKS passphrase, which plymouth intercepts so the input is drawn through
-    # the theme rather than the bare console.
+    # kms loads the DRM driver BEFORE plymouth so plymouthd has a display the
+    # moment it starts and the splash covers everything after it (otherwise
+    # plymouth starts blind and the device-wait / encrypt text prints first).
+    # The encrypt hook then prompts via `plymouth ask-for-password`, drawn
+    # through the theme rather than the bare console.
     local fs=$1 encrypted=${2:-0}
-    local hooks='base udev plymouth autodetect microcode modconf kms keyboard keymap block'
+    local hooks='base udev autodetect microcode modconf kms plymouth keyboard keymap block'
     [[ "$encrypted" -eq 1 ]] && hooks+=' encrypt'
     [[ "$fs" == 'btrfs' ]] && hooks+=' btrfs' || hooks+=' filesystems'
     hooks+=' fsck'

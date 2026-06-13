@@ -17,20 +17,20 @@ cy = Window.GetY() + Window.GetHeight() / 2;
 logo.image  = Image("logo.png");
 logo.sprite = Sprite(logo.image);
 logo.sprite.SetX(cx - logo.image.GetWidth()  / 2);
-logo.sprite.SetY(cy - logo.image.GetHeight() - 44);
+logo.sprite.SetY(cy - logo.image.GetHeight() - 64);
 
 # ── brand wordmark ────────────────────────────────────────────────────────────
 brand.image  = Image.Text("vendiOS", 0.796, 0.651, 0.969, 1, "Sans Bold 40");
 brand.sprite = Sprite(brand.image);
 brand.sprite.SetX(cx - brand.image.GetWidth()  / 2);
-brand.sprite.SetY(cy - 8);
+brand.sprite.SetY(cy + 8);
 
 # ── tagline ───────────────────────────────────────────────────────────────────
 tag.image  = Image.Text("Minimal. Modern. Yours.",
                          0.424, 0.439, 0.525, 1, "Sans 13");
 tag.sprite = Sprite(tag.image);
 tag.sprite.SetX(cx - tag.image.GetWidth() / 2);
-tag.sprite.SetY(cy + 58);
+tag.sprite.SetY(cy + 84);
 
 # ── password prompt ───────────────────────────────────────────────────────────
 # The dots are drawn from dot.png (one per typed char) — never as a font glyph,
@@ -54,17 +54,17 @@ fun display_password_callback(label, count) {
     prompt.image  = Image.Text("Enter passphrase", 0.651, 0.678, 0.784, 1, "Sans 14");
     prompt.sprite = Sprite(prompt.image);
     prompt.sprite.SetX(cx - prompt.image.GetWidth() / 2);
-    prompt.sprite.SetY(cy + 98);
+    prompt.sprite.SetY(cy + 138);
 
     clear_dots();
-    gap   = 6;
+    gap   = 8;
     total = count * dot_w + (count - 1) * gap;
     startx = cx - total / 2;
     i = 0;
     while (i < count) {
         s = Sprite(dot.image);
         s.SetX(startx + i * (dot_w + gap));
-        s.SetY(cy + 130);
+        s.SetY(cy + 176);
         dots[i] = s;
         i++;
     }
