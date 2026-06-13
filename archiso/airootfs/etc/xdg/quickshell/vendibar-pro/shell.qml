@@ -687,13 +687,16 @@ ShellRoot {
                             required property var modelData
                             property bool current: modelData.id === root.activeWs
                             Layout.alignment: Qt.AlignVCenter
-                            width: current ? 30 : 19
-                            height: 19
+                            // Drive the RowLayout's spacing through preferredWidth
+                            // (not `width`) so the wide active pill pushes its
+                            // neighbours over instead of overlapping them.
+                            Layout.preferredWidth: current ? 30 : 19
+                            Layout.preferredHeight: 19
                             radius: 9.5
                             color: current ? root.accent
                                  : modelData.windows > 0 ? Qt.rgba(1, 1, 1, 0.14)
                                  : Qt.rgba(1, 1, 1, 0.05)
-                            Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutBack } }
+                            Behavior on Layout.preferredWidth { NumberAnimation { duration: 200; easing.type: Easing.OutBack } }
                             Behavior on color { ColorAnimation { duration: 150 } }
                             Mono {
                                 anchors.centerIn: parent
