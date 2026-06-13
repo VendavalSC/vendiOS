@@ -38,10 +38,11 @@ Item {
     property color dim: "#717189"
     property string mono: "JetBrainsMonoNL Nerd Font"
 
-    // How tall the notch should grow to fit the query row + results. shell.qml
-    // reads this to size the center notch while search is open.
-    readonly property int wantHeight:
-        58 + (results.length > 0 ? Math.min(list.contentHeight, 360) + 10 : 0)
+    // How tall the notch should grow to fit the query row + results. Derived
+    // from the actual content column (body.implicitHeight) + top/bottom
+    // margins, so the result list is never a few px short and never scrolls
+    // when it already fits. shell.qml reads this to size the center notch.
+    readonly property int wantHeight: body.implicitHeight + 18
 
     // Reset + grab the keyboard whenever search (re)opens or flips mode.
     function refocus() {
@@ -286,11 +287,16 @@ Item {
     // ── UI — fills the morphed notch; the silhouette is the chrome ────────────
 
     ColumnLayout {
-        anchors.fill: parent
+        id: body
+        // Anchored to the top only — the column sizes to its content
+        // (body.implicitHeight drives wantHeight), so nothing is ever clipped
+        // into a stray scroll.
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
         anchors.leftMargin: 18
         anchors.rightMargin: 18
         anchors.topMargin: 8
-        anchors.bottomMargin: 10
         spacing: 6
 
         RowLayout {
@@ -364,9 +370,14 @@ Item {
         ListView {
             id: list
             Layout.fillWidth: true
-            Layout.fillHeight: true
+            Layout.preferredHeight: Math.min(contentHeight, 360)
             Layout.topMargin: 2
+            visible: count > 0
             clip: true
+            // Only scroll when the results genuinely overflow; otherwise the
+            // notch grew to fit them, so a fitting list must not bounce.
+            interactive: contentHeight > height
+            boundsBehavior: Flickable.StopAtBounds
             model: win.results
             delegate: Rectangle {
                 required property var modelData

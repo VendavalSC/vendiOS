@@ -1027,6 +1027,8 @@ Item {
                             Layout.fillHeight: true
                             spacing: 8
                             clip: true
+                            interactive: contentHeight > height
+                            boundsBehavior: Flickable.StopAtBounds
                             model: tcol.items
                             delegate: Rectangle {
                                 required property var modelData
@@ -1163,6 +1165,8 @@ Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
+                    interactive: contentHeight > height
+                    boundsBehavior: Flickable.StopAtBounds
                     cellWidth: Math.floor(width / 3)
                     cellHeight: Math.floor(cellWidth * 0.56)
                     model: dash.bar?.wallpapers ?? []
@@ -1402,7 +1406,7 @@ Item {
                                 property string label
                                 property var run
                                 Layout.fillWidth: true
-                                implicitHeight: 34
+                                implicitHeight: 36
                                 radius: 10
                                 color: cfgHover.hovered ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.04)
                                 Behavior on color { ColorAnimation { duration: 120 } }
@@ -1410,30 +1414,73 @@ Item {
                                 TapHandler { onTapped: run() }
                                 RowLayout {
                                     anchors.fill: parent
-                                    anchors.leftMargin: 12
-                                    spacing: 10
+                                    anchors.leftMargin: 11
+                                    anchors.rightMargin: 8
+                                    spacing: 9
                                     Glyph { text: parent.parent.glyph; color: dash.accent; font.pixelSize: 13 }
-                                    Mono { text: parent.parent.label; font.pixelSize: 11 }
-                                    Item { Layout.fillWidth: true }
+                                    Mono {
+                                        Layout.fillWidth: true
+                                        text: parent.parent.label
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                    }
                                 }
                             }
-                            CfgRow {
-                                glyph: "󰈔"; label: "Edit wm config"
-                                run: () => {
-                                    dash.requestClose();
-                                    Quickshell.execDetached(["sh", "-c",
-                                        "alacritty -e \"${EDITOR:-nano}\" \"$HOME/.config/vendi/config\""]);
+                            // Two columns so the system actions stay inside the
+                            // card (no overflow / scroll).
+                            GridLayout {
+                                Layout.fillWidth: true
+                                columns: 2
+                                rowSpacing: 8
+                                columnSpacing: 8
+                                CfgRow {
+                                    glyph: "󰈔"; label: "Edit config"
+                                    run: () => {
+                                        dash.requestClose();
+                                        Quickshell.execDetached(["sh", "-c",
+                                            "alacritty -e \"${EDITOR:-nano}\" \"$HOME/.config/vendi/config\""]);
+                                    }
                                 }
-                            }
-                            CfgRow {
-                                glyph: "󰑓"; label: "Reload wm config"
-                                run: () => Quickshell.execDetached(["vendi-ctl", "reload"])
-                            }
-                            CfgRow {
-                                glyph: "󰕾"; label: "Audio settings"
-                                run: () => {
-                                    dash.requestClose();
-                                    Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"]);
+                                CfgRow {
+                                    glyph: "󰑓"; label: "Reload config"
+                                    run: () => Quickshell.execDetached(["vendi-ctl", "reload"])
+                                }
+                                CfgRow {
+                                    glyph: "󰕾"; label: "Audio"
+                                    run: () => {
+                                        dash.requestClose();
+                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"]);
+                                    }
+                                }
+                                CfgRow {
+                                    glyph: "󰍹"; label: "Displays"
+                                    run: () => {
+                                        dash.requestClose();
+                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "display"]);
+                                    }
+                                }
+                                CfgRow {
+                                    glyph: "󰓅"; label: "Power profile"
+                                    run: () => {
+                                        dash.requestClose();
+                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "power"]);
+                                    }
+                                }
+                                CfgRow {
+                                    glyph: "󰏖"; label: "Install software"
+                                    run: () => {
+                                        dash.requestClose();
+                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "sh", "-c",
+                                            "pacman -Slq | fzf --multi --prompt='install> ' --preview 'pacman -Si {}' | xargs -ro sudo pacman -S; printf '\\n  done — any key closes '; read -rsn1"]);
+                                    }
+                                }
+                                CfgRow {
+                                    glyph: "󰚰"; label: "Update system"
+                                    run: () => {
+                                        dash.requestClose();
+                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "sh", "-c",
+                                            "sudo vendi update; printf '\\n  done — any key closes '; read -rsn1"]);
+                                    }
                                 }
                             }
                             Item { Layout.fillHeight: true }
@@ -1454,10 +1501,12 @@ Item {
                             Layout.fillHeight: true
                             clip: true
                             spacing: 5
+                            interactive: contentHeight > height
+                            boundsBehavior: Flickable.StopAtBounds
                             model: [
                                 { k: "Super + Enter",          a: "Terminal" },
                                 { k: "Super + Space",          a: "Spotlight search" },
-                                { k: "Super + Alt + Space",    a: "Actions menu" },
+                                { k: "Super + Alt + Space",    a: "Config" },
                                 { k: "Super + D",              a: "Dashboard" },
                                 { k: "Super + B",              a: "Browser" },
                                 { k: "Super + Q",              a: "Close window" },
