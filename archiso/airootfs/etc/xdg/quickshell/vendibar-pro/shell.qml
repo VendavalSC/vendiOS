@@ -117,7 +117,7 @@ ShellRoot {
 
     // geometry
     readonly property int stripH: 3
-    readonly property int barH:   38
+    readonly property int barH:   44
     readonly property int fillet: 12
     readonly property int bcr:    15
     readonly property int pad:    18
