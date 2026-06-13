@@ -1324,6 +1324,40 @@ ShellRoot {
                         Mono { text: (root.volume < 0 ? "—" : root.volume + "%"); Layout.preferredWidth: 38 }
                     }
 
+                    // brightness slider — only when there's a backlight device
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        visible: root.hasBacklight
+                        Glyph { text: "󰃟"; color: root.fg }
+                        Rectangle {
+                            id: briTrack
+                            Layout.fillWidth: true
+                            height: 8
+                            radius: 4
+                            color: Qt.rgba(1, 1, 1, 0.10)
+                            Rectangle {
+                                width: Math.max(8, parent.width * Math.max(0, root.brightness) / 100)
+                                height: parent.height
+                                radius: 4
+                                color: root.accent
+                                Behavior on width { NumberAnimation { duration: 80 } }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                function setBri(mx) {
+                                    root.setBrightness(
+                                        Math.max(0, Math.min(1, mx / briTrack.width)) * 100);
+                                }
+                                onPressed: m => setBri(m.x - 6)
+                                onPositionChanged: m => { if (pressed) setBri(m.x - 6) }
+                            }
+                        }
+                        Mono { text: root.brightness + "%"; Layout.preferredWidth: 38 }
+                    }
+
                     // cpu / mem bars
                     ColumnLayout {
                         Layout.fillWidth: true
