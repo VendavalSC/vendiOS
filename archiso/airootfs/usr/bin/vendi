@@ -805,6 +805,45 @@ cmd_power() {
     sleep 1
 }
 
+# ── fingerprint ─────────────────────────────────────────────────────────────
+# Enroll / manage fingerprints (fprintd). Once a print is enrolled it unlocks
+# vendilock (swipe at the lock screen), sudo, and the greeter automatically —
+# the PAM stacks were wired at install time.
+cmd_fingerprint() {
+    command -v fprintd-enroll >/dev/null || { _err "fprintd not installed"; return 1; }
+    if ! fprintd-list "$USER" >/dev/null 2>&1 && \
+       ! fprintd-enroll --help >/dev/null 2>&1; then
+        _err "no fingerprint reader detected"
+        return 1
+    fi
+    local sub=${1:-enroll}
+    case "$sub" in
+        enroll|"")
+            _header "fingerprint"
+            _info "place your finger on the reader, lift, repeat until done"
+            echo
+            local finger=${2:-right-index-finger}
+            if fprintd-enroll -f "$finger" "$USER"; then
+                _ok "enrolled ${finger} — you can now swipe to unlock"
+            else
+                _err "enrollment failed or cancelled"
+                return 1
+            fi
+            ;;
+        list)
+            _header "fingerprint"
+            fprintd-list "$USER" 2>/dev/null | sed 's/^/  /' || _info "no prints enrolled"
+            ;;
+        delete|clear)
+            fprintd-delete "$USER" && _ok "all fingerprints removed"
+            ;;
+        *)
+            _err "usage: vendi fingerprint [enroll [finger] | list | delete]"
+            return 1
+            ;;
+    esac
+}
+
 cmd_help() {
     _logo
     printf "\n  ${OVERLAY}Minimal. Modern. Yours.${R}\n\n"
@@ -825,6 +864,7 @@ cmd_help() {
     _cmd "bt"       "pair and connect bluetooth devices"
     _cmd "audio"    "pick output sink, volume, mute"
     _cmd "power"    "switch power profile"
+    _cmd "fingerprint" "enroll a fingerprint to unlock (swipe at the lock)"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"
     _cmd "help"     "show this message"
@@ -844,6 +884,7 @@ case "${1:-help}" in
     bt|bluetooth) cmd_bt ;;
     audio)    cmd_audio ;;
     power)    cmd_power ;;
+    fingerprint|finger|fp) shift; cmd_fingerprint "$@" ;;
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;
     help|--help|-h) cmd_help ;;

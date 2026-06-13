@@ -59,6 +59,45 @@ ShellRoot {
         pam.start();
     }
 
+    // ── fingerprint ────────────────────────────────────────────────────────
+    // A second, parallel PAM transaction running the fingerprint-only service
+    // (/etc/pam.d/vendilock-fprint → pam_fprintd). It's armed the moment we
+    // lock and re-arms after each miss, so you can swipe at any time while the
+    // password path stays fully independent. Only armed when an enrolled
+    // reader exists (fprintCheck), so machines without one never loop.
+    property bool fingerReady: false
+    Process {
+        id: fprintCheck
+        command: ["sh", "-c",
+            "command -v fprintd-list >/dev/null 2>&1 && " +
+            "fprintd-list \"$USER\" 2>/dev/null | grep -qi 'finger' && echo yes"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                root.fingerReady = (text.trim() === "yes");
+                if (root.fingerReady && lock.locked) fprint.start();
+            }
+        }
+    }
+    PamContext {
+        id: fprint
+        config: "vendilock-fprint"
+        // fprintd drives the conversation itself ("Place your finger…"); no
+        // response is ever required, so we just wait for the verdict.
+        onCompleted: result => {
+            if (result === PamResult.Success) {
+                root.unlocking = true;
+            } else if (root.fingerReady && lock.locked && !root.unlocking) {
+                fprintRearm.restart();   // missed/timed out — listen again
+            }
+        }
+    }
+    Timer {
+        id: fprintRearm
+        interval: 500
+        onTriggered: if (root.fingerReady && lock.locked && !root.unlocking) fprint.start();
+    }
+
     function barCall(fn) {
         Quickshell.execDetached(["quickshell", "-c", "vendibar-pro", "ipc", "call", "panel", fn]);
     }
@@ -80,7 +119,7 @@ ShellRoot {
     // the compositor freezes excludes the bar layer, so no ghost and no
     // gap); the bar's chrome vanish happens invisibly behind the lock.
     Component.onCompleted: { barCall("hide"); widthProbe.running = true; lockTimer.start(); }
-    Timer { id: lockTimer; interval: 400; onTriggered: { lock.locked = true; vanishTimer.start(); } }
+    Timer { id: lockTimer; interval: 400; onTriggered: { lock.locked = true; vanishTimer.start(); if (root.fingerReady) fprint.start(); } }
     Timer { id: vanishTimer; interval: 350; onTriggered: barCall("vanish") }
     // Give the unlock request a beat to flush before exiting.
     Timer { id: quitTimer; interval: 150; onTriggered: Qt.quit() }
@@ -333,7 +372,7 @@ ShellRoot {
 
             Connections {
                 target: root
-                function onUnlockingChanged() { if (root.unlocking) flyupAnim.start(); }
+                function onUnlockingChanged() { if (root.unlocking) { fprint.abort(); flyupAnim.start(); } }
             }
 
             Component.onCompleted: detachAnim.start()

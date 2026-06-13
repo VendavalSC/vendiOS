@@ -1,0 +1,10 @@
+# vendiOS lock screen — fingerprint-only PAM service.
+#
+# vendilock runs this as a second, parallel transaction so you can swipe to
+# unlock at any time. The password path uses the default (login) stack and is
+# entirely independent, so a missing/failed swipe never blocks typing the
+# passphrase. A fingerprint match satisfies "sufficient" and the stack returns
+# success; anything else falls through to pam_deny and fails quietly.
+auth     sufficient  pam_fprintd.so
+auth     required    pam_deny.so
+account  required    pam_permit.so

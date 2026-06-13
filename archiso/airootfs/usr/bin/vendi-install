@@ -630,6 +630,7 @@ step_install() {
     sys_services_enable    >>"$INSTALL_LOG" 2>&1
     sys_user_services      "$CFG_USER" >>"$INSTALL_LOG" 2>&1
     sys_install_greetd     "$CFG_USER" >>"$INSTALL_LOG" 2>&1
+    sys_fingerprint        >>"$INSTALL_LOG" 2>&1
     sys_pacman_polish
     sys_install_firewall   >>"$INSTALL_LOG" 2>&1
     sys_install_time       >>"$INSTALL_LOG" 2>&1

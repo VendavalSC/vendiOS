@@ -33,6 +33,8 @@ BASE_PKGS=(
     eza bat ripgrep fd fzf
     # hardware (python-gobject: powerprofilesctl is a python-gi script)
     bluez bluez-utils power-profiles-daemon python-gobject
+    # fingerprint reader support (enroll: `vendi fingerprint`; unlocks lock + sudo)
+    fprintd
     # auto-mount removable media
     udisks2 gvfs
     # firewall + time sync
@@ -288,6 +290,30 @@ EOF
 
 sys_sudo() {
     sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /mnt/etc/sudoers
+}
+
+# Fingerprint reader support. pam_fprintd is added as `sufficient` ABOVE the
+# password line so a swipe satisfies auth, but — crucially — when no reader is
+# present (or no print is enrolled) it returns ignore/unavailable and falls
+# straight through to the password, so this never locks anyone out. Covers
+# sudo + the greeter; the lock screen uses its own vendilock-fprint service.
+sys_fingerprint() {
+    # the locker's dedicated fingerprint-only service
+    install -Dm644 /etc/pam.d/vendilock-fprint /mnt/etc/pam.d/vendilock-fprint \
+        2>/dev/null || cat > /mnt/etc/pam.d/vendilock-fprint <<'EOF'
+auth     sufficient  pam_fprintd.so
+auth     required    pam_deny.so
+account  required    pam_permit.so
+EOF
+
+    # prepend pam_fprintd to sudo + greetd auth stacks (idempotent)
+    local svc
+    for svc in sudo greetd; do
+        local f="/mnt/etc/pam.d/${svc}"
+        [[ -f "$f" ]] || continue
+        grep -q 'pam_fprintd.so' "$f" && continue
+        sed -i '1i auth      sufficient  pam_fprintd.so' "$f"
+    done
 }
 
 sys_root_password() {
