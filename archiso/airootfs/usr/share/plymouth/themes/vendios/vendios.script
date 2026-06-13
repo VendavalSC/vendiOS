@@ -1,5 +1,5 @@
 # vendiOS Plymouth theme — Catppuccin Mocha, Mauve accent
-# Brand wordmark + LUKS password prompt. Nothing else.
+# Obsidian-shard logo + wordmark + LUKS password prompt. Nothing else.
 
 # ── colors ────────────────────────────────────────────────────────────────────
 # Base    #1E1E2E  (0.117, 0.117, 0.180)
@@ -17,52 +17,62 @@ cy = Window.GetY() + Window.GetHeight() / 2;
 logo.image  = Image("logo.png");
 logo.sprite = Sprite(logo.image);
 logo.sprite.SetX(cx - logo.image.GetWidth()  / 2);
-logo.sprite.SetY(cy - logo.image.GetHeight() - 30);
+logo.sprite.SetY(cy - logo.image.GetHeight() - 44);
 
 # ── brand wordmark ────────────────────────────────────────────────────────────
 brand.image  = Image.Text("vendiOS", 0.796, 0.651, 0.969, 1, "Sans Bold 40");
 brand.sprite = Sprite(brand.image);
 brand.sprite.SetX(cx - brand.image.GetWidth()  / 2);
-brand.sprite.SetY(cy - 6);
+brand.sprite.SetY(cy - 8);
 
 # ── tagline ───────────────────────────────────────────────────────────────────
 tag.image  = Image.Text("Minimal. Modern. Yours.",
                          0.424, 0.439, 0.525, 1, "Sans 13");
 tag.sprite = Sprite(tag.image);
 tag.sprite.SetX(cx - tag.image.GetWidth() / 2);
-tag.sprite.SetY(cy + 40);
+tag.sprite.SetY(cy + 58);
 
-# ── password prompt state ─────────────────────────────────────────────────────
-prompt.sprite  = NULL;
-bullets.sprite = NULL;
+# ── password prompt ───────────────────────────────────────────────────────────
+# The dots are drawn from dot.png (one per typed char) — never as a font glyph,
+# so they can't render as tofu when the initramfs font lacks the bullet.
+prompt.sprite = NULL;
+dot.image     = Image("dot.png");
+dot_w         = dot.image.GetWidth();
+dots          = [];
 
-fun build_bullets(count) {
-    if (count == 0) return "·";
-    s = "";
+fun clear_dots() {
     i = 0;
-    while (i < count) { s = s + "•"; i = i + 1; }
-    return s;
+    while (dots[i]) {
+        dots[i] = NULL;
+        i++;
+    }
+    dots = [];
 }
 
 fun display_password_callback(label, count) {
-    text = label;
-    if (text == "") text = "Enter passphrase";
-
-    prompt.image  = Image.Text(text, 0.651, 0.678, 0.784, 1, "Sans 13");
+    # Always a clean prompt — ignore cryptsetup's verbose label.
+    prompt.image  = Image.Text("Enter passphrase", 0.651, 0.678, 0.784, 1, "Sans 14");
     prompt.sprite = Sprite(prompt.image);
     prompt.sprite.SetX(cx - prompt.image.GetWidth() / 2);
-    prompt.sprite.SetY(cy + 84);
+    prompt.sprite.SetY(cy + 98);
 
-    bullets.image  = Image.Text(build_bullets(count),
-                                 0.796, 0.651, 0.969, 1, "Sans Bold 24");
-    bullets.sprite = Sprite(bullets.image);
-    bullets.sprite.SetX(cx - bullets.image.GetWidth() / 2);
-    bullets.sprite.SetY(cy + 112);
+    clear_dots();
+    gap   = 6;
+    total = count * dot_w + (count - 1) * gap;
+    startx = cx - total / 2;
+    i = 0;
+    while (i < count) {
+        s = Sprite(dot.image);
+        s.SetX(startx + i * (dot_w + gap));
+        s.SetY(cy + 130);
+        dots[i] = s;
+        i++;
+    }
 }
 
 fun display_normal_callback() {
-    prompt.sprite  = NULL;
-    bullets.sprite = NULL;
+    prompt.sprite = NULL;
+    clear_dots();
 }
 
 # Swallow everything else — splash stays clean from boot to handoff.
