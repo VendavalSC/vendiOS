@@ -92,10 +92,15 @@ if $OFFLINE; then
     rm -rf "$OFFLINE_DIR"
     mkdir -p "$REPO"
     tmpdb="$(mktemp -d)"
+    # pacman 7 drops to the unprivileged DownloadUser (alpm) for downloads,
+    # which can't write our root-owned tmp dbpath / repo dir. Use a config with
+    # that line stripped so downloads run as root and can populate the repo.
+    buildconf="$(mktemp)"
+    grep -viE '^[[:space:]]*DownloadUser' /etc/pacman.conf > "$buildconf"
     # -Syw with a throwaway dbpath downloads every package + full dependency
     # tree into the repo dir without touching the host's pacman state.
-    pacman -Syw --noconfirm --dbpath "$tmpdb" --cachedir "$REPO" "${OFFLINE_PKGS[@]}"
-    rm -rf "$tmpdb"
+    pacman -Syw --noconfirm --config "$buildconf" --dbpath "$tmpdb" --cachedir "$REPO" "${OFFLINE_PKGS[@]}"
+    rm -rf "$tmpdb" "$buildconf"
     repo-add "${REPO}/vendios.db.tar.zst" "${REPO}"/*.pkg.tar.zst >/dev/null
     cat > "${OFFLINE_DIR}/offline-pacman.conf" <<'EOF'
 # vendiOS offline installer repo — used by vendi-install when the bundled
