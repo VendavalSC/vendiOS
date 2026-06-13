@@ -145,6 +145,9 @@ pub struct State {
     // `auto_lock_fired` keeps that to one lock per idle stretch.
     pub last_activity:         std::time::Instant,
     pub auto_lock_fired:       bool,
+    // True while the displays are powered off via DPMS (idle screen-off).
+    // The render loop skips output while set; input clears it and wakes them.
+    pub screen_off:            bool,
 
     // Window-open animations. The Instant is None until the window's first
     // frame actually renders — starting the clock at new_toplevel would burn

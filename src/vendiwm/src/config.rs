@@ -96,10 +96,11 @@ binds {
     bind "XF86MonBrightnessDown" "spawn brightnessctl set 5%-"
 }
 
-// Lock the session after this many seconds with no keyboard / pointer /
-// touch input (0 disables). Any activity resets the timer.
+// Idle behaviour (seconds; 0 disables each). Any keyboard / pointer / touch
+// input resets the timers. The screen powers off via DPMS and wakes on input.
 idle {
     lock-after 600
+    screen-off-after 660
 }
 
 // Keyboard layout + key repeat. layout accepts comma lists ("us,es") and
@@ -131,6 +132,10 @@ pub struct IdleBlock {
     /// knus kebab-cases the field, so this is the `lock-after` node.
     #[knus(child, unwrap(argument))]
     pub lock_after: Option<i64>,
+    /// Seconds of inactivity before the displays power off via DPMS
+    /// (0 = never). Any input wakes them.
+    #[knus(child, unwrap(argument))]
+    pub screen_off_after: Option<i64>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -248,6 +253,8 @@ pub struct Config {
     pub theme:    Theme,
     /// Auto-lock after N seconds idle (0 = disabled).
     pub idle_lock_secs: u64,
+    /// Power displays off (DPMS) after N seconds idle (0 = disabled).
+    pub idle_screen_off_secs: u64,
     /// Keyboard / xkb settings, applied at startup and on reload.
     pub kb_layout:  String,
     pub kb_variant: String,
@@ -323,10 +330,13 @@ impl Config {
             theme.wallpaper = Some(p);
         }
 
-        // Idle auto-lock: built-in default, then any user override.
+        // Idle auto-lock + screen-off: built-in default, then user override.
         let mut idle_lock_secs: u64 = 600;
-        if let Some(v) = default_idle.and_then(|b| b.lock_after) { idle_lock_secs = v.max(0) as u64; }
-        if let Some(v) = user_idle.and_then(|b| b.lock_after)    { idle_lock_secs = v.max(0) as u64; }
+        let mut idle_screen_off_secs: u64 = 660;
+        for blk in [default_idle, user_idle].into_iter().flatten() {
+            if let Some(v) = blk.lock_after        { idle_lock_secs = v.max(0) as u64; }
+            if let Some(v) = blk.screen_off_after  { idle_screen_off_secs = v.max(0) as u64; }
+        }
 
         // Keyboard: defaults, then built-in config, then user override.
         let mut kb_layout = "us".to_string();
@@ -343,7 +353,7 @@ impl Config {
         }
 
         Ok(Self {
-            keybinds, keybinds_pretty, theme, idle_lock_secs,
+            keybinds, keybinds_pretty, theme, idle_lock_secs, idle_screen_off_secs,
             kb_layout, kb_variant, kb_options, repeat_delay, repeat_rate,
         })
     }

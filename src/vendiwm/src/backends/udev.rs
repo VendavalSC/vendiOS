@@ -548,20 +548,26 @@ pub fn run() -> Result<()> {
         use smithay::reexports::calloop::timer::{Timer, TimeoutAction};
         const TICK: Duration = Duration::from_secs(5);
         loop_handle.insert_source(Timer::from_duration(TICK), |_, _, app: &mut UdevApp| {
-            let secs = app.state.config.idle_lock_secs;
-            if secs > 0
+            let idle = app.state.last_activity.elapsed().as_secs();
+            let lock_secs = app.state.config.idle_lock_secs;
+            if lock_secs > 0
                 && !app.state.auto_lock_fired
                 && !app.state.is_locked()
                 && !app.state.vlock
-                && app.state.last_activity.elapsed().as_secs() >= secs
+                && idle >= lock_secs
             {
                 app.state.auto_lock_fired = true;
-                tracing::info!(idle_secs = secs, "idle auto-lock");
+                tracing::info!(idle_secs = lock_secs, "idle auto-lock");
                 if let Err(e) = std::process::Command::new("sh")
                     .arg("-c").arg("vendi-ctl lock").spawn()
                 {
                     tracing::warn!(?e, "auto-lock spawn failed");
                 }
+            }
+            let off_secs = app.state.config.idle_screen_off_secs;
+            if off_secs > 0 && !app.state.screen_off && idle >= off_secs {
+                app.state.screen_off = true;
+                sleep_outputs(app);
             }
             TimeoutAction::ToDuration(TICK)
         }).map_err(|e| anyhow::anyhow!("insert idle timer: {e:?}"))?;
@@ -662,7 +668,7 @@ fn build_state(
 
     let config = crate::config::Config::load().unwrap_or_else(|e| {
         tracing::warn!(?e, "config load failed; using empty keybinds");
-        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25 }
+        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25 }
     });
 
     let mut seat_state = SeatState::new();
@@ -714,6 +720,7 @@ fn build_state(
         last_zone:              None,
         last_activity:          std::time::Instant::now(),
         auto_lock_fired:        false,
+        screen_off:             false,
         open_anims:             Vec::new(),
         ws_anim:                None,
         geo_anims:              Vec::new(),
@@ -1215,7 +1222,39 @@ fn copy_texture(
     Some(dst)
 }
 
+/// Idle screen-off: power every output down via DPMS (DrmCompositor::clear
+/// disables the planes and sets DPMS off). Re-enabled by wake_outputs.
+fn sleep_outputs(app: &mut UdevApp) {
+    for device in app.udev.drm_devices.values_mut() {
+        for surface in device.surfaces.values_mut() {
+            if let Err(e) = surface.compositor.clear() {
+                tracing::warn!(?e, "screen-off (clear) failed");
+            }
+        }
+    }
+    tracing::info!("displays off (idle DPMS)");
+}
+
+/// Wake every output back up: a fresh render + queue_frame re-enables DPMS
+/// and restarts the VBlank cycle.
+fn wake_outputs(app: &mut UdevApp) {
+    let targets: Vec<(DrmNode, crtc::Handle)> = app.udev.drm_devices.iter()
+        .flat_map(|(node, dev)| dev.surfaces.keys().map(move |c| (*node, *c)))
+        .collect();
+    for (node, crtc) in targets {
+        if let Err(e) = render_surface(app, node, crtc) {
+            tracing::warn!(?e, "wake render failed");
+        }
+    }
+    tracing::info!("displays on (input woke them)");
+}
+
 fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Result<()> {
+    // Displays are powered off (idle DPMS). Don't render or queue frames —
+    // that would re-enable the output. Waking happens on input.
+    if app.state.screen_off {
+        return Ok(());
+    }
     let UdevApp { state, udev, .. } = app;
     let device = udev.drm_devices.get_mut(&node)
         .ok_or_else(|| anyhow::anyhow!("device not found"))?;
@@ -2251,12 +2290,17 @@ fn send_frames_surface_tree(
 // ── event source handlers ─────────────────────────────────────────────────────
 
 fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp) {
-    let state = &mut app.state;
-    // Any real input resets the idle clock (device add/remove isn't activity).
+    // Any real input resets the idle clock (device add/remove isn't activity)
+    // and wakes the displays if they were powered off.
     if !matches!(event, InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }) {
-        state.last_activity = std::time::Instant::now();
-        state.auto_lock_fired = false;
+        app.state.last_activity = std::time::Instant::now();
+        app.state.auto_lock_fired = false;
+        if app.state.screen_off {
+            app.state.screen_off = false;
+            wake_outputs(app);
+        }
     }
+    let state = &mut app.state;
     match event {
         InputEvent::DeviceAdded { mut device } => {
             // Touchpad defaults (anything with tap support): tap-to-click,
