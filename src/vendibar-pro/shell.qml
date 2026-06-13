@@ -108,7 +108,7 @@ ShellRoot {
 
     // ── theme ────────────────────────────────────────────────────────────────
     property color accent: "#cba6f7"
-    property color panel:  Qt.rgba(0.043, 0.043, 0.071, 0.96)   // #0b0b12
+    property color panel:  Qt.rgba(0.043, 0.043, 0.071, 1.0)    // #0b0b12 — fully solid, never see-through
     property color fg:     "#cdd6f4"
     property color dim:    "#717189"
     property color alert:  "#f38ba8"
