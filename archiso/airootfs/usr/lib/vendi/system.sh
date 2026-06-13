@@ -100,8 +100,8 @@ sys_install_plymouth() {
     local theme_src=/usr/share/plymouth/themes/vendios
     local theme_dst=/mnt/usr/share/plymouth/themes/vendios
     mkdir -p "$theme_dst"
-    cp "${theme_src}/vendios.plymouth" "${theme_dst}/"
-    cp "${theme_src}/vendios.script"   "${theme_dst}/"
+    # Copy the whole theme dir (.plymouth, .script, logo.png, any assets).
+    cp -a "${theme_src}/." "${theme_dst}/"
     # Just set the default — sys_initramfs runs mkinitcpio -P afterwards.
     chroot_run plymouth-set-default-theme vendios
 }

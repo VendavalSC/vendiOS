@@ -13,18 +13,24 @@ Window.SetBackgroundBottomColor(0.117, 0.117, 0.180);
 cx = Window.GetX() + Window.GetWidth()  / 2;
 cy = Window.GetY() + Window.GetHeight() / 2;
 
+# ── logo (obsidian shard) ─────────────────────────────────────────────────────
+logo.image  = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+logo.sprite.SetX(cx - logo.image.GetWidth()  / 2);
+logo.sprite.SetY(cy - logo.image.GetHeight() - 30);
+
 # ── brand wordmark ────────────────────────────────────────────────────────────
-brand.image  = Image.Text("vendiOS", 0.796, 0.651, 0.969, 1, "Sans Bold 56");
+brand.image  = Image.Text("vendiOS", 0.796, 0.651, 0.969, 1, "Sans Bold 40");
 brand.sprite = Sprite(brand.image);
 brand.sprite.SetX(cx - brand.image.GetWidth()  / 2);
-brand.sprite.SetY(cy - brand.image.GetHeight() - 24);
+brand.sprite.SetY(cy - 6);
 
 # ── tagline ───────────────────────────────────────────────────────────────────
 tag.image  = Image.Text("Minimal. Modern. Yours.",
-                         0.424, 0.439, 0.525, 1, "Sans 14");
+                         0.424, 0.439, 0.525, 1, "Sans 13");
 tag.sprite = Sprite(tag.image);
 tag.sprite.SetX(cx - tag.image.GetWidth() / 2);
-tag.sprite.SetY(cy - 8);
+tag.sprite.SetY(cy + 40);
 
 # ── password prompt state ─────────────────────────────────────────────────────
 prompt.sprite  = NULL;
@@ -45,13 +51,13 @@ fun display_password_callback(label, count) {
     prompt.image  = Image.Text(text, 0.651, 0.678, 0.784, 1, "Sans 13");
     prompt.sprite = Sprite(prompt.image);
     prompt.sprite.SetX(cx - prompt.image.GetWidth() / 2);
-    prompt.sprite.SetY(cy + 64);
+    prompt.sprite.SetY(cy + 84);
 
     bullets.image  = Image.Text(build_bullets(count),
                                  0.796, 0.651, 0.969, 1, "Sans Bold 24");
     bullets.sprite = Sprite(bullets.image);
     bullets.sprite.SetX(cx - bullets.image.GetWidth() / 2);
-    bullets.sprite.SetY(cy + 92);
+    bullets.sprite.SetY(cy + 112);
 }
 
 fun display_normal_callback() {
