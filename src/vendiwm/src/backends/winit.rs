@@ -64,6 +64,7 @@ pub fn run() -> Result<()> {
     let primary_selection_state = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<State>(&dh);
     let data_control_state   = smithay::wayland::selection::wlr_data_control::DataControlState::new::<State, _>(
         &dh, Some(&primary_selection_state), |_| true);
+    let idle_inhibit_state   = smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<State>(&dh);
     let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(&dh);
     let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(&dh);
     let mut seat_state       = smithay::input::SeatState::new();
@@ -126,6 +127,8 @@ pub fn run() -> Result<()> {
         session_lock_state,
         primary_selection_state,
         data_control_state,
+        idle_inhibit_state,
+        idle_inhibitors: Default::default(),
         xdg_decoration_state,
         viewporter_state,
         seat,

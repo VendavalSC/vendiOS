@@ -548,6 +548,13 @@ pub fn run() -> Result<()> {
         use smithay::reexports::calloop::timer::{Timer, TimeoutAction};
         const TICK: Duration = Duration::from_secs(5);
         loop_handle.insert_source(Timer::from_duration(TICK), |_, _, app: &mut UdevApp| {
+            // A playing video / presentation holding an idle inhibitor keeps
+            // the session awake — bump the clock so the countdown restarts
+            // fresh once the inhibitor goes away.
+            if app.state.idle_inhibited() {
+                app.state.last_activity = std::time::Instant::now();
+                return TimeoutAction::ToDuration(TICK);
+            }
             let idle = app.state.last_activity.elapsed().as_secs();
             let lock_secs = app.state.config.idle_lock_secs;
             if lock_secs > 0
@@ -662,6 +669,7 @@ fn build_state(
     let primary_selection_state = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<State>(dh);
     let data_control_state   = smithay::wayland::selection::wlr_data_control::DataControlState::new::<State, _>(
         dh, Some(&primary_selection_state), |_| true);
+    let idle_inhibit_state   = smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<State>(dh);
     let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(dh);
     let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(dh);
     let dmabuf_state         = DmabufState::new();
@@ -695,6 +703,8 @@ fn build_state(
         session_lock_state,
         primary_selection_state,
         data_control_state,
+        idle_inhibit_state,
+        idle_inhibitors:        Default::default(),
         xdg_decoration_state,
         viewporter_state,
         seat,

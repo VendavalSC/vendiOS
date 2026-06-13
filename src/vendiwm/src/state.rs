@@ -28,6 +28,7 @@ use smithay::{
             with_states,
         },
         dmabuf::{DmabufHandler, DmabufState, DmabufGlobal, ImportNotifier},
+        idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState},
         output::{OutputHandler, OutputManagerState},
         selection::{
             SelectionHandler,
@@ -71,6 +72,10 @@ pub struct State {
     /// wlr-data-control — lets clipboard managers (cliphist via wl-paste
     /// --watch) observe and serve the selection.
     pub data_control_state:    DataControlState,
+    /// idle-inhibit — surfaces (video players, presentations) that ask the
+    /// session to stay awake. While any is active, auto-lock/screen-off pause.
+    pub idle_inhibit_state:    IdleInhibitManagerState,
+    pub idle_inhibitors:       std::collections::HashSet<WlSurface>,
     pub xdg_decoration_state:  smithay::wayland::shell::xdg::decoration::XdgDecorationState,
     pub viewporter_state:      ViewporterState,
     pub seat:                  Seat<Self>,
@@ -475,6 +480,24 @@ impl WaylandDndGrabHandler for State {}
 impl DataControlHandler for State {
     fn data_control_state(&mut self) -> &mut DataControlState {
         &mut self.data_control_state
+    }
+}
+
+impl IdleInhibitHandler for State {
+    fn inhibit(&mut self, surface: WlSurface) {
+        self.idle_inhibitors.insert(surface);
+    }
+    fn uninhibit(&mut self, surface: WlSurface) {
+        self.idle_inhibitors.remove(&surface);
+    }
+}
+
+impl State {
+    /// True while some surface is holding an idle inhibitor (a playing video,
+    /// a presentation) — auto-lock and screen-off pause. smithay calls
+    /// `uninhibit` when an inhibitor is destroyed, so the set stays accurate.
+    pub fn idle_inhibited(&self) -> bool {
+        !self.idle_inhibitors.is_empty()
     }
 }
 
