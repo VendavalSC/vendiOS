@@ -49,11 +49,41 @@ BASE_PKGS=(
     zram-generator smartmontools
 )
 
+# Path to the bundled offline repo config; set when the ISO carries a repo.
+VENDI_OFFLINE_CONF=/opt/vendios/offline-pacman.conf
+
 sys_pacstrap() {
-    # -K initializes a fresh writable pacman keyring inside the target so
-    # pacman in the chroot can import new keys. Without it, the live ISO's
-    # keyring is copied as-is and pacman fails to add missing keys.
-    pacstrap -K /mnt "${BASE_PKGS[@]}" "$@"
+    if [[ -n "${VENDI_OFFLINE:-}" ]]; then
+        # Offline: install everything from the bundled file:// repo. No network,
+        # no signatures (SigLevel=Never), so skip -K here — the keyring is set
+        # up afterwards (sys_keyring_init) for future online updates.
+        pacstrap -C "$VENDI_OFFLINE_CONF" -G /mnt "${BASE_PKGS[@]}" "$@"
+    else
+        # -K initializes a fresh writable pacman keyring inside the target so
+        # pacman in the chroot can import new keys. Without it, the live ISO's
+        # keyring is copied as-is and pacman fails to add missing keys.
+        pacstrap -K /mnt "${BASE_PKGS[@]}" "$@"
+    fi
+}
+
+# Install extra packages into the target. Offline pulls from the bundled repo
+# via the live env's pacman (--root /mnt); online goes through the chroot.
+vendi_pkg_install() {
+    [[ $# -gt 0 ]] || return 0
+    if [[ -n "${VENDI_OFFLINE:-}" ]]; then
+        pacman --root /mnt --config "$VENDI_OFFLINE_CONF" \
+               --noconfirm --needed -S "$@"
+    else
+        chroot_run pacman -S --noconfirm --needed "$@"
+    fi
+}
+
+# Offline installs skip pacstrap's -K, so populate the target keyring now (from
+# the just-installed archlinux-keyring) so the user's first online `pacman -Syu`
+# works. No network needed — the keys ship in the package.
+sys_keyring_init() {
+    chroot_run pacman-key --init        >/dev/null 2>&1 || true
+    chroot_run pacman-key --populate archlinux >/dev/null 2>&1 || true
 }
 
 sys_genfstab() {
@@ -353,7 +383,7 @@ sys_graphics() {
     fi
 
     if [[ ${#pkgs[@]} -gt 0 ]]; then
-        chroot_run pacman -S --noconfirm --needed "${pkgs[@]}" || true
+        vendi_pkg_install "${pkgs[@]}" || true
     fi
 
     if [[ $nvidia -eq 1 ]]; then

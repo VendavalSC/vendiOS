@@ -482,6 +482,13 @@ step_install() {
     local INSTALL_LOG=/tmp/vendios-install.log
     : > "$INSTALL_LOG"
 
+    # Offline mode: the ISO carries a complete local package repo, so the whole
+    # install runs with no network (no mirrors, no AUR). Auto-detected here.
+    if [[ -f /opt/vendios/repo/vendios.db.tar.zst || -f /opt/vendios/repo/vendios.db ]]; then
+        export VENDI_OFFLINE=1
+        echo "[$(date +%T)] OFFLINE install — using bundled /opt/vendios/repo" >> "$INSTALL_LOG"
+    fi
+
     _status() { ui_progress 1 "$1" "$2"; }
     _log()    {
         local msg=$1
@@ -568,10 +575,16 @@ step_install() {
     _ok 6 "Filesystems mounted"
 
     # ── 4. mirrors ────────────────────────────────────────────
-    _status 25 "Optimizing mirrors"
-    _log "reflector"
-    reflector --latest 15 --sort rate --save /etc/pacman.d/mirrorlist >>"$INSTALL_LOG" 2>&1 || true
-    _ok 7 "Mirrors updated"
+    if [[ -z "${VENDI_OFFLINE:-}" ]]; then
+        _status 25 "Optimizing mirrors"
+        _log "reflector"
+        reflector --latest 15 --sort rate --save /etc/pacman.d/mirrorlist >>"$INSTALL_LOG" 2>&1 || true
+        _ok 7 "Mirrors updated"
+    else
+        _status 25 "Offline install — skipping mirrors"
+        _log "offline: bundled repo"
+        _ok 7 "Using bundled packages"
+    fi
 
     # ── 5. pacstrap ───────────────────────────────────────────
     _status 30 "Installing base system…"
@@ -579,6 +592,16 @@ step_install() {
     local extra=()
     [[ "$CFG_FS" == 'btrfs' ]] && extra+=(btrfs-progs)
     sys_pacstrap "${extra[@]}" >>"$INSTALL_LOG" 2>&1
+    # Offline skipped pacstrap's -K — set the target keyring up now.
+    [[ -n "${VENDI_OFFLINE:-}" ]] && { _log "populating keyring"; sys_keyring_init >>"$INSTALL_LOG" 2>&1; }
+    # Hard gate: a missing kernel means a broken pacstrap (the classic
+    # no-network failure that yields "failed to load kernel" at boot).
+    if [[ ! -f /mnt/boot/vmlinuz-linux ]]; then
+        _log "FATAL: kernel not installed — pacstrap failed (no packages?)"
+        ui_hints "Install failed: base packages did not install. Esc:shell"
+        echo "[$(date +%T)] FATAL: /mnt/boot/vmlinuz-linux missing after pacstrap" >> "$INSTALL_LOG"
+        return 1
+    fi
     _ok 8 "Base system installed"
 
     # ── 6. fstab ──────────────────────────────────────────────
@@ -664,11 +687,16 @@ step_install() {
     _ok 11 "Desktop configured"
 
     # ── 16. AUR helper ────────────────────────────────────────
-    if [[ $CFG_AUR -eq 1 ]]; then
+    # AUR needs network + makepkg, so it's skipped offline. The vendi binaries
+    # are staged directly (sys_install_vendi_cli), so the desktop still works;
+    # the user can `yay -S vendi-git` later once online to hand pacman ownership.
+    if [[ $CFG_AUR -eq 1 && -z "${VENDI_OFFLINE:-}" ]]; then
         _status 91 "Installing yay (AUR helper)"
         _log "yay (clone + makepkg)"
         # Network failure here shouldn't stop the install — log and continue.
         sys_install_aur_helper "$CFG_USER" >>"$INSTALL_LOG" 2>&1 || _log "yay install failed (see log)"
+    elif [[ -n "${VENDI_OFFLINE:-}" ]]; then
+        _log "offline: skipping AUR (vendi binaries already staged)"
     fi
 
     # ── 17. bootloader ────────────────────────────────────────

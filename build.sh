@@ -9,12 +9,14 @@ set -euo pipefail
 PROFILE="$(cd "$(dirname "$0")/archiso" && pwd)"
 WORK="/home/vendi/vendiOS/work"
 CLEAN=false
+OFFLINE=false
 OUT=""
 
 for arg in "$@"; do
     case "$arg" in
-        --clean) CLEAN=true ;;
-        *)       OUT="$arg" ;;
+        --clean)   CLEAN=true ;;
+        --offline) OFFLINE=true ;;
+        *)         OUT="$arg" ;;
     esac
 done
 OUT="${OUT:-$(pwd)/out}"
@@ -66,6 +68,53 @@ for bin in vendiwm vendi-ctl vendi-demo vendibar vendi-menu; do
     install -Dm755 "$src" "${RUST_BIN_DIR}/${bin}"
 done
 echo "  Rust binaries staged into airootfs."
+
+# ── Offline package repo ──────────────────────────────────────────────────────
+# Bundle a complete local pacman repo into the ISO so the installer can pacstrap
+# the whole target system (base + desktop + apps + every-vendor GPU driver) with
+# NO network. The installer auto-detects /opt/vendios/repo and switches to it.
+OFFLINE_DIR="${PROFILE}/airootfs/opt/vendios"
+REPO="${OFFLINE_DIR}/repo"
+if $OFFLINE; then
+    echo "  Bundling offline package repo (downloads the full target package set)..."
+    # BASE_PKGS lives in system.sh; sourcing it only defines the array.
+    # shellcheck source=/dev/null
+    source "${PROFILE}/airootfs/usr/lib/vendi/system.sh"
+    # All-vendor GPU drivers (sys_graphics installs the matching ones offline),
+    # plus archlinux-keyring so the target keyring can be populated for later
+    # online updates, plus btrfs-progs (added as an `extra` at install time).
+    OFFLINE_PKGS=(
+        "${BASE_PKGS[@]}"
+        vulkan-radeon vulkan-intel intel-media-driver
+        nvidia-open-dkms nvidia-utils libva-nvidia-driver egl-wayland
+        archlinux-keyring btrfs-progs
+    )
+    rm -rf "$OFFLINE_DIR"
+    mkdir -p "$REPO"
+    tmpdb="$(mktemp -d)"
+    # -Syw with a throwaway dbpath downloads every package + full dependency
+    # tree into the repo dir without touching the host's pacman state.
+    pacman -Syw --noconfirm --dbpath "$tmpdb" --cachedir "$REPO" "${OFFLINE_PKGS[@]}"
+    rm -rf "$tmpdb"
+    repo-add "${REPO}/vendios.db.tar.zst" "${REPO}"/*.pkg.tar.zst >/dev/null
+    cat > "${OFFLINE_DIR}/offline-pacman.conf" <<'EOF'
+# vendiOS offline installer repo — used by vendi-install when the bundled
+# package repo is present (no network, no signature/keyring requirement).
+[options]
+HoldPkg      = pacman glibc
+Architecture = auto
+SigLevel          = Never
+LocalFileSigLevel = Optional
+
+[vendios]
+SigLevel = Never
+Server   = file:///opt/vendios/repo
+EOF
+    echo "  Offline repo staged: $(ls "${REPO}"/*.pkg.tar.zst 2>/dev/null | wc -l) packages, $(du -sh "$REPO" | cut -f1)."
+else
+    # Online build — make sure no stale offline repo is left in the overlay.
+    rm -rf "$OFFLINE_DIR"
+fi
 
 
 if $CLEAN; then
