@@ -99,6 +99,7 @@ brightnessctl
 playerctl
 grim
 slurp
+wf-recorder
 swaylock
 wl-clipboard
 polkit-kde-agent

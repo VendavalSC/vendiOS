@@ -140,6 +140,7 @@ pub fn run() -> Result<()> {
         overview: false,
         overview_t: std::time::Instant::now(),
         screenshot: None,
+        pending_screencopy: Vec::new(),
         wallpaper_gen: 0,
         vlock: false,
         vlock_input: String::new(),

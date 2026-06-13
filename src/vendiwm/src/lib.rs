@@ -20,5 +20,6 @@ pub mod input;
 pub mod ipc;
 pub mod layout;
 pub mod render;
+pub mod screencopy;
 pub mod state;
 pub mod workspaces;

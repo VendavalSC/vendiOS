@@ -39,19 +39,60 @@ ShellRoot {
     property real centerW: 236
     property bool chromeGone: false
     signal chromeReturn()
-    // Spotlight launcher (Launcher.qml) — instant open, super+space.
-    Launcher {
-        id: launcher
-        accent: root.accent
-        panel: root.panel
-        fg: root.fg
-        dim: root.dim
-        mono: root.mono
-    }
+    // Spotlight search — not a window: the center notch morphs into it
+    // (Launcher.qml fills the expanded notch; panelWin drives the state).
+    signal searchToggle(string mode)
     IpcHandler {
         target: "launcher"
-        function toggle(): void { launcher.toggle(); }
-        function actions(): void { launcher.actions(); }
+        function toggle(): void { root.searchToggle("search"); }
+        function actions(): void { root.searchToggle("actions"); }
+    }
+    // Dashboard (the expanded center notch) — super+d via vendi-launcher dash.
+    signal dashToggle()
+    signal dashOpen(int tab)
+    IpcHandler {
+        target: "dash"
+        function toggle(): void { root.dashToggle(); }
+        function open(tab: int): void { root.dashOpen(tab); }
+    }
+    function rescanWallpapers() { wpList.running = true; }
+
+    // ── screen recording (wf-recorder) — red pill in the collapsed notch ────
+    property bool hasRecorder: false
+    Process {
+        command: ["sh", "-c", "command -v wf-recorder >/dev/null && echo yes || echo no"]
+        running: true
+        stdout: SplitParser { onRead: l => root.hasRecorder = l.trim() === "yes" }
+    }
+    property bool recording: false
+    property double recStart: 0
+    property int recSecs: 0
+    function startRecord() {
+        Quickshell.execDetached(["sh", "-c",
+            "mkdir -p \"$HOME/Videos\"; exec wf-recorder -f \"$HOME/Videos/rec-$(date +%Y%m%d-%H%M%S).mp4\""]);
+        recording = true;
+        recStart = Date.now();
+        recSecs = 0;
+    }
+    function stopRecord() {
+        Quickshell.execDetached(["pkill", "-INT", "-x", "wf-recorder"]);
+        recording = false;
+    }
+    // catches recordings started/stopped outside the bar too
+    Process {
+        id: recCheck
+        command: ["sh", "-c", "pgrep -x wf-recorder >/dev/null && echo yes || echo no"]
+        stdout: SplitParser {
+            onRead: l => {
+                const on = l.trim() === "yes";
+                if (on && !root.recording) { root.recording = true; root.recStart = Date.now(); }
+                else if (!on && root.recording) root.recording = false;
+            }
+        }
+    }
+    Timer {
+        interval: 5000; running: root.hasRecorder; repeat: true
+        onTriggered: recCheck.running = true
     }
 
     IpcHandler {
@@ -381,6 +422,14 @@ ShellRoot {
         try { expire ? t.n.expire() : t.n.dismiss(); } catch (e) {}
         toasts = toasts.slice(1);
     }
+    // the bar's own voice — synthetic toast, no client behind it
+    function notify(summary, body) {
+        toasts = toasts.concat([{
+            app: "vendi", icon: "", image: "", n: null,
+            summary: summary, body: body,
+        }]);
+        toastTimer.restart();
+    }
 
     // ── 1s heartbeat: clocks, media progress, active player ─────────────────
     Timer {
@@ -389,6 +438,8 @@ ShellRoot {
             root.player = root.pickPlayer();
             root.musicProgress = (root.player && root.player.length > 0)
                 ? Math.max(0, Math.min(1, root.player.position / root.player.length)) : 0;
+            if (root.recording)
+                root.recSecs = Math.max(0, Math.floor((Date.now() - root.recStart) / 1000));
         }
     }
 
@@ -402,14 +453,25 @@ ShellRoot {
             anchors { top: true; left: true; right: true }
             color: "transparent"
             WlrLayershell.namespace: "vendibar-pro"
+            // Search grabs the keyboard outright (type immediately); the
+            // dashboard's task fields just need click-to-focus.
+            WlrLayershell.keyboardFocus: searchOpen
+                ? WlrKeyboardFocus.Exclusive
+                : centerOpen ? WlrKeyboardFocus.OnDemand
+                : WlrKeyboardFocus.None
 
             // ── expansion state ─────────────────────────────────────────────
             property bool centerOpen: false
             property bool rightOpen: false
             property bool powerOpen: false
-            function toggleCenter() { centerOpen = !centerOpen; if (centerOpen) { rightOpen = false; powerOpen = false; } }
-            function toggleRight()  { rightOpen = !rightOpen;  if (rightOpen) { centerOpen = false; powerOpen = false; } }
-            function togglePower()  { powerOpen = !powerOpen;  if (powerOpen) { centerOpen = false; rightOpen = false; } }
+            // Spotlight search lives in the center notch too (morphs it).
+            property bool searchOpen: false
+            property string searchMode: "search"
+            function toggleCenter() { centerOpen = !centerOpen; if (centerOpen) { rightOpen = false; powerOpen = false; searchOpen = false; } }
+            function toggleRight()  { rightOpen = !rightOpen;  if (rightOpen) { centerOpen = false; powerOpen = false; searchOpen = false; } }
+            function togglePower()  { powerOpen = !powerOpen;  if (powerOpen) { centerOpen = false; rightOpen = false; searchOpen = false; } }
+            function openSearch(m)  { searchMode = m; searchOpen = true; centerOpen = false; rightOpen = false; powerOpen = false; }
+            function closeSearch()  { searchOpen = false; }
 
             // right notch mode: power menu wins, then control center, then
             // toasts, then the volume OSD
@@ -424,7 +486,8 @@ ShellRoot {
             // hover — the island invites the click.
             property real lw: root.modulesHidden ? 0
                 : leftRow.implicitWidth + root.pad * 2
-            property real cw: centerOpen ? 480
+            property real cw: centerOpen ? Math.min(880, panelWin.width - 120)
+                : searchOpen ? Math.min(640, panelWin.width - 120)
                 : centerRow.implicitWidth + root.pad * 2 + (centerHover.hovered ? 10 : 0)
             property real rw: root.modulesHidden ? 0
                 : rightMode === "control" ? 400
@@ -432,7 +495,9 @@ ShellRoot {
                 : rightMode === "toast" ? 380
                 : rightMode === "osd" ? 270
                 : rightRow.implicitWidth + root.pad * 2 + (rightHover.hovered ? 10 : 0)
-            property real ch: centerOpen ? 506 : root.barH
+            property real ch: centerOpen ? Math.min(620, panelWin.screen.height - 100)
+                : searchOpen ? Math.min(panelWin.screen.height - 80, root.stripH + searchItem.wantHeight)
+                : root.barH
             property real rh: rightMode === "control"
                     ? 312 + (root.notifHistory.length > 0
                              ? 30 + Math.min(root.notifHistory.length, 3) * 22 : 0)
@@ -470,16 +535,31 @@ ShellRoot {
                 }
             }
 
-            // auto-close when the pointer wanders off an open panel
+            // auto-close when the pointer wanders off an open panel (the big
+            // dashboard gets a longer leash, and never closes mid-typing)
             HoverHandler { id: panelHover }
             Timer {
                 running: (panelWin.centerOpen || panelWin.rightOpen || panelWin.powerOpen)
-                         && !panelHover.hovered
-                interval: 1600
+                         && !panelHover.hovered && !dashItem.typing
+                interval: panelWin.centerOpen ? 3200 : 1600
                 onTriggered: {
                     panelWin.centerOpen = false;
                     panelWin.rightOpen = false;
                     panelWin.powerOpen = false;
+                }
+            }
+            Connections {
+                target: root
+                function onDashToggle() { panelWin.toggleCenter(); }
+                function onDashOpen(tab) {
+                    dashItem.goTab(tab);
+                    if (!panelWin.centerOpen) panelWin.toggleCenter();
+                }
+                function onSearchToggle(mode) {
+                    if (panelWin.searchOpen && panelWin.searchMode === mode)
+                        panelWin.closeSearch();
+                    else
+                        panelWin.openSearch(mode);
                 }
             }
 
@@ -592,7 +672,12 @@ ShellRoot {
                 opacity: root.modulesHidden ? 0 : 1
                 Behavior on opacity { NumberAnimation { duration: 200 } }
 
-                Mono { text: "󰜁"; color: root.accent; font.pixelSize: 17 }
+                VendiMark {
+                    accent: root.accent
+                    implicitWidth: 17
+                    implicitHeight: 17
+                    Layout.alignment: Qt.AlignVCenter
+                }
 
                 RowLayout {
                     spacing: 5
@@ -642,8 +727,46 @@ ShellRoot {
                 y: root.stripH
                 height: root.barH - root.stripH
                 spacing: 10
-                opacity: panelWin.centerOpen ? 0 : 1
+                opacity: (panelWin.centerOpen || panelWin.searchOpen) ? 0 : 1
+                // opacity 0 still eats clicks — the dashboard / search live in
+                // this exact strip, so actually drop the row from input
+                visible: opacity > 0
                 Behavior on opacity { NumberAnimation { duration: 140 } }
+                // screen-recording pill — blinking red dot + elapsed time;
+                // click it to stop the recording (brainshell-style).
+                Item {
+                    visible: root.recording
+                    implicitWidth: recRow.implicitWidth
+                    implicitHeight: 18
+                    Row {
+                        id: recRow
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 6
+                        Rectangle {
+                            width: 8; height: 8; radius: 4
+                            color: "#f25c5c"
+                            anchors.verticalCenter: parent.verticalCenter
+                            SequentialAnimation on opacity {
+                                running: root.recording
+                                loops: Animation.Infinite
+                                NumberAnimation { to: 0.25; duration: 700 }
+                                NumberAnimation { to: 1; duration: 700 }
+                            }
+                        }
+                        Mono {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: Math.floor(root.recSecs / 60).toString().padStart(2, "0")
+                                  + ":" + (root.recSecs % 60).toString().padStart(2, "0")
+                            color: "#f25c5c"
+                            font.pixelSize: 11
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.stopRecord()
+                    }
+                }
                 // media island, left wing: a tiny equalizer breathing with
                 // the music (apple style — art on the other wing).
                 Item {
@@ -674,8 +797,10 @@ ShellRoot {
                         }
                     }
                 }
-                Mono { id: clockT; font.bold: true; font.pixelSize: 14 }
+                // date · time · weather — the bold clock sits in the middle,
+                // flanked by the dim date on the left and weather on the right.
                 Mono { id: dateT; color: root.dim }
+                Mono { id: clockT; font.bold: true; font.pixelSize: 14 }
                 Sep { visible: root.weather !== "" }
                 Mono { text: root.weather; visible: root.weather !== ""; color: root.dim }
                 // media island, right wing: the album art, rounded.
@@ -699,6 +824,36 @@ ShellRoot {
                         color: root.accent
                     }
                 }
+                // recording, right wing: a red waveform so the notch stays
+                // symmetric with the timer pill on the left.
+                Item {
+                    visible: root.recording
+                    implicitWidth: 24
+                    implicitHeight: 18
+                    Row {
+                        anchors.centerIn: parent
+                        spacing: 2
+                        Repeater {
+                            model: [0, 1, 2, 3, 4]
+                            Rectangle {
+                                required property int modelData
+                                width: 3
+                                radius: 1.5
+                                color: "#f25c5c"
+                                height: 5
+                                anchors.verticalCenter: parent.verticalCenter
+                                SequentialAnimation on height {
+                                    running: root.recording
+                                    loops: Animation.Infinite
+                                    NumberAnimation { to: 15 - (modelData % 3) * 3; duration: 240 + modelData * 60; easing.type: Easing.InOutSine }
+                                    NumberAnimation { to: 5 + (modelData % 2) * 3;  duration: 280 + modelData * 40; easing.type: Easing.InOutSine }
+                                    NumberAnimation { to: 12 - modelData;           duration: 220 + modelData * 70; easing.type: Easing.InOutSine }
+                                    NumberAnimation { to: 4;                        duration: 260 + modelData * 50; easing.type: Easing.InOutSine }
+                                }
+                            }
+                        }
+                    }
+                }
                 TapHandler { onTapped: panelWin.toggleCenter() }
                 HoverHandler { id: centerHover; cursorShape: Qt.PointingHandCursor }
             }
@@ -708,14 +863,13 @@ ShellRoot {
                     const now = new Date();
                     clockT.text = Qt.formatDateTime(now, "HH:mm");
                     dateT.text  = Qt.formatDateTime(now, "ddd d MMM");
-                    bigClock.text = Qt.formatDateTime(now, "HH:mm");
-                    bigDate.text  = Qt.formatDateTime(now, "dddd, d MMMM");
                 }
             }
 
-            // ── dashboard (expanded center notch) ───────────────────────────
+            // ── dashboard (expanded center notch) — the five-room command
+            //    center lives in Dash.qml ─────────────────────────────────────
             Item {
-                id: dashboard
+                id: dashboardBox
                 x: (panelWin.width - panelWin.cw) / 2
                 y: root.stripH
                 width: panelWin.cw
@@ -726,305 +880,45 @@ ShellRoot {
                 Behavior on opacity { NumberAnimation { duration: 180 } }
                 TapHandler { onTapped: {} }   // swallow clicks inside
 
-                // month offset for ‹ › navigation; resets on open
-                property int monthOff: 0
+                Dash {
+                    id: dashItem
+                    anchors.fill: parent
+                    bar: root
+                    onRequestClose: panelWin.centerOpen = false
+                }
                 Connections {
                     target: panelWin
                     function onCenterOpenChanged() {
-                        if (panelWin.centerOpen) {
-                            dashboard.monthOff = 0;
-                            wpList.running = true;   // rescan the library
-                        }
+                        if (panelWin.centerOpen) dashItem.refresh();
                     }
                 }
+            }
 
-                ColumnLayout {
+            // ── spotlight search (expanded center notch) — the notch itself
+            //    becomes the search box; Launcher.qml fills it ────────────────
+            Item {
+                id: searchBox
+                x: (panelWin.width - panelWin.cw) / 2
+                y: root.stripH
+                width: panelWin.cw
+                height: panelWin.ch - root.stripH
+                clip: true
+                visible: opacity > 0
+                opacity: panelWin.searchOpen ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+                TapHandler { onTapped: {} }   // swallow clicks inside
+
+                Launcher {
+                    id: searchItem
                     anchors.fill: parent
-                    anchors.margins: 20
-                    spacing: 10
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 14
-                        Rectangle {
-                            Layout.preferredWidth: 46
-                            Layout.preferredHeight: 46
-                            radius: 23
-                            color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
-                            Mono {
-                                anchors.centerIn: parent
-                                text: "󰜁"
-                                color: root.accent
-                                font.pixelSize: 22
-                            }
-                        }
-                        ColumnLayout {
-                            spacing: 1
-                            Mono { id: bigClock; font.pixelSize: 26; font.bold: true; color: root.fg }
-                            Mono { id: bigDate; color: root.dim; font.pixelSize: 11 }
-                            Mono {
-                                text: root.userName
-                                      + (root.hostName !== "" ? "@" + root.hostName : "")
-                                      + " · vendiwm · up " + root.uptimeStr
-                                color: root.dim
-                                font.pixelSize: 10
-                            }
-                        }
-                        Item { Layout.fillWidth: true }
-                        ColumnLayout {
-                            spacing: 1
-                            visible: root.weather !== ""
-                            Mono {
-                                text: root.weather
-                                font.pixelSize: 14
-                                Layout.alignment: Qt.AlignRight
-                            }
-                            Mono {
-                                text: root.weatherCond
-                                color: root.dim
-                                font.pixelSize: 10
-                                Layout.alignment: Qt.AlignRight
-                            }
-                        }
-                        Mono {
-                            text: "󰅖"
-                            color: root.dim
-                            Layout.alignment: Qt.AlignTop
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: panelWin.centerOpen = false
-                            }
-                        }
-                    }
-
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
-
-                    // calendar header + nav
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Mono {
-                            id: calTitle
-                            font.bold: true
-                            color: root.accent
-                            text: {
-                                const d = new Date();
-                                d.setDate(1); d.setMonth(d.getMonth() + dashboard.monthOff);
-                                return Qt.formatDateTime(d, "MMMM yyyy");
-                            }
-                        }
-                        Item { Layout.fillWidth: true }
-                        Mono {
-                            text: "‹"; font.pixelSize: 16; color: root.dim
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: dashboard.monthOff-- }
-                        }
-                        Mono {
-                            text: "›"; font.pixelSize: 16; color: root.dim
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: dashboard.monthOff++ }
-                        }
-                    }
-
-                    // calendar grid (Monday-first)
-                    GridLayout {
-                        Layout.fillWidth: true
-                        columns: 7
-                        rowSpacing: 2
-                        columnSpacing: 0
-                        Repeater {
-                            model: ["Mo","Tu","We","Th","Fr","Sa","Su"]
-                            Mono {
-                                required property var modelData
-                                text: modelData
-                                color: root.dim
-                                font.pixelSize: 10
-                                Layout.fillWidth: true
-                                horizontalAlignment: Text.AlignHCenter
-                            }
-                        }
-                        Repeater {
-                            model: {
-                                const base = new Date();
-                                base.setDate(1);
-                                base.setMonth(base.getMonth() + dashboard.monthOff);
-                                const off = (base.getDay() + 6) % 7;
-                                const days = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
-                                const today = new Date();
-                                const isThisMonth = dashboard.monthOff === 0;
-                                const cells = [];
-                                for (let i = 0; i < off; i++) cells.push({ d: "", today: false });
-                                for (let d = 1; d <= days; d++)
-                                    cells.push({ d: String(d), today: isThisMonth && d === today.getDate() });
-                                return cells;
-                            }
-                            Rectangle {
-                                required property var modelData
-                                Layout.fillWidth: true
-                                height: 22
-                                radius: 11
-                                color: modelData.today ? root.accent : "transparent"
-                                Mono {
-                                    anchors.centerIn: parent
-                                    text: parent.modelData.d
-                                    font.pixelSize: 11
-                                    font.bold: parent.modelData.today
-                                    color: parent.modelData.today ? "#0b0b12"
-                                         : parent.modelData.d === "" ? "transparent" : root.fg
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
-
-                    // wallpaper picker — the library at ~/Pictures/Wallpapers
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Mono { text: "Wallpapers"; font.bold: true; color: root.accent }
-                        Item { Layout.fillWidth: true }
-                        Glyph {
-                            text: "󰒝"; font.pixelSize: 14
-                            visible: root.wallpapers.length > 1
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: Quickshell.execDetached(["vendi-ctl", "wallpaper", "random"])
-                            }
-                        }
-                    }
-                    ListView {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 56
-                        orientation: ListView.Horizontal
-                        spacing: 8
-                        clip: true
-                        visible: root.wallpapers.length > 0
-                        model: root.wallpapers
-                        delegate: Item {
-                            id: wpThumb
-                            required property var modelData
-                            width: 96
-                            height: 54
-                            ClippingRectangle {
-                                anchors.fill: parent
-                                radius: 9
-                                color: Qt.rgba(1, 1, 1, 0.05)
-                                Image {
-                                    anchors.fill: parent
-                                    source: "file://" + wpThumb.modelData
-                                    fillMode: Image.PreserveAspectCrop
-                                    sourceSize.width: 192
-                                    asynchronous: true
-                                }
-                            }
-                            Rectangle {
-                                anchors.fill: parent
-                                radius: 9
-                                color: "transparent"
-                                border.width: 2
-                                border.color: wpThumb.modelData === root.currentWall
-                                    ? root.accent : Qt.rgba(1, 1, 1, 0.10)
-                                Behavior on border.color { ColorAnimation { duration: 150 } }
-                            }
-                            TapHandler {
-                                onTapped: Quickshell.execDetached(
-                                    ["vendi-ctl", "wallpaper", wpThumb.modelData])
-                            }
-                            HoverHandler { cursorShape: Qt.PointingHandCursor }
-                        }
-                    }
-                    Mono {
-                        visible: root.wallpapers.length === 0
-                        text: "drop images in ~/Pictures/Wallpapers"
-                        color: root.dim
-                    }
-
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
-
-                    // media card — album art washes across the backdrop
-                    ClippingRectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 64
-                        radius: 12
-                        color: Qt.rgba(1, 1, 1, 0.04)
-                        Image {
-                            anchors.fill: parent
-                            source: root.player?.trackArtUrl ?? ""
-                            fillMode: Image.PreserveAspectCrop
-                            sourceSize.width: 480
-                            asynchronous: true
-                            opacity: 0.16
-                            visible: (root.player?.trackArtUrl ?? "") !== ""
-                        }
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.margins: 10
-                            spacing: 12
-                            ClippingRectangle {
-                                Layout.preferredWidth: 44
-                                Layout.preferredHeight: 44
-                                radius: 9
-                                color: Qt.rgba(1, 1, 1, 0.06)
-                                Image {
-                                    anchors.fill: parent
-                                    source: root.player?.trackArtUrl ?? ""
-                                    fillMode: Image.PreserveAspectCrop
-                                    sourceSize.width: 88
-                                    asynchronous: true
-                                    visible: (root.player?.trackArtUrl ?? "") !== ""
-                                }
-                                Glyph {
-                                    anchors.centerIn: parent
-                                    text: "󰝚"
-                                    font.pixelSize: 17
-                                    visible: (root.player?.trackArtUrl ?? "") === ""
-                                }
-                            }
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 4
-                                Mono {
-                                    text: root.musicTrack !== ""
-                                          ? (root.musicTrack.length > 34 ? root.musicTrack.slice(0, 34) + "…" : root.musicTrack)
-                                          : "nothing playing"
-                                    color: root.musicTrack !== "" ? root.fg : root.dim
-                                }
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    height: 3
-                                    radius: 1.5
-                                    color: Qt.rgba(1, 1, 1, 0.10)
-                                    visible: root.musicTrack !== ""
-                                    Rectangle {
-                                        width: parent.width * root.musicProgress
-                                        height: parent.height
-                                        radius: 1.5
-                                        color: root.accent
-                                        Behavior on width { NumberAnimation { duration: 500 } }
-                                    }
-                                }
-                            }
-                            Glyph {
-                                text: "󰒮"; font.pixelSize: 15
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.player?.previous() }
-                            }
-                            Glyph {
-                                text: root.musicPlaying ? "󰏤" : "󰐊"
-                                color: root.accent; font.pixelSize: 16
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.player?.togglePlaying() }
-                            }
-                            Glyph {
-                                text: "󰒭"; font.pixelSize: 15
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.player?.next() }
-                            }
-                        }
-                    }
-
-                    Item { Layout.fillHeight: true }
+                    active: panelWin.searchOpen
+                    mode: panelWin.searchMode
+                    accent: root.accent
+                    panel: root.panel
+                    fg: root.fg
+                    dim: root.dim
+                    mono: root.mono
+                    onRequestClose: panelWin.closeSearch()
                 }
             }
 
@@ -1521,6 +1415,14 @@ ShellRoot {
                             label: root.dnd ? "Silenced" : "DND"
                             active: root.dnd
                             run: () => root.dnd = !root.dnd
+                        }
+                        QuickAction {
+                            glyph: "󰹑"; label: "Shot"
+                            run: () => {
+                                panelWin.rightOpen = false;
+                                Quickshell.execDetached(["sh", "-c",
+                                    "sleep 0.3; grim -g \"$(slurp)\" - | wl-copy -t image/png"]);
+                            }
                         }
                         QuickAction {
                             glyph: "󰐥"; label: "Power"

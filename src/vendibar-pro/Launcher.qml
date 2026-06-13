@@ -1,5 +1,7 @@
-// vendi spotlight — the quickshell launcher (lives inside vendibar-pro, so
-// it opens instantly and shares the theme). Opens as a bare search bar.
+// vendi spotlight — search that lives *inside* the center notch. It isn't a
+// separate window: the notch itself morphs into the search box (shell.qml
+// grows the silhouette and drops this Item in), so opening search feels like
+// the dynamic island unfurling, not a popup landing on top of it.
 //
 //   plain text   fuzzy app search · google search row at the bottom
 //   2+2*8        inline calculator (Enter copies the result)
@@ -8,26 +10,27 @@
 //   w term       open-window switcher (Enter focuses, via vendi-ctl)
 //   >cmd         run a shell command
 //
-// Actions mode (super+alt+space) replaces the GTK vendi-menu on the pro
-// bar: the same nested system menu — capture, theme, wallpaper, settings,
-// connect, install, power — rendered in the spotlight card. Type to filter,
-// Backspace on empty input goes up a level.
+// Actions mode (super+alt+space) replaces the GTK vendi-menu on the pro bar:
+// the same nested system menu — capture, theme, wallpaper, settings, connect,
+// install, power. Type to filter, Backspace on empty input goes up a level.
 //
-// IPC: quickshell -c vendibar-pro ipc call launcher toggle | actions
+// shell.qml drives `active`/`mode`; we signal `requestClose()` back.
 
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
 import Quickshell.Widgets
 import QtQuick
 import QtQuick.Layouts
 
-PanelWindow {
+Item {
     id: win
 
-    property bool open: false
+    // Driven by shell.qml (bound to the notch's search state).
+    property bool active: false
     property string mode: "search"      // search | actions
     property var crumb: []              // actions drill-down stack
+    signal requestClose()
+
     // Theme handles, wired from shell.qml.
     property color accent: "#cba6f7"
     property color panel: "#0b0b12"
@@ -35,34 +38,22 @@ PanelWindow {
     property color dim: "#717189"
     property string mono: "JetBrainsMonoNL Nerd Font"
 
-    function toggle() {
-        if (open && mode === "actions") { mode = "search"; query.text = ""; return; }
-        open = !open;
-        if (open) {
-            mode = "search";
-            crumb = [];
-            query.text = "";
-            list.currentIndex = 0;
-            winRefresh.running = true;
-        }
-    }
-    function actions() {
-        if (open && mode === "actions") { open = false; return; }
-        open = true;
-        mode = "actions";
+    // How tall the notch should grow to fit the query row + results. shell.qml
+    // reads this to size the center notch while search is open.
+    readonly property int wantHeight:
+        58 + (results.length > 0 ? Math.min(list.contentHeight, 360) + 10 : 0)
+
+    // Reset + grab the keyboard whenever search (re)opens or flips mode.
+    function refocus() {
         crumb = [];
         query.text = "";
         list.currentIndex = 0;
-        wpRefresh.running = true;
+        winRefresh.running = true;
+        if (mode === "actions") wpRefresh.running = true;
+        Qt.callLater(() => query.forceActiveFocus());
     }
-
-    visible: open
-    color: "transparent"
-    anchors { top: true; bottom: true; left: true; right: true }
-    WlrLayershell.namespace: "vendi-spotlight"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: open ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
-    exclusionMode: ExclusionMode.Ignore
+    onActiveChanged: if (active) refocus()
+    onModeChanged: if (active) refocus()
 
     // ── result providers ─────────────────────────────────────────────────────
 
@@ -289,42 +280,25 @@ PanelWindow {
         const r = results[list.currentIndex];
         if (!r) return;
         r.act();
-        if (!r.stay) win.open = false;
+        if (!r.stay) win.requestClose();
     }
 
-    // ── UI ───────────────────────────────────────────────────────────────────
+    // ── UI — fills the morphed notch; the silhouette is the chrome ────────────
 
-    MouseArea {
+    ColumnLayout {
         anchors.fill: parent
-        onClicked: win.open = false
-    }
-
-    Rectangle {
-        id: card
-        anchors.horizontalCenter: parent.horizontalCenter
-        y: parent.height * 0.22
-        width: 560
-        height: queryRow.height + (list.count > 0 ? list.height + 16 : 0) + 12
-        radius: 18
-        color: win.panel
-        border.width: 1
-        border.color: Qt.rgba(win.accent.r, win.accent.g, win.accent.b, 0.25)
-
-        opacity: win.open ? 1 : 0
-        scale: win.open ? 1 : 0.96
-        Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
-        Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack; easing.overshoot: 1.2 } }
-        Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
-
-        MouseArea { anchors.fill: parent }  // swallow clicks inside the card
+        anchors.leftMargin: 18
+        anchors.rightMargin: 18
+        anchors.topMargin: 8
+        anchors.bottomMargin: 10
+        spacing: 6
 
         RowLayout {
             id: queryRow
-            width: parent.width
-            height: 54
+            Layout.fillWidth: true
+            Layout.preferredHeight: 42
             spacing: 10
             Text {
-                Layout.leftMargin: 18
                 text: win.mode === "actions"
                     ? (win.crumb.length ? "\u{f0141}" : "\u{f0493}")
                     : "\u{f0349}"
@@ -339,11 +313,11 @@ PanelWindow {
             TextInput {
                 id: query
                 Layout.fillWidth: true
-                Layout.rightMargin: 18
                 focus: true
                 color: win.fg
                 font.family: win.mono
                 font.pixelSize: 16
+                verticalAlignment: TextInput.AlignVCenter
                 clip: true
                 onTextChanged: {
                     list.currentIndex = 0;
@@ -351,7 +325,7 @@ PanelWindow {
                 }
                 Keys.onPressed: event => {
                     if (event.key === Qt.Key_Escape) {
-                        win.open = false;
+                        win.requestClose();
                         event.accepted = true;
                     } else if ((event.key === Qt.Key_Backspace || event.key === Qt.Key_Left)
                                && text === "" && win.mode === "actions" && win.crumb.length > 0) {
@@ -379,9 +353,9 @@ PanelWindow {
         }
 
         Rectangle {
-            anchors.top: queryRow.bottom
-            width: parent.width - 28
-            anchors.horizontalCenter: parent.horizontalCenter
+            Layout.fillWidth: true
+            Layout.leftMargin: -6
+            Layout.rightMargin: -6
             height: 1
             color: Qt.rgba(1, 1, 1, 0.07)
             visible: list.count > 0
@@ -389,12 +363,9 @@ PanelWindow {
 
         ListView {
             id: list
-            anchors.top: queryRow.bottom
-            anchors.topMargin: 8
-            anchors.horizontalCenter: parent.horizontalCenter
-            width: parent.width - 16
-            height: Math.min(contentHeight, 440)
-            interactive: contentHeight > 440
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.topMargin: 2
             clip: true
             model: win.results
             delegate: Rectangle {

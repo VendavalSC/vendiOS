@@ -232,6 +232,127 @@ fn save_screenshot(
     Ok(())
 }
 
+/// Service every pending `wlr-screencopy` request that targets `output`:
+/// re-render the scene into an offscreen, read back the requested region, and
+/// blit it into the client's shm buffer. Drains the matching entries.
+fn fulfill_screencopy(
+    renderer: &mut GlesRenderer,
+    elements: &[FrameElement],
+    after_cursor: usize,
+    bg: Color32F,
+    out_size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    scale: smithay::utils::Scale<f64>,
+    output: &smithay::output::Output,
+    pending: &mut Vec<crate::screencopy::PendingScreencopy>,
+) {
+    use smithay::reexports::wayland_server::Resource as _;
+    let mut i = 0;
+    while i < pending.len() {
+        if pending[i].output.name() != output.name() {
+            i += 1;
+            continue;
+        }
+        let p = pending.remove(i);
+        if !p.frame.is_alive() {
+            continue;
+        }
+        match copy_screencopy_frame(renderer, elements, after_cursor, bg, out_size, scale, &p) {
+            Ok(()) => tracing::debug!("screencopy frame served"),
+            Err(e) => {
+                tracing::warn!(?e, "screencopy frame failed");
+                p.frame.failed();
+            }
+        }
+    }
+}
+
+fn copy_screencopy_frame(
+    renderer: &mut GlesRenderer,
+    elements: &[FrameElement],
+    after_cursor: usize,
+    bg: Color32F,
+    out_size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    scale: smithay::utils::Scale<f64>,
+    p: &crate::screencopy::PendingScreencopy,
+) -> anyhow::Result<()> {
+    use smithay::backend::renderer::{Bind, ExportMem, Frame, Offscreen, Renderer as _};
+    use smithay::backend::renderer::element::Element as _;
+    use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::Flags;
+
+    // Cursor is the front of the element stack; including it = draw from 0.
+    let skip = if p.overlay_cursor { 0 } else { after_cursor };
+
+    // Clamp the requested region to the output we actually have.
+    let rx = p.region.loc.x.clamp(0, out_size.w);
+    let ry = p.region.loc.y.clamp(0, out_size.h);
+    let rw = p.region.size.w.min(out_size.w - rx);
+    let rh = p.region.size.h.min(out_size.h - ry);
+    if rw <= 0 || rh <= 0 {
+        anyhow::bail!("empty capture region");
+    }
+
+    let size_phys = smithay::utils::Size::<i32, smithay::utils::Physical>::from((out_size.w, out_size.h));
+    let full = smithay::utils::Rectangle::from_size(size_phys);
+    let mut tex: smithay::backend::renderer::gles::GlesTexture = renderer
+        .create_buffer(smithay::backend::allocator::Fourcc::Abgr8888, (out_size.w, out_size.h).into())
+        .map_err(|e| anyhow::anyhow!("create_buffer: {e:?}"))?;
+    {
+        let mut fb = renderer.bind(&mut tex).map_err(|e| anyhow::anyhow!("bind: {e:?}"))?;
+        let mut frame = renderer.render(&mut fb, size_phys, Transform::Normal)
+            .map_err(|e| anyhow::anyhow!("render: {e:?}"))?;
+        frame.clear(bg, &[full]).map_err(|e| anyhow::anyhow!("clear: {e:?}"))?;
+        for elem in elements[skip..].iter().rev() {
+            let src = elem.src();
+            let dst = elem.geometry(scale);
+            let _ = RenderElement::<GlesRenderer>::draw(elem, &mut frame, src, dst, &[full], &[], None);
+        }
+        let _ = frame.finish().map_err(|e| anyhow::anyhow!("finish: {e:?}"))?;
+    }
+
+    // Read back only the requested region.
+    let region = smithay::utils::Rectangle::<i32, smithay::utils::Buffer>::new(
+        (rx, ry).into(), (rw, rh).into());
+    let mapping = renderer.copy_texture(&tex, region, smithay::backend::allocator::Fourcc::Abgr8888)
+        .map_err(|e| anyhow::anyhow!("copy_texture: {e:?}"))?;
+    let pixels = renderer.map_texture(&mapping)
+        .map_err(|e| anyhow::anyhow!("map_texture: {e:?}"))?
+        .to_vec();
+
+    // Blit into the client's shm buffer, honouring its stride.
+    let src_stride = rw as usize * 4;
+    smithay::wayland::shm::with_buffer_contents_mut(&p.buffer, |ptr, len, bdata| {
+        let bstride = bdata.stride as usize;
+        let rows = (bdata.height as usize).min(rh as usize);
+        let cols = (bdata.width as usize).min(rw as usize) * 4;
+        let off = bdata.offset as usize;
+        for y in 0..rows {
+            let dst_off = off + y * bstride;
+            if dst_off + cols > len {
+                break;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    pixels.as_ptr().add(y * src_stride),
+                    ptr.add(dst_off),
+                    cols,
+                );
+            }
+        }
+    }).map_err(|e| anyhow::anyhow!("shm buffer access: {e:?}"))?;
+
+    // The read-back is already top-row-first, so no y-invert.
+    p.frame.flags(Flags::empty());
+    if p.with_damage {
+        p.frame.damage(0, 0, rw as u32, rh as u32);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    p.frame.ready((secs >> 32) as u32, (secs & 0xFFFF_FFFF) as u32, now.subsec_nanos());
+    Ok(())
+}
+
 /// Concrete `DrmCompositor` parameterisation we use. `U=()` means we hand a
 /// unit value to `queue_frame` (no per-frame presentation feedback userdata).
 type GbmDrmCompositor = DrmCompositor<
@@ -305,6 +426,8 @@ pub fn run() -> Result<()> {
     // 6. Build the wayland State with the renderer's SHM formats. wl_drm
     //    binding for Mesa EGL clients happens next.
     let state = build_state(&display_handle, shm_formats)?;
+    // wlr-screencopy — lets wf-recorder/grim/OBS/portals capture the screen.
+    crate::screencopy::init(&display_handle);
     let mut app = UdevApp { state, udev, display_handle: display_handle.clone() };
 
     // 7. Try to bring up the first connected connector. If this fails we
@@ -548,6 +671,7 @@ fn build_state(
         overview:               false,
         overview_t:             std::time::Instant::now(),
         screenshot:             None,
+        pending_screencopy:     Vec::new(),
         wallpaper_gen:          0,
         vlock: false,
         vlock_input: String::new(),
@@ -2007,6 +2131,19 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             Ok(())  => tracing::info!(%path, "screenshot saved"),
             Err(e) => tracing::warn!(?e, %path, "screenshot failed"),
         }
+    }
+
+    // ── wlr-screencopy (wf-recorder / grim / OBS / portals) ──────────────────
+    // Same offscreen render + read-back as the screenshot path, but the bytes
+    // go into each client's shm buffer instead of a PNG.
+    if !state.pending_screencopy.is_empty() {
+        let out_size = state.space.output_geometry(&surface.output)
+            .map(|g| g.size)
+            .unwrap_or_else(|| (1, 1).into());
+        let bg = Color32F::new(theme.background[0], theme.background[1], theme.background[2], 1.0);
+        let output = surface.output.clone();
+        fulfill_screencopy(renderer, &elements, after_cursor, bg, out_size, scale,
+                           &output, &mut state.pending_screencopy);
     }
 
     // Keep the loop hot while animations are in flight.

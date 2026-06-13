@@ -2,15 +2,17 @@
 # vendi-launcher — launcher dispatch.
 #   vendi-launcher           spotlight search (super+space)
 #   vendi-launcher actions   nested system menu (super+alt+space)
-# Pro bar: the quickshell spotlight inside vendibar-pro (instant toggle).
+#   vendi-launcher dash      dashboard (super+d, pro bar)
+# Pro bar: the quickshell spotlight/dashboard inside vendibar-pro (instant).
 # Classic bar (or no quickshell): the GTK vendi-menu.
 mode=${1:-}
 choice=$(cat "$HOME/.config/vendi/bar" 2>/dev/null || echo classic)
 if [[ "$choice" == "pro" ]] && command -v quickshell >/dev/null && pgrep -x quickshell >/dev/null; then
-    if [[ "$mode" == "actions" ]]; then
-        exec quickshell -c vendibar-pro ipc call launcher actions
-    fi
-    exec quickshell -c vendibar-pro ipc call launcher toggle
+    case "$mode" in
+        actions) exec quickshell -c vendibar-pro ipc call launcher actions ;;
+        dash)    exec quickshell -c vendibar-pro ipc call dash toggle ;;
+        *)       exec quickshell -c vendibar-pro ipc call launcher toggle ;;
+    esac
 fi
 if [[ "$mode" == "actions" ]]; then
     exec vendi-menu actions

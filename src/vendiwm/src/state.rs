@@ -116,6 +116,9 @@ pub struct State {
     // One-shot screenshot request from IPC: render the next frame to this
     // PNG path (the backend services and clears it).
     pub screenshot:            Option<String>,
+    // wlr-screencopy capture requests awaiting their output's next render
+    // (wf-recorder, grim, OBS, screen-share portals). Drained by the backend.
+    pub pending_screencopy:    Vec<crate::screencopy::PendingScreencopy>,
     // Bumped whenever theme.wallpaper changes at runtime (IPC). Each output
     // surface keeps its own copy and rebuilds its buffer when it lags.
     pub wallpaper_gen:         u64,
@@ -335,6 +338,23 @@ impl CompositorHandler for State {
                 // Launchers set keyboard_interactivity before mapping — grab
                 // or release keyboard focus as layer surfaces come and go.
                 self.update_keyboard_focus();
+            }
+            // keyboard_interactivity can also flip on an already-mapped
+            // surface (the bar takes the keyboard while its dashboard is
+            // expanded, then gives it back) — chase the change without
+            // waiting for a zone change. Layer clients commit every frame,
+            // so only act when the desired focus actually differs.
+            if !self.is_locked() {
+                let desired = self.exclusive_layer_surface().or_else(|| {
+                    self.focused_window()
+                        .filter(|w| w.alive())
+                        .and_then(|w| w.wl_surface().map(|s| s.into_owned()))
+                });
+                if let Some(kb) = self.seat.get_keyboard() {
+                    if kb.current_focus() != desired {
+                        self.update_keyboard_focus();
+                    }
+                }
             }
         }
 
