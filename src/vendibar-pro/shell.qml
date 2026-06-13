@@ -248,6 +248,39 @@ ShellRoot {
         Quickshell.execDetached(["brightnessctl", "set", v + "%"]);
     }
 
+    // ── keyboard backlight (leds class, *kbd_backlight*) ──────────────────────
+    // Often only a handful of steps (0..max), so we drive it by raw level and
+    // present it as a percentage of max. Empty kbdDev → no device → slider hides.
+    property string kbdDev: ""
+    property int kbdMax: 0
+    property int kbdLevel: 0
+    property bool hasKbdBacklight: kbdDev !== "" && kbdMax > 0
+    property int kbdPct: kbdMax > 0 ? Math.round(100 * kbdLevel / kbdMax) : 0
+    Process {
+        id: kbdGet
+        command: ["sh", "-c",
+            "d=$(ls /sys/class/leds 2>/dev/null | grep -i kbd_backlight | head -1); " +
+            "[ -z \"$d\" ] && exit 0; " +
+            "echo \"$d\"; cat /sys/class/leds/$d/brightness; cat /sys/class/leds/$d/max_brightness"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const l = text.trim().split("\n");
+                if (l.length >= 3) {
+                    root.kbdDev = l[0];
+                    root.kbdLevel = parseInt(l[1]) || 0;
+                    root.kbdMax = parseInt(l[2]) || 0;
+                }
+            }
+        }
+    }
+    function setKbdBacklight(pct) {
+        if (!hasKbdBacklight) return;
+        const lvl = Math.round(Math.max(0, Math.min(1, pct / 100)) * kbdMax);
+        root.kbdLevel = lvl;            // optimistic
+        Quickshell.execDetached(["brightnessctl", "-d", kbdDev, "set", String(lvl)]);
+    }
+
     // volume OSD: external changes bulge the right notch for a moment.
     // Armed late so the initial pipewire binding doesn't flash it at startup.
     property bool osdShow: false
@@ -1324,7 +1357,7 @@ ShellRoot {
                         Mono { text: (root.volume < 0 ? "—" : root.volume + "%"); Layout.preferredWidth: 38 }
                     }
 
-                    // brightness slider — only when there's a backlight device
+                    // screen brightness slider — only when there's a backlight device
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 10
@@ -1358,40 +1391,38 @@ ShellRoot {
                         Mono { text: root.brightness + "%"; Layout.preferredWidth: 38 }
                     }
 
-                    // cpu / mem bars
-                    ColumnLayout {
+                    // keyboard backlight slider — only when a *kbd_backlight led exists
+                    RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
-                        RowLayout {
-                            Layout.fillWidth: true; spacing: 10
-                            Glyph { text: "󰻠" }
+                        spacing: 10
+                        visible: root.hasKbdBacklight
+                        Glyph { text: "󰌌"; color: root.fg }
+                        Rectangle {
+                            id: kbdTrack
+                            Layout.fillWidth: true
+                            height: 8
+                            radius: 4
+                            color: Qt.rgba(1, 1, 1, 0.10)
                             Rectangle {
-                                Layout.fillWidth: true; height: 8; radius: 4
-                                color: Qt.rgba(1, 1, 1, 0.10)
-                                Rectangle {
-                                    width: parent.width * root.cpu / 100
-                                    height: parent.height; radius: 4
-                                    color: root.cpu > 85 ? root.alert : root.accent
-                                    Behavior on width { NumberAnimation { duration: 300 } }
-                                }
+                                width: Math.max(8, parent.width * Math.max(0, root.kbdPct) / 100)
+                                height: parent.height
+                                radius: 4
+                                color: root.accent
+                                Behavior on width { NumberAnimation { duration: 80 } }
                             }
-                            Mono { text: Math.round(root.cpu) + "%"; Layout.preferredWidth: 38 }
-                        }
-                        RowLayout {
-                            Layout.fillWidth: true; spacing: 10
-                            Glyph { text: "󰍛" }
-                            Rectangle {
-                                Layout.fillWidth: true; height: 8; radius: 4
-                                color: Qt.rgba(1, 1, 1, 0.10)
-                                Rectangle {
-                                    width: parent.width * root.mem / 100
-                                    height: parent.height; radius: 4
-                                    color: root.mem > 85 ? root.alert : root.accent
-                                    Behavior on width { NumberAnimation { duration: 300 } }
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                function setKbd(mx) {
+                                    root.setKbdBacklight(
+                                        Math.max(0, Math.min(1, mx / kbdTrack.width)) * 100);
                                 }
+                                onPressed: m => setKbd(m.x - 6)
+                                onPositionChanged: m => { if (pressed) setKbd(m.x - 6) }
                             }
-                            Mono { text: Math.round(root.mem) + "%"; Layout.preferredWidth: 38 }
                         }
+                        Mono { text: root.kbdPct + "%"; Layout.preferredWidth: 38 }
                     }
 
                     // notification history
