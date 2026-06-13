@@ -26,6 +26,7 @@ binds {
     // shipped before the alacritty package was added.
     bind "super+return"        "spawn sh -c 'alacritty || foot'"
     bind "super+b"             "spawn firefox"
+    bind "super+e"             "spawn nautilus"
     // Launchers: the dispatcher picks the right one for the bar in use
     // (quickshell spotlight/dashboard on pro, vendi-menu on classic).
     bind "super+d"             "spawn vendi-launcher dash"

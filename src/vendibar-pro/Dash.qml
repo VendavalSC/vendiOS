@@ -1509,6 +1509,7 @@ Item {
                                 { k: "Super + Alt + Space",    a: "Config" },
                                 { k: "Super + D",              a: "Dashboard" },
                                 { k: "Super + B",              a: "Browser" },
+                                { k: "Super + E",              a: "Files" },
                                 { k: "Super + Q",              a: "Close window" },
                                 { k: "Super + F",              a: "Fullscreen" },
                                 { k: "Super + H / V",          a: "Split direction" },

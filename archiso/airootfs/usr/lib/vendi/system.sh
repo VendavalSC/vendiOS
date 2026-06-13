@@ -23,6 +23,10 @@ BASE_PKGS=(
     gtk3 gtk4 gtk4-layer-shell
     # default browser
     firefox
+    # default apps — a matched GTK4 set so every common file type opens in
+    # something that looks like it belongs (files / images / PDF / text /
+    # archives / media). Associations wired in /etc/xdg/mimeapps.list.
+    nautilus loupe papers gnome-text-editor file-roller mpv
     # silent boot + LUKS + invisible login manager
     plymouth cryptsetup greetd
     # vendiwm runtime deps (most overlap with hyprland; explicit for safety)
@@ -375,6 +379,11 @@ EOF
         [[ -f /usr/share/vendios/$art ]] && \
             cp "/usr/share/vendios/$art" /mnt/usr/share/vendios/
     done
+    # Default app associations (files/images/PDF/text/archives/media/web) so
+    # double-clicking or `xdg-open` always lands in the matched GTK4 app.
+    if [[ -f /etc/xdg/mimeapps.list ]]; then
+        install -Dm644 /etc/xdg/mimeapps.list /mnt/etc/xdg/mimeapps.list
+    fi
 }
 
 sys_install_vendi_cli() {
