@@ -109,7 +109,7 @@ pub fn run() -> Result<()> {
     let config = crate::config::Config::load()
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "config load failed; using empty keybinds");
-            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default() }
+            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0 }
         });
 
     let mut state = State {
@@ -146,6 +146,8 @@ pub fn run() -> Result<()> {
         vlock_input: String::new(),
         vlock_fail: None,
         last_zone: None,
+        last_activity: std::time::Instant::now(),
+        auto_lock_fired: false,
         open_anims: Vec::new(),
         ws_anim: None,
         geo_anims: Vec::new(),

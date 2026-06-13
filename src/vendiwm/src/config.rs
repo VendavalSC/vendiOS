@@ -95,6 +95,12 @@ binds {
     bind "XF86MonBrightnessUp"   "spawn brightnessctl set 5%+"
     bind "XF86MonBrightnessDown" "spawn brightnessctl set 5%-"
 }
+
+// Lock the session after this many seconds with no keyboard / pointer /
+// touch input (0 disables). Any activity resets the timer.
+idle {
+    lock-after 600
+}
 "#;
 
 // ── KDL schema ────────────────────────────────────────────────────────────────
@@ -105,6 +111,16 @@ pub struct Document {
     pub binds: Option<BindsBlock>,
     #[knus(child)]
     pub theme: Option<ThemeBlock>,
+    #[knus(child)]
+    pub idle: Option<IdleBlock>,
+}
+
+#[derive(knus::Decode, Debug)]
+pub struct IdleBlock {
+    /// Seconds of inactivity before the session auto-locks (0 = never).
+    /// knus kebab-cases the field, so this is the `lock-after` node.
+    #[knus(child, unwrap(argument))]
+    pub lock_after: Option<i64>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -201,6 +217,8 @@ pub struct Config {
     /// Served over IPC (`list-binds`) for the Super+K keybinds menu.
     pub keybinds_pretty: Vec<(String, String)>,
     pub theme:    Theme,
+    /// Auto-lock after N seconds idle (0 = disabled).
+    pub idle_lock_secs: u64,
 }
 
 impl Config {
@@ -228,6 +246,9 @@ impl Config {
             .and_then(|d| d.binds.take())
             .map(|b| b.entries)
             .unwrap_or_default();
+        // Pull the idle blocks out now, before user_doc is consumed below.
+        let default_idle = default_doc.idle;
+        let user_idle = user_doc.as_mut().and_then(|d| d.idle.take());
         for entry in default_binds.into_iter().chain(user_binds) {
             let chord = parse_chord(&entry.chord)
                 .with_context(|| format!("parse chord {:?}", entry.chord))?;
@@ -265,7 +286,12 @@ impl Config {
             theme.wallpaper = Some(p);
         }
 
-        Ok(Self { keybinds, keybinds_pretty, theme })
+        // Idle auto-lock: built-in default, then any user override.
+        let mut idle_lock_secs: u64 = 600;
+        if let Some(v) = default_idle.and_then(|b| b.lock_after) { idle_lock_secs = v.max(0) as u64; }
+        if let Some(v) = user_idle.and_then(|b| b.lock_after)    { idle_lock_secs = v.max(0) as u64; }
+
+        Ok(Self { keybinds, keybinds_pretty, theme, idle_lock_secs })
     }
 }
 

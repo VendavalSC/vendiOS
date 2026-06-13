@@ -136,6 +136,12 @@ pub struct State {
     // trigger a configure storm to every toplevel.
     pub last_zone:             Option<Rectangle<i32, Logical>>,
 
+    // Idle auto-lock: every input event stamps `last_activity`; a periodic
+    // timer locks the session once it exceeds config.idle_lock_secs.
+    // `auto_lock_fired` keeps that to one lock per idle stretch.
+    pub last_activity:         std::time::Instant,
+    pub auto_lock_fired:       bool,
+
     // Window-open animations. The Instant is None until the window's first
     // frame actually renders — starting the clock at new_toplevel would burn
     // most of the animation during the configure round-trip, so windows

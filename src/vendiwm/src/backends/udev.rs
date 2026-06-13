@@ -541,6 +541,32 @@ pub fn run() -> Result<()> {
         },
     ).map_err(|e| anyhow::anyhow!("insert display source: {e:?}"))?;
 
+    // Idle auto-lock: poll every few seconds; once input has been quiet for
+    // longer than config.idle_lock_secs, fire `vendi-ctl lock` exactly once
+    // (auto_lock_fired clears on the next input). 0 disables.
+    {
+        use smithay::reexports::calloop::timer::{Timer, TimeoutAction};
+        const TICK: Duration = Duration::from_secs(5);
+        loop_handle.insert_source(Timer::from_duration(TICK), |_, _, app: &mut UdevApp| {
+            let secs = app.state.config.idle_lock_secs;
+            if secs > 0
+                && !app.state.auto_lock_fired
+                && !app.state.is_locked()
+                && !app.state.vlock
+                && app.state.last_activity.elapsed().as_secs() >= secs
+            {
+                app.state.auto_lock_fired = true;
+                tracing::info!(idle_secs = secs, "idle auto-lock");
+                if let Err(e) = std::process::Command::new("sh")
+                    .arg("-c").arg("vendi-ctl lock").spawn()
+                {
+                    tracing::warn!(?e, "auto-lock spawn failed");
+                }
+            }
+            TimeoutAction::ToDuration(TICK)
+        }).map_err(|e| anyhow::anyhow!("insert idle timer: {e:?}"))?;
+    }
+
     // 10. Kick off the first frames so VBlank-driven rendering can begin.
     for crtc in first_crtcs {
         loop_handle.insert_idle(move |app| {
@@ -640,7 +666,7 @@ fn build_state(
 
     let config = crate::config::Config::load().unwrap_or_else(|e| {
         tracing::warn!(?e, "config load failed; using empty keybinds");
-        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default() }
+        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0 }
     });
 
     Ok(State {
@@ -677,6 +703,8 @@ fn build_state(
         vlock_input: String::new(),
         vlock_fail: None,
         last_zone:              None,
+        last_activity:          std::time::Instant::now(),
+        auto_lock_fired:        false,
         open_anims:             Vec::new(),
         ws_anim:                None,
         geo_anims:              Vec::new(),
@@ -2215,6 +2243,11 @@ fn send_frames_surface_tree(
 
 fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp) {
     let state = &mut app.state;
+    // Any real input resets the idle clock (device add/remove isn't activity).
+    if !matches!(event, InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }) {
+        state.last_activity = std::time::Instant::now();
+        state.auto_lock_fired = false;
+    }
     match event {
         InputEvent::DeviceAdded { mut device } => {
             // Touchpad defaults (anything with tap support): tap-to-click,
