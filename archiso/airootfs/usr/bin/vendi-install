@@ -678,6 +678,11 @@ step_install() {
     limine_install "$CFG_DISK" "$FIRMWARE" "$partuuid" "$CFG_FS" "$LUKS_UUID" >>"$INSTALL_LOG" 2>&1
     _ok 12 "Limine installed"
 
+    # ── 18. graphics drivers (AMD / Intel / NVIDIA auto-detect) ──
+    _status 96 "Installing graphics drivers"
+    _log "gpu detect + drivers"
+    sys_graphics >>"$INSTALL_LOG" 2>&1 || _log "graphics setup had warnings (see log)"
+
     # ── 16. done ──────────────────────────────────────────────
     _status 99 "Finalizing"
     # Persist install log onto the FAT32 boot partition so it survives reboot

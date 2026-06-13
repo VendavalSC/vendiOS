@@ -29,8 +29,10 @@ BASE_PKGS=(
     nautilus loupe papers gnome-text-editor file-roller mpv
     # silent boot + LUKS + invisible login manager
     plymouth cryptsetup greetd
-    # vendiwm runtime deps (most overlap with hyprland; explicit for safety)
-    seatd libinput libxkbcommon mesa
+    # vendiwm runtime deps (most overlap with hyprland; explicit for safety).
+    # mesa = GL for AMD/Intel (the GBM path vendiwm renders through); the
+    # vulkan loader + per-vendor drivers are added by sys_graphics at install.
+    seatd libinput libxkbcommon mesa vulkan-icd-loader pciutils
     # automated snapshots + recovery
     snapper snap-pac
     # CLI toolkit (improves the bare shell experience)
@@ -320,6 +322,56 @@ EOF
         grep -q 'pam_fprintd.so' "$f" && continue
         sed -i '1i auth      sufficient  pam_fprintd.so' "$f"
     done
+}
+
+# Detect the GPU(s) and install the matching drivers. AMD + Intel render
+# through Mesa's GBM/GLES path that vendiwm already uses, so they just need
+# their Vulkan/VA-API drivers. NVIDIA additionally needs the proprietary
+# module, early-KMS (modules in the initramfs) and nvidia_drm.modeset=1 so the
+# GPU drives both the console/Plymouth and the Wayland GBM surface vendiwm
+# scans out on. Runs after limine.conf + mkinitcpio.conf already exist.
+sys_graphics() {
+    command -v lspci >/dev/null || return 0
+    local gpus; gpus=$(lspci -nn 2>/dev/null | grep -iE 'vga|3d controller|display controller')
+    local pkgs=() nvidia=0
+
+    # mesa (in BASE_PKGS) already ships the VA-API + VDPAU drivers, so AMD/Intel
+    # only need their Vulkan ICD (+ Intel's media driver for hw video decode).
+    if grep -qiE 'amd|ati|radeon' <<<"$gpus"; then
+        pkgs+=(vulkan-radeon)
+    fi
+    if grep -qiE 'intel' <<<"$gpus"; then
+        pkgs+=(vulkan-intel intel-media-driver)
+    fi
+    if grep -qiE 'nvidia' <<<"$gpus"; then
+        nvidia=1
+        # nvidia-open-dkms: the open kernel modules (now the only packaged
+        # NVIDIA driver in Arch), built via dkms against the stock `linux`
+        # kernel. Supports Turing (GTX 16xx / RTX 20xx) and newer; older cards
+        # need a legacy AUR driver. egl-wayland for the EGLStream fallback.
+        pkgs+=(nvidia-open-dkms nvidia-utils libva-nvidia-driver egl-wayland)
+    fi
+
+    if [[ ${#pkgs[@]} -gt 0 ]]; then
+        chroot_run pacman -S --noconfirm --needed "${pkgs[@]}" || true
+    fi
+
+    if [[ $nvidia -eq 1 ]]; then
+        # early-KMS modules in the initramfs
+        local mc=/mnt/etc/mkinitcpio.conf
+        if ! grep -q 'nvidia_drm' "$mc"; then
+            if grep -qE '^MODULES=\(\)' "$mc"; then
+                sed -i 's/^MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' "$mc"
+            else
+                sed -i 's/^MODULES=(/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm /' "$mc"
+            fi
+        fi
+        # kernel param so DRM modesetting is on from boot
+        grep -q 'nvidia_drm.modeset' /mnt/boot/limine.conf 2>/dev/null || \
+            sed -i 's|\(^[[:space:]]*cmdline:.*\)|\1 nvidia_drm.modeset=1|' /mnt/boot/limine.conf
+        # rebuild the initramfs against the kernel modules + sync to FAT32 boot
+        chroot_run mkinitcpio -P || true
+    fi
 }
 
 sys_root_password() {
