@@ -223,6 +223,31 @@ ShellRoot {
         sinkAudio.volume = Math.max(0, Math.min(1, pct / 100));
     }
 
+    // ── backlight (brightnessctl) ────────────────────────────────────────────
+    // brightnessctl -m → "name,class,current,percent,max" (percent has a % sign).
+    // -1 means no backlight device (desktop / VM) — the slider hides itself.
+    property int brightness: -1
+    property bool hasBacklight: brightness >= 0
+    Process {
+        id: brightnessGet
+        command: ["brightnessctl", "-m", "-c", "backlight"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const f = text.trim().split(",");
+                if (f.length >= 4) {
+                    const pct = parseInt(f[3]);
+                    if (!isNaN(pct)) root.brightness = pct;
+                }
+            }
+        }
+    }
+    function setBrightness(pct) {
+        const v = Math.max(1, Math.min(100, Math.round(pct)));
+        root.brightness = v;            // optimistic — slider tracks the drag
+        Quickshell.execDetached(["brightnessctl", "set", v + "%"]);
+    }
+
     // volume OSD: external changes bulge the right notch for a moment.
     // Armed late so the initial pipewire binding doesn't flash it at startup.
     property bool osdShow: false

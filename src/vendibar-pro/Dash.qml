@@ -794,6 +794,43 @@ Item {
                                     Layout.preferredWidth: 30
                                 }
                             }
+                            // brightness slider — only when there's a backlight
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                visible: dash.bar?.hasBacklight ?? false
+                                Glyph { text: "󰃟" }
+                                Rectangle {
+                                    id: homeBri
+                                    Layout.fillWidth: true
+                                    height: 7
+                                    radius: 3.5
+                                    color: Qt.rgba(1, 1, 1, 0.10)
+                                    Rectangle {
+                                        width: Math.max(7, parent.width * Math.max(0, dash.bar?.brightness ?? 0) / 100)
+                                        height: parent.height
+                                        radius: 3.5
+                                        color: dash.accent
+                                        Behavior on width { NumberAnimation { duration: 80 } }
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        anchors.margins: -6
+                                        cursorShape: Qt.PointingHandCursor
+                                        function setBri(mx) {
+                                            if (dash.bar) dash.bar.setBrightness(
+                                                Math.max(0, Math.min(1, mx / homeBri.width)) * 100);
+                                        }
+                                        onPressed: m => setBri(m.x - 6)
+                                        onPositionChanged: m => { if (pressed) setBri(m.x - 6) }
+                                    }
+                                }
+                                Mono {
+                                    text: (dash.bar?.brightness ?? 0) + "%"
+                                    font.pixelSize: 10
+                                    Layout.preferredWidth: 30
+                                }
+                            }
                         }
                     }
                 }
