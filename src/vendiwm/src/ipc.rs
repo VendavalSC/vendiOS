@@ -71,7 +71,7 @@ impl From<SplitDir> for Direction {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum EventKind { Window, Workspace }
+pub enum EventKind { Window, Workspace, Overview }
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -128,6 +128,8 @@ pub enum Event {
     WindowFocused     { id: u32, title: String },
     WindowTitle       { id: u32, title: String, focused: bool },
     WorkspacesChanged { active: u32, workspaces: Vec<WorkspaceInfo> },
+    /// Overview (exposé) opened/closed — drives the bar's overview chrome.
+    Overview          { active: bool },
 }
 
 // ── server ────────────────────────────────────────────────────────────────────
@@ -226,6 +228,7 @@ impl Server {
                         | Event::WindowFocused { .. }
                         | Event::WindowTitle { .. } => EventKind::Window,
                         Event::WorkspacesChanged { .. } => EventKind::Workspace,
+                        Event::Overview { .. } => EventKind::Overview,
                     };
                     if !subs.contains(&kind) { continue; }
                     let mut bytes = serde_json::to_vec(ev).unwrap_or_default();

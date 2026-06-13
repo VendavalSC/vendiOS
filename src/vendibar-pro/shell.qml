@@ -136,6 +136,7 @@ ShellRoot {
     property int activeWs: 1
     property var wsList: [{ id: 1, windows: 0 }]
     property string title: ""
+    property bool overviewActive: false   // exposé is open (drives Overview chrome)
 
     function applyWorkspaces(active, list) {
         activeWs = active;
@@ -144,7 +145,7 @@ ShellRoot {
 
     Process {
         id: wmSub
-        command: ["vendi-ctl", "subscribe", "workspace", "window"]
+        command: ["vendi-ctl", "subscribe", "workspace", "window", "overview"]
         running: true
         stdout: SplitParser {
             onRead: data => {
@@ -156,6 +157,8 @@ ShellRoot {
                         root.title = ev.title ?? "";
                     else if (ev.event === "window-title" && ev.focused)
                         root.title = ev.title ?? "";
+                    else if (ev.event === "overview")
+                        root.overviewActive = ev.active === true;
                 } catch (e) {}
             }
         }
@@ -1527,6 +1530,17 @@ ShellRoot {
                 }
             }
             }
+        }
+    }
+
+    // Overview chrome — one fullscreen overlay per screen, shown while the
+    // compositor's exposé is open (bar.overviewActive).
+    Variants {
+        model: Quickshell.screens
+        Overview {
+            required property var modelData
+            screen: modelData
+            bar: root
         }
     }
 }

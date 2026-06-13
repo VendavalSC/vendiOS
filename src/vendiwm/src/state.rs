@@ -1163,6 +1163,9 @@ impl State {
             }
         }
         self.pending_redraw = true;
+        // Tell the bar (vendibar-pro) so it can show its overview chrome —
+        // the spaces strip + hint overlay — in sync with the exposé.
+        self.pending_ipc_events.push(crate::ipc::Event::Overview { active: self.overview });
     }
 
     /// Overview layout: one panel per workspace (non-empty ones plus the
