@@ -7,6 +7,12 @@ set -e
 VENDI_SESSION=vendiwm
 [[ -f /etc/vendi/session.conf ]] && source /etc/vendi/session.conf
 
+# Desktop identity — xdg-desktop-portal matches this against portals.conf to
+# pick the wlroots backend (screen-share / screenshot via wlr-screencopy).
+export XDG_CURRENT_DESKTOP=vendiwm
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=vendiwm
+
 # Stream the compositor's stderr to a flat log file — easier to inspect
 # off-disk than chasing it through greetd's journal.
 mkdir -p "${HOME}/logs"
@@ -37,6 +43,13 @@ spawn_desktop() {
     export WAYLAND_DISPLAY="$(basename "$sock")"
     # vendiwm binds its IPC socket adjacent to the wayland socket.
     export VENDIWM_SOCK="${sock_dir}/${WAYLAND_DISPLAY}.ipc.sock"
+    # Hand the live display to the D-Bus activation env so dbus-activated
+    # services (xdg-desktop-portal + the wlr backend) can reach the
+    # compositor when an app first asks to screen-share.
+    if command -v dbus-update-activation-environment >/dev/null; then
+        dbus-update-activation-environment --systemd \
+            WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
+    fi
     # Status bar — ~/.config/vendi/bar picks the flavor:
     #   classic (default)  GTK4 vendibar, minimal macOS-style
     #   pro                quickshell island bar (vendibar-pro)

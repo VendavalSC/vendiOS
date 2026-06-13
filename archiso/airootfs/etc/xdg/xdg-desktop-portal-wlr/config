@@ -1,0 +1,6 @@
+# xdg-desktop-portal-wlr — how the user picks what to share.
+# slurp draws the region/output selector; falls back gracefully if absent.
+[screencast]
+chooser_type=simple
+chooser_cmd=slurp -f %o -or
+max_fps=60
