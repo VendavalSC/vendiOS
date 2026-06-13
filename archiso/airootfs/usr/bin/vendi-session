@@ -50,12 +50,31 @@ spawn_desktop() {
         dbus-update-activation-environment --systemd \
             WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
     fi
+    # Polkit authentication agent — the GUI password prompt for privileged
+    # actions (mounting internal disks, changing system settings, etc.).
+    # Without an agent running, those actions just fail with no prompt.
+    if [[ -x /usr/lib/polkit-kde-authentication-agent-1 ]] && \
+       ! pgrep -f polkit-kde-authentication-agent-1 >/dev/null; then
+        /usr/lib/polkit-kde-authentication-agent-1 >>"$LOG" 2>&1 &
+    fi
     # Clipboard history: cliphist records every copy (text + images) so the
     # spotlight `v` provider can paste anything from recent history.
     if command -v cliphist >/dev/null; then
         pkill -x wl-paste 2>/dev/null || true
         wl-paste --type text  --watch cliphist store >>"$LOG" 2>&1 &
         wl-paste --type image --watch cliphist store >>"$LOG" 2>&1 &
+    fi
+    # Security: lock before the machine sleeps (lid close / suspend / hibernate)
+    # so it always resumes to the lock screen — never a live desktop. Watches
+    # logind's PrepareForSleep(true) signal on the system bus.
+    if command -v dbus-monitor >/dev/null; then
+        (
+            dbus-monitor --system \
+                "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" 2>/dev/null \
+            | while read -r l; do
+                case "$l" in *"boolean true"*) vendi-ctl lock >>"$LOG" 2>&1 || true ;; esac
+            done
+        ) &
     fi
     # Status bar — ~/.config/vendi/bar picks the flavor:
     #   classic (default)  GTK4 vendibar, minimal macOS-style
