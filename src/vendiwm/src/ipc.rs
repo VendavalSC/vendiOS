@@ -338,6 +338,25 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
                     // Background/accent may have changed — rebuild wallpaper.
                     state.wallpaper_gen += 1;
                     state.pending_redraw = true;
+                    // Apply keyboard layout + repeat live. Clone the strings
+                    // out first — set_xkb_config borrows `state` mutably, so
+                    // the XkbConfig can't also borrow state.config.
+                    if let Some(kb) = state.seat.get_keyboard() {
+                        let (layout, variant, options, delay, rate) = (
+                            state.config.kb_layout.clone(),
+                            state.config.kb_variant.clone(),
+                            state.config.kb_options.clone(),
+                            state.config.repeat_delay, state.config.repeat_rate,
+                        );
+                        if let Err(e) = kb.set_xkb_config(state, smithay::input::keyboard::XkbConfig {
+                            layout: &layout, variant: &variant,
+                            options: if options.is_empty() { None } else { Some(options) },
+                            ..Default::default()
+                        }) {
+                            tracing::warn!(?e, "set xkb config on reload");
+                        }
+                        kb.change_repeat_info(rate, delay);
+                    }
                     tracing::info!("config reloaded");
                     Response::Ok { ok: true }
                 }

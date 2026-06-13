@@ -62,6 +62,8 @@ pub fn run() -> Result<()> {
     let layer_shell_state    = smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<State>(&dh);
     let session_lock_state   = smithay::wayland::session_lock::SessionLockManagerState::new::<State, _>(&dh, |_| true);
     let primary_selection_state = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<State>(&dh);
+    let data_control_state   = smithay::wayland::selection::wlr_data_control::DataControlState::new::<State, _>(
+        &dh, Some(&primary_selection_state), |_| true);
     let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(&dh);
     let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(&dh);
     let mut seat_state       = smithay::input::SeatState::new();
@@ -109,7 +111,7 @@ pub fn run() -> Result<()> {
     let config = crate::config::Config::load()
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "config load failed; using empty keybinds");
-            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0 }
+            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25 }
         });
 
     let mut state = State {
@@ -123,6 +125,7 @@ pub fn run() -> Result<()> {
         output_manager_state,
         session_lock_state,
         primary_selection_state,
+        data_control_state,
         xdg_decoration_state,
         viewporter_state,
         seat,
@@ -180,7 +183,13 @@ pub fn run() -> Result<()> {
     let mut clients: Vec<_> = Vec::new();
     let start_time = std::time::Instant::now();
     let mut quit_requested = false;
-    let keyboard = state.seat.add_keyboard(Default::default(), 200, 25)
+    let kb_xkb = smithay::input::keyboard::XkbConfig {
+        layout: &state.config.kb_layout,
+        variant: &state.config.kb_variant,
+        options: if state.config.kb_options.is_empty() { None } else { Some(state.config.kb_options.clone()) },
+        ..Default::default()
+    };
+    let keyboard = state.seat.add_keyboard(kb_xkb, state.config.repeat_delay, state.config.repeat_rate)
         .context("add keyboard to seat")?;
 
     loop {

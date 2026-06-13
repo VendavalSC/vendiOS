@@ -33,6 +33,7 @@ use smithay::{
             SelectionHandler,
             data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler},
             primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
+            wlr_data_control::{DataControlHandler, DataControlState},
         },
         viewporter::ViewporterState,
         shell::{
@@ -67,6 +68,9 @@ pub struct State {
     pub output_manager_state:  OutputManagerState,
     pub session_lock_state:    SessionLockManagerState,
     pub primary_selection_state: PrimarySelectionState,
+    /// wlr-data-control — lets clipboard managers (cliphist via wl-paste
+    /// --watch) observe and serve the selection.
+    pub data_control_state:    DataControlState,
     pub xdg_decoration_state:  smithay::wayland::shell::xdg::decoration::XdgDecorationState,
     pub viewporter_state:      ViewporterState,
     pub seat:                  Seat<Self>,
@@ -464,6 +468,12 @@ impl DataDeviceHandler for State {
     }
 }
 impl WaylandDndGrabHandler for State {}
+
+impl DataControlHandler for State {
+    fn data_control_state(&mut self) -> &mut DataControlState {
+        &mut self.data_control_state
+    }
+}
 
 impl PrimarySelectionHandler for State {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {

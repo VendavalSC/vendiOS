@@ -50,6 +50,7 @@ Item {
         query.text = "";
         list.currentIndex = 0;
         winRefresh.running = true;
+        clipRefresh.running = true;
         if (mode === "actions") wpRefresh.running = true;
         Qt.callLater(() => query.forceActiveFocus());
     }
@@ -73,6 +74,17 @@ Item {
                 try { win.openWindows = JSON.parse(text).windows || []; }
                 catch (e) { win.openWindows = []; }
             }
+        }
+    }
+
+    // Clipboard history (cliphist) — refreshed each open. Each line is
+    // "<id>\t<preview>"; decoding by id puts it back on the clipboard.
+    property var clipItems: []
+    Process {
+        id: clipRefresh
+        command: ["sh", "-c", "cliphist list 2>/dev/null | head -200"]
+        stdout: StdioCollector {
+            onStreamFinished: win.clipItems = text.trim() ? text.trim().split("\n") : []
         }
     }
 
@@ -251,6 +263,25 @@ Item {
             }
             return out;
         }
+        if (q.startsWith("v ") || q === "v") {
+            const needle = q.slice(1).trim().toLowerCase();
+            for (const line of win.clipItems) {
+                const tab = line.indexOf("\t");
+                const id = tab > 0 ? line.slice(0, tab) : line;
+                const preview = (tab > 0 ? line.slice(tab + 1) : line).trim();
+                if (!/^\d+$/.test(id) || preview === "") continue;
+                if (needle && !preview.toLowerCase().includes(needle)) continue;
+                out.push({
+                    glyph: "\u{f0192}",   // clipboard
+                    title: preview.length > 70 ? preview.slice(0, 70) + "\u{2026}" : preview,
+                    hint: "paste",
+                    act: () => Quickshell.execDetached(["sh", "-c",
+                        "cliphist decode " + id + " | wl-copy"]),
+                });
+                if (out.length >= 30) break;
+            }
+            return out;
+        }
         // Spotlight starts as a bare bar — nothing until you type.
         if (!q) return out;
 
@@ -349,7 +380,7 @@ Item {
                     visible: query.text === ""
                     text: win.mode === "actions"
                         ? (win.crumb.map(c => c.title).join(" › ") || "vendiOS")
-                        : "search · 2+2 · :emoji · f files · w windows · >run"
+                        : "search · 2+2 · :emoji · f files · w windows · v clip · >run"
                     color: win.dim
                     font.family: win.mono
                     font.pixelSize: 14

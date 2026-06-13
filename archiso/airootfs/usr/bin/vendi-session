@@ -50,6 +50,13 @@ spawn_desktop() {
         dbus-update-activation-environment --systemd \
             WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
     fi
+    # Clipboard history: cliphist records every copy (text + images) so the
+    # spotlight `v` provider can paste anything from recent history.
+    if command -v cliphist >/dev/null; then
+        pkill -x wl-paste 2>/dev/null || true
+        wl-paste --type text  --watch cliphist store >>"$LOG" 2>&1 &
+        wl-paste --type image --watch cliphist store >>"$LOG" 2>&1 &
+    fi
     # Status bar — ~/.config/vendi/bar picks the flavor:
     #   classic (default)  GTK4 vendibar, minimal macOS-style
     #   pro                quickshell island bar (vendibar-pro)

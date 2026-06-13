@@ -654,20 +654,28 @@ fn build_state(
     let layer_shell_state    = WlrLayerShellState::new::<State>(dh);
     let session_lock_state   = smithay::wayland::session_lock::SessionLockManagerState::new::<State, _>(dh, |_| true);
     let primary_selection_state = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<State>(dh);
+    let data_control_state   = smithay::wayland::selection::wlr_data_control::DataControlState::new::<State, _>(
+        dh, Some(&primary_selection_state), |_| true);
     let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(dh);
     let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(dh);
     let dmabuf_state         = DmabufState::new();
 
-    let mut seat_state = SeatState::new();
-    let mut seat = seat_state.new_wl_seat(dh, "vendi-seat-0");
-    let _ = seat.add_keyboard(Default::default(), 200, 25)
-        .context("add keyboard to seat")?;
-    let _ = seat.add_pointer();
-
     let config = crate::config::Config::load().unwrap_or_else(|e| {
         tracing::warn!(?e, "config load failed; using empty keybinds");
-        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0 }
+        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25 }
     });
+
+    let mut seat_state = SeatState::new();
+    let mut seat = seat_state.new_wl_seat(dh, "vendi-seat-0");
+    let xkb = smithay::input::keyboard::XkbConfig {
+        layout: &config.kb_layout,
+        variant: &config.kb_variant,
+        options: if config.kb_options.is_empty() { None } else { Some(config.kb_options.clone()) },
+        ..Default::default()
+    };
+    seat.add_keyboard(xkb, config.repeat_delay, config.repeat_rate)
+        .context("add keyboard to seat")?;
+    let _ = seat.add_pointer();
 
     Ok(State {
         compositor_state,
@@ -680,6 +688,7 @@ fn build_state(
         output_manager_state,
         session_lock_state,
         primary_selection_state,
+        data_control_state,
         xdg_decoration_state,
         viewporter_state,
         seat,

@@ -101,6 +101,14 @@ binds {
 idle {
     lock-after 600
 }
+
+// Keyboard layout + key repeat. layout accepts comma lists ("us,es") and
+// options can pair them with a toggle ("grp:alt_shift_toggle").
+input {
+    keyboard-layout "us"
+    repeat-delay 200
+    repeat-rate 25
+}
 "#;
 
 // ── KDL schema ────────────────────────────────────────────────────────────────
@@ -113,6 +121,8 @@ pub struct Document {
     pub theme: Option<ThemeBlock>,
     #[knus(child)]
     pub idle: Option<IdleBlock>,
+    #[knus(child)]
+    pub input: Option<InputBlock>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -121,6 +131,25 @@ pub struct IdleBlock {
     /// knus kebab-cases the field, so this is the `lock-after` node.
     #[knus(child, unwrap(argument))]
     pub lock_after: Option<i64>,
+}
+
+#[derive(knus::Decode, Debug)]
+pub struct InputBlock {
+    /// xkb layout(s), e.g. "us" or "us,es" (comma-separated to toggle).
+    #[knus(child, unwrap(argument))]
+    pub keyboard_layout: Option<String>,
+    /// xkb variant, e.g. "dvorak" or "intl".
+    #[knus(child, unwrap(argument))]
+    pub keyboard_variant: Option<String>,
+    /// xkb options, e.g. "ctrl:nocaps,grp:alt_shift_toggle".
+    #[knus(child, unwrap(argument))]
+    pub keyboard_options: Option<String>,
+    /// Key repeat: ms before repeat starts.
+    #[knus(child, unwrap(argument))]
+    pub repeat_delay: Option<i64>,
+    /// Key repeat: repeats per second.
+    #[knus(child, unwrap(argument))]
+    pub repeat_rate: Option<i64>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -219,6 +248,12 @@ pub struct Config {
     pub theme:    Theme,
     /// Auto-lock after N seconds idle (0 = disabled).
     pub idle_lock_secs: u64,
+    /// Keyboard / xkb settings, applied at startup and on reload.
+    pub kb_layout:  String,
+    pub kb_variant: String,
+    pub kb_options: String,
+    pub repeat_delay: i32,
+    pub repeat_rate:  i32,
 }
 
 impl Config {
@@ -246,9 +281,11 @@ impl Config {
             .and_then(|d| d.binds.take())
             .map(|b| b.entries)
             .unwrap_or_default();
-        // Pull the idle blocks out now, before user_doc is consumed below.
+        // Pull the idle/input blocks out now, before user_doc is consumed.
         let default_idle = default_doc.idle;
         let user_idle = user_doc.as_mut().and_then(|d| d.idle.take());
+        let default_input = default_doc.input;
+        let user_input = user_doc.as_mut().and_then(|d| d.input.take());
         for entry in default_binds.into_iter().chain(user_binds) {
             let chord = parse_chord(&entry.chord)
                 .with_context(|| format!("parse chord {:?}", entry.chord))?;
@@ -291,7 +328,24 @@ impl Config {
         if let Some(v) = default_idle.and_then(|b| b.lock_after) { idle_lock_secs = v.max(0) as u64; }
         if let Some(v) = user_idle.and_then(|b| b.lock_after)    { idle_lock_secs = v.max(0) as u64; }
 
-        Ok(Self { keybinds, keybinds_pretty, theme, idle_lock_secs })
+        // Keyboard: defaults, then built-in config, then user override.
+        let mut kb_layout = "us".to_string();
+        let mut kb_variant = String::new();
+        let mut kb_options = String::new();
+        let mut repeat_delay = 200_i32;
+        let mut repeat_rate = 25_i32;
+        for blk in [default_input, user_input].into_iter().flatten() {
+            if let Some(v) = blk.keyboard_layout  { kb_layout = v; }
+            if let Some(v) = blk.keyboard_variant { kb_variant = v; }
+            if let Some(v) = blk.keyboard_options { kb_options = v; }
+            if let Some(v) = blk.repeat_delay     { repeat_delay = v as i32; }
+            if let Some(v) = blk.repeat_rate      { repeat_rate = v as i32; }
+        }
+
+        Ok(Self {
+            keybinds, keybinds_pretty, theme, idle_lock_secs,
+            kb_layout, kb_variant, kb_options, repeat_delay, repeat_rate,
+        })
     }
 }
 

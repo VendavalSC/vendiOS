@@ -102,6 +102,7 @@ slurp
 wf-recorder
 swaylock
 wl-clipboard
+cliphist
 polkit-kde-agent
 qt5-wayland
 qt6-wayland
