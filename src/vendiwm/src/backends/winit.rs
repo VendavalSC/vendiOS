@@ -112,7 +112,7 @@ pub fn run() -> Result<()> {
     let config = crate::config::Config::load()
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "config load failed; using empty keybinds");
-            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25 }
+            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, outputs: Vec::new() }
         });
 
     let mut state = State {

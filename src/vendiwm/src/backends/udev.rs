@@ -676,7 +676,7 @@ fn build_state(
 
     let config = crate::config::Config::load().unwrap_or_else(|e| {
         tracing::warn!(?e, "config load failed; using empty keybinds");
-        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25 }
+        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, outputs: Vec::new() }
     });
 
     let mut seat_state = SeatState::new();
@@ -928,7 +928,32 @@ impl UdevData {
 // ── surface setup ─────────────────────────────────────────────────────────────
 
 /// Preferred mode if flagged, else the first listed one.
-fn pick_mode(connector: &connector::Info) -> Option<smithay::reexports::drm::control::Mode> {
+fn pick_mode(
+    connector: &connector::Info,
+    want: Option<(i32, i32, Option<u32>)>,
+) -> Option<smithay::reexports::drm::control::Mode> {
+    // Honour a configured resolution/refresh first: exact size match, then the
+    // closest refresh if one was asked for.
+    if let Some((w, h, hz)) = want {
+        let mut best: Option<smithay::reexports::drm::control::Mode> = None;
+        for m in connector.modes() {
+            let (mw, mh) = m.size();
+            if mw as i32 != w || mh as i32 != h { continue; }
+            match hz {
+                Some(want_hz) => {
+                    if m.vrefresh() == want_hz { return Some(*m); }
+                    let better = best.map_or(true, |b| {
+                        (b.vrefresh() as i64 - want_hz as i64).abs()
+                            > (m.vrefresh() as i64 - want_hz as i64).abs()
+                    });
+                    if better { best = Some(*m); }
+                }
+                None => best = Some(*m),
+            }
+        }
+        if best.is_some() { return best; }
+    }
+    // Fall back to the connector's preferred mode (or the first listed).
     let idx = connector.modes().iter()
         .position(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
         .unwrap_or(0);
@@ -980,7 +1005,11 @@ fn connect_connector(
     let device = udev.drm_devices.get_mut(&node)
         .ok_or_else(|| anyhow::anyhow!("device not found: {node:?}"))?;
 
-    let drm_mode = pick_mode(connector)
+    // User arrangement for this connector (scale / position / mode), if any.
+    let output_name = format!("{:?}-{}", connector.interface(), connector.interface_id());
+    let ocfg = state.config.output_cfg(&output_name).cloned();
+
+    let drm_mode = pick_mode(connector, ocfg.as_ref().and_then(|c| c.mode))
         .ok_or_else(|| anyhow::anyhow!("connector has no modes"))?;
 
     // Find a CRTC reachable by one of this connector's encoders that isn't
@@ -1007,7 +1036,6 @@ fn connect_connector(
         .map_err(|e| anyhow::anyhow!("create_surface: {e:?}"))?;
 
     // smithay Output mirrors the DRM mode so layout knows about size + refresh.
-    let output_name = format!("{:?}-{}", connector.interface(), connector.interface_id());
     let (phys_w, phys_h) = connector.size().unwrap_or((0, 0));
     let output = Output::new(
         output_name.clone(),
@@ -1019,22 +1047,30 @@ fn connect_connector(
             serial_number: "0".into(),
         },
     );
-    // New outputs land to the right of everything already mapped.
+    // Position: configured, else to the right of everything already mapped.
     let next_x = state.space.outputs()
         .filter_map(|o| state.space.output_geometry(o))
         .map(|g| g.loc.x + g.size.w)
         .max()
         .unwrap_or(0);
+    let pos = ocfg.as_ref().and_then(|c| c.position).unwrap_or((next_x, 0));
+    // Scale: integer when whole (keeps the cheap path), fractional otherwise.
+    let scale_val = ocfg.as_ref().and_then(|c| c.scale).unwrap_or(1.0);
+    let scale = if (scale_val.fract()).abs() < 1e-6 {
+        Scale::Integer(scale_val.max(1.0) as i32)
+    } else {
+        Scale::Fractional(scale_val)
+    };
     let wl_mode = WlMode::from(drm_mode);
     output.change_current_state(
         Some(wl_mode),
         Some(Transform::Normal),
-        Some(Scale::Integer(1)),
-        Some((next_x, 0).into()),
+        Some(scale),
+        Some(pos.into()),
     );
     output.set_preferred(wl_mode);
     let global = output.create_global::<State>(display_handle);
-    state.space.map_output(&output, (next_x, 0));
+    state.space.map_output(&output, pos);
 
     // DrmCompositor wires the renderer to scanout. Cursor size 64×64 is the
     // standard everyone supports.
@@ -1095,6 +1131,13 @@ fn connect_connector(
 /// whose monitor vanished or switched resolution, bring up new ones, then
 /// re-pack the remaining outputs left-to-right and keep the pointer inside.
 fn rescan_connectors(app: &mut UdevApp, node: DrmNode) {
+    // Snapshot the configured arrangement up front so the mode-stale check
+    // below can match against the same mode connect_connector would pick
+    // (otherwise a configured non-preferred mode looks "changed" every event
+    // and thrashes the surface). Owned, so no borrow tangle with `device`.
+    let cfg_outputs = app.state.config.outputs.clone();
+    let cfg_mode = |name: &str| cfg_outputs.iter().find(|o| o.name == name).and_then(|o| o.mode);
+
     // 1. Re-probe.
     let (stale, fresh): (Vec<crtc::Handle>, Vec<connector::Info>) = {
         let Some(device) = app.udev.drm_devices.get_mut(&node) else { return };
@@ -1115,7 +1158,8 @@ fn rescan_connectors(app: &mut UdevApp, node: DrmNode) {
             .filter_map(|(crtc, s)| {
                 let info = connectors.iter().find(|c| c.handle() == s.connector);
                 let connected = matches!(info.map(|c| c.state()), Some(connector::State::Connected));
-                let same_mode = info.and_then(pick_mode) == Some(s.mode);
+                let want = cfg_mode(&s.output.name());
+                let same_mode = info.and_then(|c| pick_mode(c, want)) == Some(s.mode);
                 (!connected || !same_mode).then_some(*crtc)
             })
             .collect();
@@ -1145,18 +1189,32 @@ fn rescan_connectors(app: &mut UdevApp, node: DrmNode) {
         }
     }
 
-    // 4. Re-pack outputs left-to-right in stable connector order so removals
+    // 4. Re-place outputs. Configured monitors go to their fixed position;
+    //    the rest pack left-to-right in stable connector order so removals
     //    don't leave gaps the pointer could fall into.
     {
-        let Some(device) = app.udev.drm_devices.get_mut(&node) else { return };
-        let mut surfaces: Vec<&SurfaceState> = device.surfaces.values().collect();
-        surfaces.sort_by_key(|s| s.output.name());
+        // Snapshot (crtc, name, width) so we can consult the config (on
+        // app.state) without holding the device borrow across the loop.
+        let order: Vec<(crtc::Handle, String, i32)> = {
+            let Some(device) = app.udev.drm_devices.get(&node) else { return };
+            let mut v: Vec<_> = device.surfaces.iter()
+                .map(|(c, s)| (*c, s.output.name(),
+                    s.output.current_mode().map(|m| m.size.w).unwrap_or(0)))
+                .collect();
+            v.sort_by(|a, b| a.1.cmp(&b.1));
+            v
+        };
         let mut x = 0;
-        for s in surfaces {
-            let size = s.output.current_mode().map(|m| m.size).unwrap_or_default();
-            s.output.change_current_state(None, None, None, Some((x, 0).into()));
-            app.state.space.map_output(&s.output, (x, 0));
-            x += size.w;
+        for (crtc, name, w) in order {
+            let cfg_pos = app.state.config.output_cfg(&name).and_then(|c| c.position);
+            let pos = cfg_pos.unwrap_or((x, 0));
+            if cfg_pos.is_none() { x += w; }
+            if let Some(device) = app.udev.drm_devices.get(&node) {
+                if let Some(s) = device.surfaces.get(&crtc) {
+                    s.output.change_current_state(None, None, None, Some(pos.into()));
+                    app.state.space.map_output(&s.output, pos);
+                }
+            }
         }
     }
 

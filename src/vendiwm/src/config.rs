@@ -125,6 +125,28 @@ pub struct Document {
     pub idle: Option<IdleBlock>,
     #[knus(child)]
     pub input: Option<InputBlock>,
+    /// Per-monitor arrangement. Each `output "NAME" { … }` node sets scale /
+    /// position / mode for the matching connector (e.g. "eDP-1", "DP-2").
+    #[knus(children(name = "output"))]
+    pub outputs: Vec<OutputEntry>,
+}
+
+#[derive(knus::Decode, Debug)]
+pub struct OutputEntry {
+    /// Connector name as reported by `vendi-ctl output list` (e.g. "eDP-1").
+    #[knus(argument)]
+    pub name: String,
+    /// Fractional scale (1.0, 1.5, 2.0 …). HiDPI displays usually want 1.5–2.
+    #[knus(child, unwrap(argument))]
+    pub scale: Option<f64>,
+    /// Top-left position of this monitor in the global layout, logical px.
+    #[knus(child, unwrap(argument))]
+    pub x: Option<i64>,
+    #[knus(child, unwrap(argument))]
+    pub y: Option<i64>,
+    /// Resolution + optional refresh, "2560x1440" or "2560x1440@165".
+    #[knus(child, unwrap(argument))]
+    pub mode: Option<String>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -246,6 +268,17 @@ impl Default for Theme {
     }
 }
 
+/// Resolved per-output arrangement. Any field left None keeps the auto value
+/// (preferred mode, scale 1, packed left-to-right).
+#[derive(Debug, Clone)]
+pub struct OutputCfg {
+    pub name:     String,
+    pub scale:    Option<f64>,
+    pub position: Option<(i32, i32)>,
+    /// (width, height, optional refresh in Hz)
+    pub mode:     Option<(i32, i32, Option<u32>)>,
+}
+
 pub struct Config {
     pub keybinds: HashMap<Chord, Action>,
     /// Human-readable bind list in config order, user overrides applied.
@@ -262,9 +295,16 @@ pub struct Config {
     pub kb_options: String,
     pub repeat_delay: i32,
     pub repeat_rate:  i32,
+    /// Per-monitor arrangement, keyed by connector name.
+    pub outputs: Vec<OutputCfg>,
 }
 
 impl Config {
+    /// Look up the arrangement for a connector by name, if the user set one.
+    pub fn output_cfg(&self, name: &str) -> Option<&OutputCfg> {
+        self.outputs.iter().find(|o| o.name == name)
+    }
+
     /// Defaults always load first; a user file overlays them. A config that
     /// only sets a theme block keeps every default bind, and a user bind on
     /// an already-bound chord replaces the default action.
@@ -294,6 +334,9 @@ impl Config {
         let user_idle = user_doc.as_mut().and_then(|d| d.idle.take());
         let default_input = default_doc.input;
         let user_input = user_doc.as_mut().and_then(|d| d.input.take());
+        let user_outputs = user_doc.as_mut()
+            .map(|d| std::mem::take(&mut d.outputs))
+            .unwrap_or_default();
         for entry in default_binds.into_iter().chain(user_binds) {
             let chord = parse_chord(&entry.chord)
                 .with_context(|| format!("parse chord {:?}", entry.chord))?;
@@ -353,10 +396,70 @@ impl Config {
             if let Some(v) = blk.repeat_rate      { repeat_rate = v as i32; }
         }
 
+        // Output arrangement: blocks in vendiwm.kdl, then the vendi-ctl-managed
+        // outputs.kdl wins (so live `vendi-ctl output set` / the Pro GUI persist
+        // and survive a reload), overriding per connector name.
+        let mut output_entries = user_outputs;
+        if let Some(extra) = read_output_overrides()? {
+            for e in extra {
+                match output_entries.iter_mut().find(|o| o.name == e.name) {
+                    Some(slot) => *slot = e,
+                    None       => output_entries.push(e),
+                }
+            }
+        }
+        let outputs: Vec<OutputCfg> = output_entries.into_iter().map(|e| OutputCfg {
+            name:     e.name,
+            scale:    e.scale.filter(|s| *s > 0.0),
+            position: match (e.x, e.y) {
+                (Some(x), Some(y)) => Some((x as i32, y as i32)),
+                _ => None,
+            },
+            mode:     e.mode.as_deref().and_then(parse_mode),
+        }).collect();
+
         Ok(Self {
             keybinds, keybinds_pretty, theme, idle_lock_secs, idle_screen_off_secs,
-            kb_layout, kb_variant, kb_options, repeat_delay, repeat_rate,
+            kb_layout, kb_variant, kb_options, repeat_delay, repeat_rate, outputs,
         })
+    }
+}
+
+/// "WxH" or "WxH@Hz" → (width, height, optional refresh).
+fn parse_mode(s: &str) -> Option<(i32, i32, Option<u32>)> {
+    let (res, hz) = match s.split_once('@') {
+        Some((r, h)) => (r, h.trim().parse::<u32>().ok()),
+        None         => (s, None),
+    };
+    let (w, h) = res.split_once('x')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?, hz))
+}
+
+/// The vendi-ctl-managed arrangement overrides (~/.config/vendi/outputs.kdl).
+/// Contains only `output "NAME" { … }` nodes; rewritten by `vendi-ctl output`.
+fn read_output_overrides() -> Result<Option<Vec<OutputEntry>>> {
+    let mut path = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(d) => PathBuf::from(d),
+        None    => {
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
+            PathBuf::from(home).join(".config")
+        }
+    };
+    path.push("vendi");
+    path.push("outputs.kdl");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match knus::parse::<Document>("outputs.kdl", &text) {
+            Ok(doc) => Ok(Some(doc.outputs)),
+            // A broken overrides file must never brick the whole config (which
+            // would take down keybinds, theme, everything). Warn and ignore.
+            Err(e) => {
+                tracing::warn!("ignoring malformed outputs.kdl: {e}");
+                Ok(None)
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context("read outputs.kdl")),
     }
 }
 

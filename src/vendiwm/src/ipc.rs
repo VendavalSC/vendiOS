@@ -38,6 +38,8 @@ pub enum Request {
     ListWorkspaces,
     /// All active keybinds (defaults merged with user overrides).
     ListBinds,
+    /// Snapshot of all connected monitors (name, current mode, scale, position).
+    ListOutputs,
     /// Switch to a workspace (created on demand).
     Workspace      { id: u32 },
     /// Set the direction of the next split.
@@ -79,6 +81,19 @@ pub enum Response {
     Windows   { windows: Vec<WindowInfo> },
     Workspaces{ workspaces: Vec<WorkspaceInfo> },
     Binds     { binds: Vec<BindInfo> },
+    Outputs   { outputs: Vec<OutputInfo> },
+}
+
+#[derive(Debug, Serialize)]
+pub struct OutputInfo {
+    pub name:    String,
+    pub width:   i32,
+    pub height:  i32,
+    /// Refresh in Hz (rounded).
+    pub refresh: i32,
+    pub scale:   f64,
+    pub x:       i32,
+    pub y:       i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -306,6 +321,24 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
                     .collect(),
             }
         }
+        Request::ListOutputs => {
+            let mut out = Vec::new();
+            for o in state.space.outputs() {
+                let geo  = state.space.output_geometry(o);
+                let mode = o.current_mode();
+                out.push(OutputInfo {
+                    name:    o.name(),
+                    width:   mode.map(|m| m.size.w).unwrap_or(0),
+                    height:  mode.map(|m| m.size.h).unwrap_or(0),
+                    refresh: mode.map(|m| (m.refresh as f64 / 1000.0).round() as i32).unwrap_or(0),
+                    scale:   o.current_scale().fractional_scale(),
+                    x:       geo.map(|g| g.loc.x).unwrap_or(0),
+                    y:       geo.map(|g| g.loc.y).unwrap_or(0),
+                });
+            }
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+            Response::Outputs { outputs: out }
+        }
         Request::Workspace { id } => {
             state.switch_workspace(id);
             Response::Ok { ok: true }
@@ -357,6 +390,29 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
                         }
                         kb.change_repeat_info(rate, delay);
                     }
+                    // Re-apply output scale + position live. (A changed mode
+                    // needs the surface rebuilt, which happens on reconnect /
+                    // restart — scale + position take effect immediately.)
+                    let cfgs = state.config.outputs.clone();
+                    let outs: Vec<_> = state.space.outputs().cloned().collect();
+                    for o in outs {
+                        match cfgs.iter().find(|c| c.name == o.name()) {
+                            Some(c) => {
+                                let scale = c.scale.map(|s| if s.fract().abs() < 1e-6 {
+                                    smithay::output::Scale::Integer(s.max(1.0) as i32)
+                                } else {
+                                    smithay::output::Scale::Fractional(s)
+                                });
+                                o.change_current_state(None, None, scale, c.position.map(|p| p.into()));
+                                if let Some(p) = c.position { state.space.map_output(&o, p); }
+                            }
+                            // No config for this output — revert any prior scale
+                            // override back to 1 so `output reset` truly resets.
+                            None => o.change_current_state(
+                                None, None, Some(smithay::output::Scale::Integer(1)), None),
+                        }
+                    }
+                    state.relayout();
                     tracing::info!("config reloaded");
                     Response::Ok { ok: true }
                 }
