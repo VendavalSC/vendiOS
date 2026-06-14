@@ -593,6 +593,11 @@ ShellRoot {
             readonly property string rightMode:
                 powerOpen ? "power"
                 : rightOpen ? "control"
+                // While the island is open, never bulge the right notch for a
+                // toast or volume/brightness OSD — it would reach into the
+                // expanded island and merge. The dashboard carries its own
+                // volume slider, so the OSD is redundant there anyway.
+                : centerExpanded ? "idle"
                 : root.toasts.length > 0 ? "toast"
                 : root.osdShow ? "osd"
                 : "idle"
