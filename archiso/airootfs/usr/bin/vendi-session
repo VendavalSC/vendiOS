@@ -18,8 +18,17 @@ export XDG_SESSION_DESKTOP=vendiwm
 mkdir -p "${HOME}/logs"
 LOG="${HOME}/logs/vendi-session.log"
 
-# Release Plymouth's hold on the framebuffer so the compositor takes over.
-plymouth quit --retain-splash 2>/dev/null || true
+# Release Plymouth's hold on the GPU so the compositor can become DRM master.
+# NOTE: --retain-splash keeps plymouthd alive holding /dev/dri/cardN, which
+# makes the compositor's session.open fail with EBUSY on real hardware (e.g.
+# Intel i915) even though it works on the VM's virtio GPU. So do a full quit
+# and wait until plymouthd has actually exited (and released DRM) before
+# handing off — a brief black flash beats a black-screen boot.
+plymouth quit 2>/dev/null || true
+for _ in $(seq 1 30); do
+    pgrep -x plymouthd >/dev/null 2>&1 || break
+    sleep 0.1
+done
 
 # The exec below turns this shell into the compositor, so $$ is the
 # compositor's pid — the bar supervisor watches it to know when to quit.
