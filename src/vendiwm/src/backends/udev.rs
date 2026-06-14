@@ -2309,8 +2309,12 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // Same offscreen render + read-back as the screenshot path, but the bytes
     // go into each client's shm buffer instead of a PNG.
     if !state.pending_screencopy.is_empty() {
-        let out_size = state.space.output_geometry(&surface.output)
-            .map(|g| g.size)
+        // Capture buffer must be the PHYSICAL framebuffer size (mode), not the
+        // logical output size — elements are drawn through geometry(scale), so
+        // sizing the buffer to the logical size clipped everything to the
+        // top-left under HiDPI. Using the mode makes the capture match scanout.
+        let out_size = surface.output.current_mode()
+            .map(|m| smithay::utils::Size::<i32, smithay::utils::Logical>::from((m.size.w, m.size.h)))
             .unwrap_or_else(|| (1, 1).into());
         let bg = Color32F::new(theme.background[0], theme.background[1], theme.background[2], 1.0);
         let output = surface.output.clone();
