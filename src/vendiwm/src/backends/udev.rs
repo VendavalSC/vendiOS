@@ -1961,6 +1961,16 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     });
     if reveal.is_none() { surface.old_wallpaper = None; } else { state.pending_redraw = true; }
 
+    // Wallpaper sizing under scale: the buffer is built at physical mode size
+    // (buffer_scale 1, so its logical size == the mode size). We draw it at the
+    // logical output size (size = osize → physical = mode size, fills exactly),
+    // and must crop from the FULL buffer (src = whole buffer) — otherwise the
+    // source defaults to the smaller dest size and the wallpaper looks zoomed.
+    let wp_mode = surface.output.current_mode().map(|m| m.size).unwrap_or_else(|| (1, 1).into());
+    let wp_src = Some(smithay::utils::Rectangle::<f64, smithay::utils::Logical>::from_size(
+        (wp_mode.w as f64, wp_mode.h as f64).into(),
+    ));
+
     if let Some((p, (cx, cy))) = reveal {
         // Radius that reaches the farthest screen corner from the center.
         let osize = state.space.output_geometry(&surface.output)
@@ -1976,7 +1986,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             (0.0, 0.0),
             &surface.wallpaper,
             Some(wallpaper_alpha),
-            None,
+            wp_src,
             Some(osize),
             Kind::Unspecified,
         ) {
@@ -1991,7 +2001,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         // The outgoing wallpaper sits underneath, untouched.
         if let Some((old, ..)) = &surface.old_wallpaper {
             if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
-                renderer, (0.0, 0.0), old, Some(wallpaper_alpha), None, Some(osize), Kind::Unspecified,
+                renderer, (0.0, 0.0), old, Some(wallpaper_alpha), wp_src, Some(osize), Kind::Unspecified,
             ) {
                 elements.push(OutputRenderElements::Memory(elem));
             }
@@ -2001,7 +2011,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         (0.0, 0.0),
         &surface.wallpaper,
         Some(wallpaper_alpha),
-        None,
+        wp_src,
         Some(state.space.output_geometry(&surface.output).map(|g| g.size).unwrap_or_else(|| (1, 1).into())),
         Kind::Unspecified,
     ) {
