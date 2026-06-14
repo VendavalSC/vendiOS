@@ -1,9 +1,13 @@
 # Maintainer: vendiOS <layoguerrero@gmail.com>
 pkgname=vendi-git
 _pkgname=vendi
-pkgver=r1
-pkgrel=4
-pkgdesc="vendiOS CLI, installer, vendiwm compositor, supporting libraries (git)"
+# vendiOS uses Minecraft-style snapshot versions: YYwWW<letter>
+#   26w24b = 2026, ISO week 24, snapshot b   (preview, pre-v0.1.1)
+# Bump this by hand each snapshot (a → b → c …, then next week 26w25a).
+# Stable releases will drop the snapshot scheme for plain semver (0.1.1, …).
+pkgver=26w24b
+pkgrel=1
+pkgdesc="vendiOS preview snapshot — compositor, bar, lock, installer, CLI (pre-v0.1.1)"
 arch=('x86_64')
 url="https://github.com/VendavalSC/vendiOS"
 license=('MIT')
@@ -51,10 +55,8 @@ conflicts=("${_pkgname}")
 source=("${_pkgname}::git+${url}.git")
 sha256sums=('SKIP')
 
-pkgver() {
-    cd "${_pkgname}"
-    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-}
+# NB: no pkgver() — snapshot versions are set by hand above (Minecraft-style),
+# not auto-derived from the git revision.
 
 build() {
     cd "${_pkgname}/src"
