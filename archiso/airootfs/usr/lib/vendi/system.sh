@@ -182,12 +182,35 @@ EOF
     chroot_run systemctl mask getty@tty1.service >/dev/null 2>&1 || true
     chroot_run systemctl enable greetd.service   >/dev/null 2>&1 || true
 
-    # Hold Plymouth alive until Hyprland's first frame — mask the early-quit
-    # services so the splash persists from boot straight into the compositor.
-    # Hyprland calls `plymouth quit --retain-splash` from exec-once to release
-    # the DRM master cleanly without a black gap.
+    # Plymouth holds the GPU as DRM master for the splash. The session runs as
+    # the *user*, who cannot quit the root plymouthd — so on real GPUs (Intel
+    # i915) plymouthd keeps /dev/dri/cardN and the compositor's session.open
+    # fails with EBUSY (ResourceBusy). Quit Plymouth from a ROOT oneshot
+    # ordered right before greetd. We mask the stock quit units and let this
+    # single, correctly-ordered service own the handoff (brief black gap, but
+    # a reliable boot beats a seamless black screen).
     chroot_run systemctl mask plymouth-quit.service      >/dev/null 2>&1 || true
     chroot_run systemctl mask plymouth-quit-wait.service >/dev/null 2>&1 || true
+    cat > /mnt/etc/systemd/system/vendi-plymouth-quit.service <<'PQ'
+[Unit]
+Description=Quit Plymouth and release DRM before the compositor
+After=systemd-user-sessions.service
+Before=greetd.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/bin/plymouth quit
+ExecStartPost=/usr/bin/bash -c 'for i in $(seq 1 50); do pgrep -x plymouthd >/dev/null 2>&1 || exit 0; sleep 0.1; done; pkill -x plymouthd 2>/dev/null; exit 0'
+[Install]
+WantedBy=graphical.target
+PQ
+    mkdir -p /mnt/etc/systemd/system/greetd.service.d
+    cat > /mnt/etc/systemd/system/greetd.service.d/10-after-plymouth.conf <<'GD'
+[Unit]
+After=vendi-plymouth-quit.service
+Wants=vendi-plymouth-quit.service
+GD
+    chroot_run systemctl enable vendi-plymouth-quit.service >/dev/null 2>&1 || true
 
     # Suppress any /etc/issue banner that might leak in failure modes
     : > /mnt/etc/issue

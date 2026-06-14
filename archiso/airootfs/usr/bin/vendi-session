@@ -112,6 +112,19 @@ spawn_desktop() {
 
 (spawn_desktop) &
 
+# Diagnostic: snapshot the DRM state + whether plymouthd still holds the GPU,
+# right before the compositor opens it. If the compositor ever fails with
+# EBUSY again, this names exactly what's holding /dev/dri/cardN.
+{
+    echo "=== pre-compositor $(date '+%T') ==="
+    ls -l /dev/dri/ 2>&1
+    if pgrep -ax plymouthd >/dev/null 2>&1; then
+        echo "WARN: plymouthd STILL RUNNING (likely holding DRM):"; pgrep -ax plymouthd
+    else
+        echo "plymouthd: gone (good)"
+    fi
+} >> "$LOG" 2>&1
+
 case "${VENDI_SESSION:-vendiwm}" in
     hyprland)
         exec Hyprland >> "$LOG" 2>&1
