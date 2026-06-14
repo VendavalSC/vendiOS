@@ -108,7 +108,14 @@ ShellRoot {
 
     // ── theme ────────────────────────────────────────────────────────────────
     property color accent: "#cba6f7"
-    property color panel:  Qt.rgba(0.043, 0.043, 0.071, 1.0)    // #0b0b12 — fully solid, never see-through
+    // Bar/notch background: a near-black base tinted a little toward the theme
+    // accent so the whole bar shifts with the theme (warm on gruvbox, red on
+    // think, …), not just the text. Kept dark and fully solid — the bar's
+    // hover/surface overlays are white-alpha, so a light panel would break
+    // them. Re-evaluates live whenever `accent` changes.
+    property color panel:  Qt.rgba(0.05 + accent.r * 0.06,
+                                   0.05 + accent.g * 0.06,
+                                   0.07 + accent.b * 0.06, 1.0)
     property color fg:     "#cdd6f4"
     property color dim:    "#717189"
     property color alert:  "#f38ba8"
