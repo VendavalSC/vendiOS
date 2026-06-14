@@ -844,6 +844,92 @@ cmd_fingerprint() {
     esac
 }
 
+# ── displays ────────────────────────────────────────────────────────────────
+# Arrange monitors from the terminal (the Pro bar has a GUI tab; this is the
+# classic-bar equivalent). Wraps `vendi-ctl output {list,scale,position,mode,
+# reset}`. The plain list format is:  "  <name>  <WxH@hz>  scale <s>  at <x,y>".
+_out_field() { vendi-ctl output list 2>/dev/null | awk -v n="$1" -v f="$2" '$1==n{print $f}'; }
+
+cmd_display() {
+    command -v vendi-ctl >/dev/null || { _err "vendi-ctl not available"; return 1; }
+    _header "displays"
+    local list; list=$(vendi-ctl output list 2>/dev/null)
+    if ! printf '%s' "$list" | grep -qE ' at '; then
+        _err "no monitors detected (is vendiwm running?)"; return 1
+    fi
+    local choice
+    choice=$(printf '%s\n' "$list" \
+        | awk 'NF>=6 && $5=="at"{ printf "%s\t󰍹 %-10s %-13s scale %-5s @ %s\n", $1, $1, $2, $4, $6 }' \
+        | _fzf "display> " --delimiter='\t' --with-nth=2 --header="enter configure · esc done") || return 0
+    local name; name=$(printf '%s' "$choice" | cut -f1)
+    [[ -z "$name" ]] && return 0
+    _display_actions "$name"
+    cmd_display   # loop until esc
+}
+
+_display_actions() {
+    local name=$1 act
+    act=$(printf '%b' "scale\t󰊓 scale\nposition\t󰍹 position (arrange)\nmode\t󰧨 resolution\nreset\t󰑓 reset to auto\n" \
+        | _fzf "${name}> " --delimiter='\t' --with-nth=2 --header="configure ${name} · esc back") || return 0
+    case "$(printf '%s' "$act" | cut -f1)" in
+        scale)    _display_scale "$name" ;;
+        position) _display_position "$name" ;;
+        mode)     _display_mode "$name" ;;
+        reset)    vendi-ctl output reset "$name" && _ok "${name}: reset to auto" ;;
+    esac
+}
+
+_display_scale() {
+    local name=$1 s
+    s=$(printf '%b' "1.0\n1.25\n1.5\n1.75\n2.0\n" \
+        | _fzf "${name} scale> " --header="enter apply · esc back") || return 0
+    [[ -n "$s" ]] && vendi-ctl output scale "$name" "$s" && _ok "${name}: scale ${s}"
+}
+
+_display_mode() {
+    local name=$1 m
+    _info "current: $(_out_field "$name" 2)"
+    read -rp "  new mode (WxH[@hz], blank to cancel): " m
+    [[ -n "$m" ]] && vendi-ctl output mode "$name" "$m" && _ok "${name}: mode ${m}"
+}
+
+_display_position() {
+    local name=$1
+    local others; others=$(vendi-ctl output list 2>/dev/null | awk -v n="$name" 'NF>=6 && $5=="at" && $1!=n{print}')
+    if [[ -z "$others" ]]; then
+        vendi-ctl output position "$name" 0 0 && _ok "${name}: primary at 0,0"
+        return 0
+    fi
+    local ref
+    ref=$(printf '%s\n' "$others" \
+        | awk 'NF>=6{printf "%s\t%s (%s)\n",$1,$1,$2}' \
+        | _fzf "place ${name} next to> " --delimiter='\t' --with-nth=2 --header="reference monitor · esc back") || return 0
+    local rname; rname=$(printf '%s' "$ref" | cut -f1)
+    [[ -z "$rname" ]] && return 0
+    local side
+    side=$(printf '%b' "right\nleft\nabove\nbelow\n" \
+        | _fzf "side> " --header="${name} goes to the ___ of ${rname}") || return 0
+    [[ -z "$side" ]] && return 0
+    # Reference + this monitor geometry. Mode is physical WxH; positions are in
+    # logical global space, so divide each width/height by its scale.
+    local rmode rpos rscale mmode mscale
+    rmode=$(_out_field "$rname" 2); rpos=$(_out_field "$rname" 6); rscale=$(_out_field "$rname" 4)
+    mmode=$(_out_field "$name"  2); mscale=$(_out_field "$name"  4)
+    local rw=${rmode%@*}; local rh=${rw#*x}; rw=${rw%x*}
+    local mw=${mmode%@*}; local mh=${mw#*x}; mw=${mw%x*}
+    local rx=${rpos%,*}; local ry=${rpos#*,}
+    local nx ny
+    read -r nx ny < <(awk -v rw="$rw" -v rh="$rh" -v rx="$rx" -v ry="$ry" \
+        -v mw="$mw" -v mh="$mh" -v rs="${rscale:-1}" -v ms="${mscale:-1}" -v side="$side" 'BEGIN{
+            rwl=int(rw/rs); rhl=int(rh/rs); mwl=int(mw/ms); mhl=int(mh/ms);
+            if(side=="right"){nx=rx+rwl; ny=ry}
+            else if(side=="left"){nx=rx-mwl; ny=ry}
+            else if(side=="above"){nx=rx; ny=ry-mhl}
+            else {nx=rx; ny=ry+rhl}
+            print nx, ny }')
+    vendi-ctl output position "$name" "$nx" "$ny" && _ok "${name}: ${side} of ${rname} (${nx},${ny})"
+}
+
 cmd_help() {
     _logo
     printf "\n  ${OVERLAY}Minimal. Modern. Yours.${R}\n\n"
@@ -860,6 +946,7 @@ cmd_help() {
     _cmd "rollback" "roll back to a previous snapshot"
     _cmd "theme"    "recolor the whole desktop (mocha latte gruvbox mono think)"
     _cmd "bar"      "switch the status bar (classic / pro)"
+    _cmd "display"  "arrange monitors — scale, position, resolution"
     _cmd "wifi"     "scan and connect to wireless networks"
     _cmd "bt"       "pair and connect bluetooth devices"
     _cmd "audio"    "pick output sink, volume, mute"
@@ -880,6 +967,7 @@ case "${1:-help}" in
     rollback) shift; cmd_rollback "$@" ;;
     theme)    shift; cmd_theme "$@" ;;
     bar)      shift; cmd_bar "$@" ;;
+    display|displays|monitor|monitors) cmd_display ;;
     wifi)     cmd_wifi  ;;
     bt|bluetooth) cmd_bt ;;
     audio)    cmd_audio ;;

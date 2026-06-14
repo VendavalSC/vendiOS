@@ -1388,7 +1388,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // windows, layers, ghosts, and the cursor are all skipped below.
     let locked = state.vlock;
 
-    let scale = smithay::utils::Scale::from(1.0_f64);
+    // Real output scale (HiDPI / fractional). The whole element stack below
+    // is laid out in logical coords and converted to physical with this; a
+    // few spots build physical points by hand and multiply by `sf` directly.
+    let sf = surface.output.current_scale().fractional_scale();
+    let scale = smithay::utils::Scale::from(sf);
 
     // ── session lock ─────────────────────────────────────────────────────────
     // Handled AFTER the desktop element stack is built (see below): the
@@ -1566,8 +1570,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // Cursor first — render_frame treats `elements` as front-to-back, so
     // index 0 is drawn on top of everything else.
     let pointer_phys = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
-        state.pointer_location.x - out_loc.x as f64 - cursor.hotspot.0 as f64,
-        state.pointer_location.y - out_loc.y as f64 - cursor.hotspot.1 as f64,
+        (state.pointer_location.x - out_loc.x as f64 - cursor.hotspot.0 as f64) * sf,
+        (state.pointer_location.y - out_loc.y as f64 - cursor.hotspot.1 as f64) * sf,
     ));
     if !locked {
         if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
@@ -1608,8 +1612,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             ((geo.size.h as f64 * shrink) as i32).max(1),
         ));
         let loc = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
-            (geo.loc.x - out_loc.x) as f64 + (geo.size.w - size.w) as f64 / 2.0,
-            (geo.loc.y - out_loc.y) as f64 + (geo.size.h - size.h) as f64 / 2.0,
+            ((geo.loc.x - out_loc.x) as f64 + (geo.size.w - size.w) as f64 / 2.0) * sf,
+            ((geo.loc.y - out_loc.y) as f64 + (geo.size.h - size.h) as f64 / 2.0) * sf,
         ));
         let ghost = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
             eid.clone(),
@@ -1761,8 +1765,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                 (target.size.w + border_w * 2, target.size.h + border_w * 2).into(),
             );
             let ring_center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
-                target.loc.x + target.size.w / 2,
-                target.loc.y + target.size.h / 2,
+                (((target.loc.x + target.size.w / 2) as f64) * sf).round() as i32,
+                (((target.loc.y + target.size.h / 2) as f64) * sf).round() as i32,
             ));
             let ring = PixelShaderElement::new(
                 border_prog.clone(),
@@ -1796,10 +1800,13 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         let anchor: smithay::utils::Point<i32, smithay::utils::Physical> =
             geo.loc.to_physical_precise_round(scale);
         let content_center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
-            geo.loc.x + target.size.w / 2,
-            geo.loc.y + target.size.h / 2,
+            (((geo.loc.x + target.size.w / 2) as f64) * sf).round() as i32,
+            (((geo.loc.y + target.size.h / 2) as f64) * sf).round() as i32,
         ));
-        let off = (target.loc.x - geo.loc.x, target.loc.y - geo.loc.y);
+        let off = (
+            (((target.loc.x - geo.loc.x) as f64) * sf).round() as i32,
+            (((target.loc.y - geo.loc.y) as f64) * sf).round() as i32,
+        );
         for elem in surfaces {
             let rounded = crate::render::RoundedElement::new(elem, rounded_prog.clone(), radius);
             let morphed = RescaleRenderElement::from_element(rounded, anchor, morph_scale);
@@ -1959,26 +1966,29 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         let far_x = cx.max(osize.w as f32 - cx);
         let far_y = cy.max(osize.h as f32 - cy);
         let max_r = (far_x * far_x + far_y * far_y).sqrt();
+        // The buffer is built at physical mode size; tell the element to fill
+        // the logical output so the render scale maps it back to full physical.
         if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             (0.0, 0.0),
             &surface.wallpaper,
             Some(wallpaper_alpha),
             None,
-            None,
+            Some(osize),
             Kind::Unspecified,
         ) {
+            // Reveal shader works in physical dst pixels → scale the disc.
             elements.push(OutputRenderElements::Reveal(crate::render::RevealElement::new(
                 elem,
                 reveal_prog.clone(),
-                (cx, cy),
-                p * max_r,
+                ((cx as f64 * sf) as f32, (cy as f64 * sf) as f32),
+                p * max_r * sf as f32,
             )));
         }
         // The outgoing wallpaper sits underneath, untouched.
         if let Some((old, ..)) = &surface.old_wallpaper {
             if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
-                renderer, (0.0, 0.0), old, Some(wallpaper_alpha), None, None, Kind::Unspecified,
+                renderer, (0.0, 0.0), old, Some(wallpaper_alpha), None, Some(osize), Kind::Unspecified,
             ) {
                 elements.push(OutputRenderElements::Memory(elem));
             }
@@ -1989,7 +1999,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         &surface.wallpaper,
         Some(wallpaper_alpha),
         None,
-        None,
+        Some(state.space.output_geometry(&surface.output).map(|g| g.size).unwrap_or_else(|| (1, 1).into())),
         Kind::Unspecified,
     ) {
         let zoom = match ws_progress.filter(|p| *p < 1.0) {
@@ -2000,7 +2010,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             .map(|g| g.size)
             .unwrap_or_else(|| (1, 1).into());
         let center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
-            osize.w / 2, osize.h / 2,
+            ((osize.w as f64) * sf / 2.0) as i32, ((osize.h as f64) * sf / 2.0) as i32,
         ));
         elements.push(OutputRenderElements::Wallpaper(
             RescaleRenderElement::from_element(elem, center, zoom),
