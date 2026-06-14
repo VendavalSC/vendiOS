@@ -37,6 +37,9 @@ use smithay::{
             wlr_data_control::{DataControlHandler, DataControlState},
         },
         viewporter::ViewporterState,
+        fractional_scale::{
+            FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
+        },
         shell::{
             xdg::{
                 PopupSurface, PositionerState, ToplevelSurface,
@@ -78,6 +81,7 @@ pub struct State {
     pub idle_inhibitors:       std::collections::HashSet<WlSurface>,
     pub xdg_decoration_state:  smithay::wayland::shell::xdg::decoration::XdgDecorationState,
     pub viewporter_state:      ViewporterState,
+    pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub seat:                  Seat<Self>,
 
     // ext-session-lock: a client (swaylock) asked to lock. We confirm only
@@ -259,6 +263,18 @@ impl CompositorHandler for State {
     }
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+
+        // Tell fractional-scale-aware clients (quickshell, alacritty, GTK) the
+        // scale to render at. Without this they only ever learn the integer
+        // wl_output scale and render blurry/unscaled at fractional scales.
+        // set_preferred_scale is a no-op when unchanged / no fractional object.
+        if let Some(s) = self.space.outputs().next()
+            .map(|o| o.current_scale().fractional_scale())
+        {
+            with_states(surface, |states| {
+                with_fractional_scale(states, |fs| fs.set_preferred_scale(s));
+            });
+        }
 
         // Popups: track commits + send the spec-mandated initial configure.
         self.popups.commit(surface);
@@ -560,6 +576,20 @@ impl smithay::wayland::shell::xdg::decoration::XdgDecorationHandler for State {
 }
 
 impl OutputHandler for State {}
+
+impl FractionalScaleHandler for State {
+    // A client just bound wp_fractional_scale for this surface — send it the
+    // current preferred scale right away (the commit handler keeps it fresh).
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        if let Some(s) = self.space.outputs().next()
+            .map(|o| o.current_scale().fractional_scale())
+        {
+            with_states(&surface, |states| {
+                with_fractional_scale(states, |fs| fs.set_preferred_scale(s));
+            });
+        }
+    }
+}
 
 impl WlrLayerShellHandler for State {
     fn shell_state(&mut self) -> &mut WlrLayerShellState {

@@ -672,6 +672,8 @@ fn build_state(
     let idle_inhibit_state   = smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<State>(dh);
     let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(dh);
     let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(dh);
+    let fractional_scale_manager_state =
+        smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<State>(dh);
     let dmabuf_state         = DmabufState::new();
 
     let config = crate::config::Config::load().unwrap_or_else(|e| {
@@ -711,6 +713,7 @@ fn build_state(
         idle_inhibitors:        Default::default(),
         xdg_decoration_state,
         viewporter_state,
+        fractional_scale_manager_state,
         seat,
         lock_pending:           None,
         locked:                 false,

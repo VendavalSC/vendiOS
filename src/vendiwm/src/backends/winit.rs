@@ -67,6 +67,8 @@ pub fn run() -> Result<()> {
     let idle_inhibit_state   = smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<State>(&dh);
     let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(&dh);
     let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(&dh);
+    let fractional_scale_manager_state =
+        smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<State>(&dh);
     let mut seat_state       = smithay::input::SeatState::new();
     let seat                 = seat_state.new_wl_seat(&dh, "vendi-seat-0");
 
@@ -131,6 +133,7 @@ pub fn run() -> Result<()> {
         idle_inhibitors: Default::default(),
         xdg_decoration_state,
         viewporter_state,
+        fractional_scale_manager_state,
         seat,
         lock_pending: None,
         locked: false,
