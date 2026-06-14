@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO=/home/vendi/vendiOS
 CLONE=~/aur-vendi-git
-MSG="${1:-26w24c: touch, blur toggle, opacity, displays tab}"
+MSG="${1:-26w25a: output scaling, fractional scale, vendi display, themed bars}"
 
 # Load the (passphrase-protected) AUR key once for this run.
 if ! ssh-add -l >/dev/null 2>&1; then
