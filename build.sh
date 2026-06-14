@@ -75,7 +75,9 @@ echo "  Rust binaries staged into airootfs."
 # NO network. The installer auto-detects /opt/vendios/repo and switches to it.
 OFFLINE_DIR="${PROFILE}/airootfs/opt/vendios"
 REPO="${OFFLINE_DIR}/repo"
-if $OFFLINE; then
+if $OFFLINE && [[ -f "${REPO}/vendios.db.tar.zst" ]]; then
+    echo "  Reusing existing offline repo ($(ls "${REPO}"/*.pkg.tar.zst 2>/dev/null | wc -l) packages) — delete ${REPO} to force a fresh download."
+elif $OFFLINE; then
     echo "  Bundling offline package repo (downloads the full target package set)..."
     # BASE_PKGS lives in system.sh; sourcing it only defines the array.
     # shellcheck source=/dev/null

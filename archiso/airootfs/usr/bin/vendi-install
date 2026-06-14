@@ -47,7 +47,7 @@ step_back() { (( STEP > 0 )) && (( STEP-- )); }
 step_welcome() {
     ui_clear
     ui_panel_draw 1 "$TOTAL" "Welcome"
-    ui_hints "Enter:begin" "Ctrl+C:quit"
+    ui_hints "Enter:begin" "S:rescue shell" "Ctrl+C:quit"
 
     # The shard, then the name under it — the boot logo carried into the
     # installer.
@@ -68,7 +68,23 @@ step_welcome() {
     fi
 
     ui_center_text 22 "${BOLD}${FG_ACCENT}Press Enter to begin${R}"
-    local k; IFS= read -rsn1 k; return 0
+    ui_center_text 23 "${FG_DIM}or press S for a rescue shell (mount disks, read logs)${R}"
+    local k; IFS= read -rsn1 k
+    # Rescue shell: drop straight to root bash in the live env — lets you
+    # unlock/mount an existing install and read its logs without reinstalling.
+    if [[ "$k" == 's' || "$k" == 'S' ]]; then
+        ui_cleanup 2>/dev/null || true
+        clear
+        echo "vendiOS rescue shell."
+        echo "  e.g.:  lsblk"
+        echo "         cryptsetup open /dev/mmcblk0p2 root   # your LUKS partition"
+        echo "         mount -o subvol=@home /dev/mapper/root /mnt"
+        echo "         cat /mnt/*/logs/vendi-session.log"
+        echo "  Type 'exit' (or reboot) when done."
+        echo
+        exec bash
+    fi
+    return 0
 }
 
 # ── step: locale ──────────────────────────────────────────────────────────────
