@@ -84,8 +84,8 @@ binds {
     bind "super+shift+s"       "spawn sh -c 'grim -g \"$(slurp)\" - | wl-copy'"
 
     // ── media keys ─────────────────────────────────────────────
-    bind "XF86AudioRaiseVolume" "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
-    bind "XF86AudioLowerVolume" "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
+    bind "XF86AudioRaiseVolume" "spawn wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"
+    bind "XF86AudioLowerVolume" "spawn wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%-"
     bind "XF86AudioMute"        "spawn wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
     bind "XF86AudioMicMute"     "spawn wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"
     bind "XF86AudioPlay"        "spawn playerctl play-pause"

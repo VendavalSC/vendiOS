@@ -218,7 +218,9 @@ ShellRoot {
     // ── audio (pipewire, live — no polling) ──────────────────────────────────
     PwObjectTracker { objects: [Pipewire.defaultAudioSink] }
     property var sinkAudio: Pipewire.defaultAudioSink?.audio ?? null
-    property int volume: sinkAudio ? Math.round(sinkAudio.volume * 100) : -1
+    // Clamp the displayed volume at 100 — pipewire can report >1.0 if something
+    // over-amplified the sink; the bar should never show 130%.
+    property int volume: sinkAudio ? Math.min(100, Math.round(sinkAudio.volume * 100)) : -1
     property bool muted: sinkAudio?.muted ?? false
     function setVolume(pct) {
         if (!sinkAudio) return;
@@ -288,17 +290,55 @@ ShellRoot {
     // Armed late so the initial pipewire binding doesn't flash it at startup.
     property bool osdShow: false
     property bool osdArmed: false
+    property string osdKind: "volume"   // "volume" | "brightness"
     Timer { interval: 4000; running: true; onTriggered: root.osdArmed = true }
     Timer { id: osdTimer; interval: 1400; onTriggered: root.osdShow = false }
     Connections {
         target: root.sinkAudio
-        function onVolumeChanged() { root.pokeOsd() }
-        function onMutedChanged()  { root.pokeOsd() }
+        function onVolumeChanged() { root.pokeOsd("volume") }
+        function onMutedChanged()  { root.pokeOsd("volume") }
     }
-    function pokeOsd() {
+    function pokeOsd(kind) {
         if (!osdArmed) return;
+        osdKind = kind || "volume";
         osdShow = true;
         osdTimer.restart();
+    }
+
+    // ── screen-brightness OSD ─────────────────────────────────────────────────
+    // The XF86MonBrightness keys run brightnessctl, which writes the backlight
+    // sysfs file. Watch that file so the bar flashes a brightness OSD (and keeps
+    // root.brightness live) — there's no D-Bus signal for backlight changes.
+    property string backlightPath: ""
+    property int    backlightMax: 1
+    Process {
+        id: backlightFind
+        running: true
+        command: ["sh", "-c",
+            "d=$(ls /sys/class/backlight 2>/dev/null | head -1); " +
+            "[ -n \"$d\" ] && { echo \"/sys/class/backlight/$d\"; cat \"/sys/class/backlight/$d/max_brightness\"; }"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const l = text.trim().split("\n");
+                if (l.length >= 2) {
+                    root.backlightPath = l[0];
+                    root.backlightMax = parseInt(l[1]) || 1;
+                }
+            }
+        }
+    }
+    FileView {
+        path: root.backlightPath !== "" ? root.backlightPath + "/brightness" : ""
+        watchChanges: root.backlightPath !== ""
+        onFileChanged: reload()
+        onLoaded: {
+            const v = parseInt(text().trim());
+            if (isNaN(v) || root.backlightMax <= 0) return;
+            const pct = Math.round(100 * v / root.backlightMax);
+            const changed = pct !== root.brightness;
+            root.brightness = pct;            // keep the slider live + reactive
+            if (changed) root.pokeOsd("brightness");
+        }
     }
 
     // ── battery (upower) ─────────────────────────────────────────────────────
@@ -1090,9 +1130,11 @@ ShellRoot {
                 opacity: panelWin.rightMode === "osd" ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: 140 } }
 
+                readonly property bool bri: root.osdKind === "brightness"
                 Glyph {
-                    text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
-                    color: root.muted ? root.dim : root.accent
+                    text: osdRow.bri ? "󰃟"
+                        : root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
+                    color: (!osdRow.bri && root.muted) ? root.dim : root.accent
                     font.pixelSize: 15
                 }
                 Rectangle {
@@ -1101,14 +1143,18 @@ ShellRoot {
                     radius: 3
                     color: Qt.rgba(1, 1, 1, 0.10)
                     Rectangle {
-                        width: parent.width * Math.max(0, root.volume) / 100
+                        width: parent.width * Math.max(0, Math.min(100, osdRow.bri ? root.brightness : root.volume)) / 100
                         height: parent.height
                         radius: 3
-                        color: root.muted ? root.dim : root.accent
+                        color: (!osdRow.bri && root.muted) ? root.dim : root.accent
                         Behavior on width { NumberAnimation { duration: 100 } }
                     }
                 }
-                Mono { text: root.muted ? "muted" : root.volume + "%"; Layout.preferredWidth: 44 }
+                Mono {
+                    text: osdRow.bri ? root.brightness + "%"
+                        : root.muted ? "muted" : root.volume + "%"
+                    Layout.preferredWidth: 44
+                }
             }
 
             // ── notification toast (right notch swells around it) ───────────

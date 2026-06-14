@@ -589,56 +589,16 @@ sys_fastfetch_config() {
       "keyColor": "38;2;203;166;247"
     },
     { "type": "separator", "string": "─" },
-    {
-      "type": "os",
-      "key": "  os",
-      "keyColor": "38;2;203;166;247"
-    },
-    {
-      "type": "kernel",
-      "key": "  kernel",
-      "keyColor": "38;2;180;190;254"
-    },
-    {
-      "type": "uptime",
-      "key": "󰔟  uptime",
-      "keyColor": "38;2;148;226;213"
-    },
-    {
-      "type": "packages",
-      "key": "  packages",
-      "keyColor": "38;2;166;227;161"
-    },
-    {
-      "type": "shell",
-      "key": "  shell",
-      "keyColor": "38;2;249;226;175"
-    },
-    {
-      "type": "terminal",
-      "key": "  terminal",
-      "keyColor": "38;2;250;179;135"
-    },
-    {
-      "type": "cpu",
-      "key": "  cpu",
-      "keyColor": "38;2;243;139;168"
-    },
-    {
-      "type": "gpu",
-      "key": "󰍛  gpu",
-      "keyColor": "38;2;235;160;172"
-    },
-    {
-      "type": "memory",
-      "key": "  memory",
-      "keyColor": "38;2;137;180;250"
-    },
-    {
-      "type": "disk",
-      "key": "󰋊  disk",
-      "keyColor": "38;2;108;112;134"
-    },
+    { "type": "os",       "key": "os",       "keyColor": "38;2;203;166;247" },
+    { "type": "kernel",   "key": "kernel",   "keyColor": "38;2;180;190;254" },
+    { "type": "uptime",   "key": "uptime",   "keyColor": "38;2;148;226;213" },
+    { "type": "packages", "key": "packages", "keyColor": "38;2;166;227;161" },
+    { "type": "shell",    "key": "shell",    "keyColor": "38;2;249;226;175" },
+    { "type": "terminal", "key": "terminal", "keyColor": "38;2;250;179;135" },
+    { "type": "cpu",      "key": "cpu",      "keyColor": "38;2;243;139;168" },
+    { "type": "gpu",      "key": "gpu",      "keyColor": "38;2;235;160;172" },
+    { "type": "memory",   "key": "memory",   "keyColor": "38;2;137;180;250" },
+    { "type": "disk",     "key": "disk",     "keyColor": "38;2;108;112;134" },
     { "type": "separator", "string": "─" },
     { "type": "colors", "paddingLeft": 2, "symbol": "circle" }
   ]

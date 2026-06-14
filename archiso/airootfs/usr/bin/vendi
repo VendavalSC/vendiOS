@@ -176,7 +176,7 @@ cmd_info() {
     _kv "version"   "${ver} (${codename})"
     _kv "built"     "${built}"
     _kv "kernel"    "$(uname -r)"
-    _kv "hostname"  "$(hostname)"
+    _kv "hostname"  "$(uname -n)"
     _kv "uptime"    "$(uptime -p 2>/dev/null | sed 's/up //')"
     _kv "packages"  "$(pacman -Q 2>/dev/null | wc -l) installed"
     _kv "disk /"    "$(df -h / 2>/dev/null | awk 'NR==2{print $3" / "$2" ("$5" used)"}')"
