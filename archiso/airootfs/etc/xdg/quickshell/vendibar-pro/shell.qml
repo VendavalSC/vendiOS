@@ -580,6 +580,13 @@ ShellRoot {
             function togglePower()  { powerOpen = !powerOpen;  if (powerOpen) { centerOpen = false; rightOpen = false; searchOpen = false; } }
             function openSearch(m)  { searchMode = m; searchOpen = true; centerOpen = false; rightOpen = false; powerOpen = false; }
             function closeSearch()  { searchOpen = false; }
+            // Only ever one panel open at a time — opening any one closes the
+            // rest, however it was opened (toggle, keybind, click). Guards only
+            // fire on the true edge, so there's no feedback loop.
+            onCenterOpenChanged: if (centerOpen) { rightOpen = false; powerOpen = false; searchOpen = false; }
+            onRightOpenChanged:  if (rightOpen)  { centerOpen = false; powerOpen = false; searchOpen = false; }
+            onPowerOpenChanged:  if (powerOpen)  { centerOpen = false; rightOpen = false; searchOpen = false; }
+            onSearchOpenChanged: if (searchOpen) { centerOpen = false; rightOpen = false; powerOpen = false; }
 
             // right notch mode: power menu wins, then control center, then
             // toasts, then the volume OSD
@@ -1061,7 +1068,7 @@ ShellRoot {
                 // system tray (icons only; click = activate)
                 RowLayout {
                     spacing: 8
-                    visible: SystemTray.items.values.length > 0
+                    visible: SystemTray.items.values.length > 0 && !panelWin.centerExpanded
                     Repeater {
                         model: SystemTray.items
                         IconImage {
@@ -1074,12 +1081,14 @@ ShellRoot {
                         }
                     }
                 }
-                Sep { visible: SystemTray.items.values.length > 0 }
+                Sep { visible: SystemTray.items.values.length > 0 && !panelWin.centerExpanded }
 
                 // quiet icon cluster — no numbers in the corner; the control
-                // center carries the detail
+                // center carries the detail. Hidden while the island is open so
+                // the right pill collapses to just the power button.
                 RowLayout {
                     spacing: 11
+                    visible: !panelWin.centerExpanded
                     Glyph { text: root.netIcon; font.pixelSize: 14 }
                     Glyph {
                         text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
@@ -1103,7 +1112,6 @@ ShellRoot {
                         }
                         Mono {
                             text: root.battery + "%"
-                            visible: !panelWin.centerExpanded
                             font.pixelSize: 11
                             color: root.charging ? root.good
                                  : root.battery <= 20 ? root.alert : root.dim
@@ -1117,7 +1125,7 @@ ShellRoot {
                     TapHandler { onTapped: panelWin.toggleRight() }
                 }
 
-                Sep {}
+                Sep { visible: !panelWin.centerExpanded }
                 Mono {
                     text: "󰐥"
                     color: root.accent
