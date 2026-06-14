@@ -592,6 +592,12 @@ ShellRoot {
 
             // notch dimensions, all springy. Idle notches grow a hair on
             // hover — the island invites the click.
+            // While the center island is expanded the side pills drop their
+            // text (window title / battery %) and keep just their icons, so
+            // they shrink a little and stop kissing the island — they don't
+            // vanish, and spring back when it collapses. (Scaling on a tiny
+            // screen is never going to be roomy; this just adds breathing space.)
+            property bool centerExpanded: centerOpen || searchOpen
             property real lw: root.modulesHidden ? 0
                 : leftRow.implicitWidth + root.pad * 2
             property real cw: centerOpen ? Math.min(880, panelWin.width - 120)
@@ -744,11 +750,9 @@ ShellRoot {
                     ctx.closePath();
                     ctx.fillStyle = root.panel;
                     ctx.fill();
-                    // Rim light: a whisper of an edge so the silhouette
-                    // separates from dark wallpapers.
-                    ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
-                    ctx.lineWidth = 1;
-                    ctx.stroke();
+                    // No rim/border: a lighter edge made overlapping notches
+                    // read as a seam. Flat fill only, so any overlap just
+                    // blends into one solid shape.
                 }
             }
 
@@ -823,10 +827,10 @@ ShellRoot {
                     }
                 }
 
-                Sep { visible: root.title.length > 0 }
+                Sep { visible: root.title.length > 0 && !panelWin.centerExpanded }
                 Mono {
                     text: root.title.length > 42 ? root.title.slice(0, 42) + "…" : root.title
-                    visible: root.title.length > 0
+                    visible: root.title.length > 0 && !panelWin.centerExpanded
                     color: root.dim
                 }
             }
@@ -1099,6 +1103,7 @@ ShellRoot {
                         }
                         Mono {
                             text: root.battery + "%"
+                            visible: !panelWin.centerExpanded
                             font.pixelSize: 11
                             color: root.charging ? root.good
                                  : root.battery <= 20 ? root.alert : root.dim
