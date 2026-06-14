@@ -690,6 +690,10 @@ fn build_state(
     seat.add_keyboard(xkb, config.repeat_delay, config.repeat_rate)
         .context("add keyboard to seat")?;
     let _ = seat.add_pointer();
+    // Touchscreen: advertise wl_touch so touch-aware clients get native
+    // touch events (real touchscreens emit Touch* events, not absolute
+    // pointer motion, so without this a tap reaches nothing).
+    let _ = seat.add_touch();
 
     Ok(State {
         compositor_state,
@@ -1677,7 +1681,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             .find(|(w, _)| w == window)
             .and_then(|(_, t)| *t)
             .map(|t| (now.duration_since(t).as_secs_f32() * 1000.0 / OPEN_MS).min(1.0));
-        let alpha = ws_alpha * open_t.map(ease_out).unwrap_or(1.0);
+        let alpha = ws_alpha * open_t.map(ease_out).unwrap_or(1.0)
+            * crate::state::window_opacity(window, theme.opacity);
         // Super+drag pick-up: ease in a slight grow while the grab holds,
         // and ease it back out after release (put-down).
         let drag_scale: f64 = state.drag.as_ref()
@@ -2684,6 +2689,60 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                 }
                 _ => {}
             }
+        }
+
+        // ── touchscreen ────────────────────────────────────────────────────
+        // Real touchscreens emit Touch* events (not absolute pointer motion),
+        // so they're delivered to touch-aware clients via wl_touch. A first
+        // touch also focuses/raises the window under it, like a tap-to-click.
+        InputEvent::TouchDown { event } => {
+            if state.vlock { return; }
+            use smithay::backend::input::TouchEvent as _;
+            let Some(touch) = state.seat.get_touch() else { return };
+            let Some(output) = state.space.outputs().next().cloned() else { return };
+            let Some(geo) = state.space.output_geometry(&output) else { return };
+            let pos = event.position_transformed(geo.size) + geo.loc.to_f64();
+            state.pointer_location = pos;
+            state.focus_window_at_cursor();
+            let under = state.surface_under(pos);
+            touch.down(state, under, &smithay::input::touch::DownEvent {
+                slot:     event.slot(),
+                location: pos,
+                serial:   SERIAL_COUNTER.next_serial(),
+                time:     InputEventTrait::time_msec(&event),
+            });
+            state.pending_redraw = true;
+        }
+        InputEvent::TouchMotion { event } => {
+            if state.vlock { return; }
+            use smithay::backend::input::TouchEvent as _;
+            let Some(touch) = state.seat.get_touch() else { return };
+            let Some(output) = state.space.outputs().next().cloned() else { return };
+            let Some(geo) = state.space.output_geometry(&output) else { return };
+            let pos = event.position_transformed(geo.size) + geo.loc.to_f64();
+            let under = state.surface_under(pos);
+            touch.motion(state, under, &smithay::input::touch::MotionEvent {
+                slot:     event.slot(),
+                location: pos,
+                time:     InputEventTrait::time_msec(&event),
+            });
+        }
+        InputEvent::TouchUp { event } => {
+            if state.vlock { return; }
+            use smithay::backend::input::TouchEvent as _;
+            let Some(touch) = state.seat.get_touch() else { return };
+            touch.up(state, &smithay::input::touch::UpEvent {
+                slot:   event.slot(),
+                serial: SERIAL_COUNTER.next_serial(),
+                time:   InputEventTrait::time_msec(&event),
+            });
+        }
+        InputEvent::TouchFrame { .. } => {
+            if state.vlock { return; }
+            if let Some(touch) = state.seat.get_touch() { touch.frame(state); }
+        }
+        InputEvent::TouchCancel { .. } => {
+            if let Some(touch) = state.seat.get_touch() { touch.cancel(state); }
         }
 
         _ => {}

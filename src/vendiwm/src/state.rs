@@ -396,6 +396,28 @@ pub fn window_id(window: &smithay::desktop::Window) -> u32 {
     window.user_data().get::<WindowId>().unwrap().0
 }
 
+/// Per-window opacity override, kept in the window's user-data so it travels
+/// with the window and needs no separate map/cleanup. Unset means "use the
+/// theme default"; `cycle-opacity` sets it explicitly.
+struct WindowOpacity(std::cell::Cell<f32>);
+
+/// Effective opacity for a window: its per-window override if set, else the
+/// theme default. Used by the renderer to scale the window's alpha.
+pub fn window_opacity(window: &smithay::desktop::Window, theme_default: f32) -> f32 {
+    window.user_data()
+        .get::<WindowOpacity>()
+        .map(|o| o.0.get())
+        .unwrap_or(theme_default)
+}
+
+/// Set a window's explicit opacity override (clamped to a visible range).
+pub fn set_window_opacity(window: &smithay::desktop::Window, value: f32) {
+    let v = value.clamp(0.1, 1.0);
+    let ud = window.user_data();
+    ud.insert_if_missing(|| WindowOpacity(std::cell::Cell::new(v)));
+    ud.get::<WindowOpacity>().unwrap().0.set(v);
+}
+
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -1048,6 +1070,21 @@ impl State {
             ToggleFloating      => self.toggle_floating(),
             ToggleFullscreen    => self.toggle_fullscreen(),
             ToggleOverview      => self.toggle_overview(),
+            ToggleBlur          => {
+                self.config.theme.blur = !self.config.theme.blur;
+                tracing::info!(blur = self.config.theme.blur, "toggle blur");
+                self.pending_redraw = true;
+            }
+            CycleOpacity        => {
+                if let Some(w) = self.focused_window() {
+                    // Opaque → 85% → 65% → opaque. Starts from the theme
+                    // default so a global `opacity` setting cycles sensibly.
+                    let cur = crate::state::window_opacity(&w, self.config.theme.opacity);
+                    let next = if cur > 0.95 { 0.85 } else if cur > 0.75 { 0.65 } else { 1.0 };
+                    crate::state::set_window_opacity(&w, next);
+                    self.pending_redraw = true;
+                }
+            }
             Lock                => self.lock_session(),
             Quit => { self.quit_requested = true; return true; }
         }

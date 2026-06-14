@@ -56,6 +56,8 @@ binds {
     bind "super+v"             "split-vertical"
     bind "super+f"             "fullscreen"
     bind "super+o"             "overview"
+    bind "super+shift+o"       "cycle-opacity"
+    bind "super+shift+b"       "toggle-blur"
     bind "super+shift+space"   "toggle-floating"
     bind "super+shift+escape"  "quit"
 
@@ -210,6 +212,10 @@ pub struct ThemeBlock {
     /// default; turn off on GPUs where the extra passes hurt.
     #[knus(child, unwrap(argument))]
     pub blur:       Option<bool>,
+    /// Default window opacity, 0.0–1.0 (1.0 = opaque). Applies to every
+    /// window; the `cycle-opacity` bind overrides it per-window at runtime.
+    #[knus(child, unwrap(argument))]
+    pub opacity:    Option<f64>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -250,6 +256,7 @@ pub struct Theme {
     pub margin:     i32,
     pub wallpaper:  Option<String>,
     pub blur:       bool,
+    pub opacity:    f32,
 }
 
 impl Default for Theme {
@@ -264,6 +271,7 @@ impl Default for Theme {
             margin:     14,
             wallpaper:  None,
             blur:       true,
+            opacity:    1.0,
         }
     }
 }
@@ -366,6 +374,7 @@ impl Config {
             if let Some(v) = t.margin  { theme.margin = v as i32; }
             if t.wallpaper.is_some()   { theme.wallpaper = t.wallpaper; }
             if let Some(v) = t.blur    { theme.blur = v; }
+            if let Some(v) = t.opacity { theme.opacity = (v as f32).clamp(0.1, 1.0); }
         }
 
         // Runtime wallpaper switches (vendi-ctl wallpaper / the bar's picker)
@@ -560,6 +569,8 @@ fn parse_action(s: &str) -> Result<Action> {
         "toggle-floating"   => Action::ToggleFloating,
         "fullscreen"        => Action::ToggleFullscreen,
         "overview"          => Action::ToggleOverview,
+        "toggle-blur"       => Action::ToggleBlur,
+        "cycle-opacity"     => Action::CycleOpacity,
         "lock"              => Action::Lock,
         "quit"              => Action::Quit,
         other => anyhow::bail!("unknown action verb {other:?}"),

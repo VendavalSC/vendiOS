@@ -54,6 +54,10 @@ pub enum Action {
     ToggleFullscreen,
     /// Toggle the overview (exposé) window grid.
     ToggleOverview,
+    /// Toggle the frosted-glass blur behind overlay surfaces.
+    ToggleBlur,
+    /// Cycle the focused window's opacity (opaque → translucent → back).
+    CycleOpacity,
     Lock,
     /// Quit the compositor.
     Quit,

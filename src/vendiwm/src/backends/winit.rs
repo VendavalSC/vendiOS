@@ -169,6 +169,7 @@ pub fn run() -> Result<()> {
     };
 
     let pointer = state.seat.add_pointer();
+    let _ = state.seat.add_touch();
 
     // Pick the first free wayland-N name. Bail rather than overwrite an
     // existing compositor's socket.
