@@ -69,6 +69,16 @@ for bin in vendiwm vendi-ctl vendi-demo vendibar vendi-menu; do
 done
 echo "  Rust binaries staged into airootfs."
 
+# Keep the shipped quickshell bar config in sync with its canonical source
+# (src/vendibar-pro). They are separate trees and drift silently otherwise —
+# which once shipped a stale, half-transparent bar. Always re-sync here.
+if [[ -d "${RUST_SRC}/vendibar-pro" ]]; then
+    mkdir -p "${PROFILE}/airootfs/etc/xdg/quickshell/vendibar-pro"
+    cp -a "${RUST_SRC}/vendibar-pro/." \
+          "${PROFILE}/airootfs/etc/xdg/quickshell/vendibar-pro/"
+    echo "  Synced src/vendibar-pro -> airootfs quickshell config."
+fi
+
 # ── Offline package repo ──────────────────────────────────────────────────────
 # Bundle a complete local pacman repo into the ISO so the installer can pacstrap
 # the whole target system (base + desktop + apps + every-vendor GPU driver) with

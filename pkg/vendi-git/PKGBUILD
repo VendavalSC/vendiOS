@@ -94,8 +94,11 @@ package() {
     # lock, themes and portals actually work — without them the quickshell
     # bars report "could not find config directory". Shipping them here means
     # `yay -S vendi-git` updates the whole desktop, no reinstall needed.
-    install -d "${pkgdir}/etc/xdg" "${pkgdir}/usr/share"
-    cp -a archiso/airootfs/etc/xdg/quickshell "${pkgdir}/etc/xdg/quickshell"
+    install -d "${pkgdir}/etc/xdg/quickshell" "${pkgdir}/usr/share"
+    # vendibar-pro: canonical source is src/vendibar-pro (the airootfs copy is a
+    # build-synced duplicate); install straight from the source to avoid drift.
+    cp -a src/vendibar-pro "${pkgdir}/etc/xdg/quickshell/vendibar-pro"
+    cp -a archiso/airootfs/etc/xdg/quickshell/vendilock "${pkgdir}/etc/xdg/quickshell/vendilock"
     cp -a archiso/airootfs/etc/xdg/waybar     "${pkgdir}/etc/xdg/waybar"
     [ -d archiso/airootfs/etc/xdg/xdg-desktop-portal-wlr ] && \
         cp -a archiso/airootfs/etc/xdg/xdg-desktop-portal-wlr "${pkgdir}/etc/xdg/xdg-desktop-portal-wlr"

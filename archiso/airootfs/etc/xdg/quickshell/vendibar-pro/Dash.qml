@@ -40,6 +40,7 @@ Item {
         dfProc.running = true;
         netSample.running = true;
         tasksFile.reload();
+        if (tab === 4) outputsProc.running = true;
         if (bar) bar.rescanWallpapers();
         forceActiveFocus();
     }
@@ -255,6 +256,32 @@ Item {
         onLoaded: dash.barNow = text().trim() || "classic"
         onFileChanged: reload()
     }
+
+    // ── displays (config tab) ────────────────────────────────────────────────
+    // Live monitor list from the compositor; arrangement + scale write back
+    // through `vendi-ctl output …` (same path the classic CLI uses).
+    property var outputs: []                 // [{name,width,height,refresh,scale,x,y}]
+    property string selOut: ""               // selected monitor in the arranger
+    Process {
+        id: outputsProc
+        command: ["sh", "-c", "VENDI_JSON=1 vendi-ctl output list"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    const j = JSON.parse(text.trim());
+                    dash.outputs = j.outputs || [];
+                    if (dash.selOut === "" && dash.outputs.length > 0)
+                        dash.selOut = dash.outputs[0].name;
+                } catch (e) { dash.outputs = []; }
+            }
+        }
+    }
+    function outputCtl(args) {
+        Quickshell.execDetached(["vendi-ctl", "output"].concat(args));
+        // give the compositor a beat to apply, then re-read
+        outputsRefresh.restart();
+    }
+    Timer { id: outputsRefresh; interval: 350; onTriggered: outputsProc.running = true }
 
     // ── clock ────────────────────────────────────────────────────────────────
     property string clockHM: ""
@@ -1393,6 +1420,138 @@ Item {
                         }
                     }
 
+                    // ── displays: drag to arrange + scale presets ──────────
+                    Card {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 158
+                        ColumnLayout {
+                            anchors.fill: parent
+                            anchors.margins: 16
+                            spacing: 8
+                            RowLayout {
+                                Layout.fillWidth: true
+                                CardTitle { text: "DISPLAYS" }
+                                Item { Layout.fillWidth: true }
+                                Glyph {
+                                    text: "󰑓"; font.pixelSize: 12
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: outputsProc.running = true
+                                    }
+                                }
+                            }
+                            // mini-map: each monitor is a draggable tile placed
+                            // by its real position, scaled to fit. Drop snaps to
+                            // neighbour edges and writes via vendi-ctl.
+                            Item {
+                                id: dmap
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                readonly property real pad: 8
+                                readonly property var bb: {
+                                    let x0 = 0, y0 = 0, x1 = 1, y1 = 1, first = true;
+                                    for (const o of dash.outputs) {
+                                        if (first) { x0 = o.x; y0 = o.y; x1 = o.x + o.width; y1 = o.y + o.height; first = false; }
+                                        else {
+                                            x0 = Math.min(x0, o.x); y0 = Math.min(y0, o.y);
+                                            x1 = Math.max(x1, o.x + o.width); y1 = Math.max(y1, o.y + o.height);
+                                        }
+                                    }
+                                    return { x0: x0, y0: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+                                }
+                                readonly property real k: Math.min(
+                                    (width - pad * 2) / bb.w, (height - pad * 2) / bb.h)
+                                readonly property real ox: pad + (width  - pad * 2 - bb.w * k) / 2
+                                readonly property real oy: pad + (height - pad * 2 - bb.h * k) / 2
+
+                                Repeater {
+                                    model: dash.outputs
+                                    Rectangle {
+                                        id: orect
+                                        required property var modelData
+                                        property bool sel: dash.selOut === modelData.name
+                                        width:  Math.max(30, modelData.width  * dmap.k)
+                                        height: Math.max(20, modelData.height * dmap.k)
+                                        x: dmap.ox + (modelData.x - dmap.bb.x0) * dmap.k
+                                        y: dmap.oy + (modelData.y - dmap.bb.y0) * dmap.k
+                                        radius: 7
+                                        color: sel ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.22)
+                                                   : Qt.rgba(1, 1, 1, 0.06)
+                                        border.width: sel ? 2 : 1
+                                        border.color: sel ? dash.accent : dash.cardBr
+                                        Column {
+                                            anchors.centerIn: parent
+                                            spacing: 0
+                                            Mono { anchors.horizontalCenter: parent.horizontalCenter
+                                                   text: orect.modelData.name; font.pixelSize: 9; font.bold: true }
+                                            Mono { anchors.horizontalCenter: parent.horizontalCenter
+                                                   text: orect.modelData.scale + "×"; color: dash.accent; font.pixelSize: 8 }
+                                        }
+                                        TapHandler { onTapped: dash.selOut = orect.modelData.name }
+                                        DragHandler {
+                                            target: orect
+                                            onActiveChanged: {
+                                                dash.selOut = orect.modelData.name;
+                                                if (active) return;
+                                                let rx = Math.round((orect.x - dmap.ox) / dmap.k + dmap.bb.x0);
+                                                let ry = Math.round((orect.y - dmap.oy) / dmap.k + dmap.bb.y0);
+                                                const snap = 100;   // real px
+                                                const w = orect.modelData.width, h = orect.modelData.height;
+                                                for (const o of dash.outputs) {
+                                                    if (o.name === orect.modelData.name) continue;
+                                                    if (Math.abs(rx - (o.x + o.width)) < snap) rx = o.x + o.width;
+                                                    if (Math.abs((rx + w) - o.x) < snap)       rx = o.x - w;
+                                                    if (Math.abs(ry - o.y) < snap)             ry = o.y;
+                                                    if (Math.abs(ry - (o.y + o.height)) < snap) ry = o.y + o.height;
+                                                }
+                                                if (Math.abs(ry) < snap) ry = 0;
+                                                dash.outputCtl(["position", orect.modelData.name, String(rx), String(ry)]);
+                                            }
+                                        }
+                                    }
+                                }
+                                Mono {
+                                    anchors.centerIn: parent
+                                    visible: dash.outputs.length === 0
+                                    text: "no monitors detected"
+                                    color: dash.dim; font.pixelSize: 11
+                                }
+                            }
+                            // scale presets for the selected monitor
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                visible: dash.selOut !== ""
+                                Glyph { text: "󰍹"; font.pixelSize: 12 }
+                                Mono { text: dash.selOut; font.pixelSize: 10 }
+                                Item { Layout.fillWidth: true }
+                                Mono { text: "Scale"; color: dash.dim; font.pixelSize: 9 }
+                                Repeater {
+                                    model: [1.0, 1.25, 1.5, 2.0]
+                                    Rectangle {
+                                        required property var modelData
+                                        property var cur: dash.outputs.find(o => o.name === dash.selOut)
+                                        property bool on: cur && Math.abs(cur.scale - modelData) < 0.01
+                                        implicitWidth: 36; implicitHeight: 22; radius: 7
+                                        color: on ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.22)
+                                             : scHov.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                                        border.width: 1
+                                        border.color: on ? dash.accent : dash.cardBr
+                                        HoverHandler { id: scHov; cursorShape: Qt.PointingHandCursor }
+                                        TapHandler { onTapped: dash.outputCtl(["scale", dash.selOut, String(modelData)]) }
+                                        Mono {
+                                            anchors.centerIn: parent
+                                            text: modelData + "×"
+                                            font.pixelSize: 9
+                                            color: on ? dash.accent : dash.fg
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     Card {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
@@ -1453,13 +1612,6 @@ Item {
                                     }
                                 }
                                 CfgRow {
-                                    glyph: "󰍹"; label: "Displays"
-                                    run: () => {
-                                        dash.requestClose();
-                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "display"]);
-                                    }
-                                }
-                                CfgRow {
                                     glyph: "󰓅"; label: "Power profile"
                                     run: () => {
                                         dash.requestClose();
@@ -1509,6 +1661,7 @@ Item {
                                 { k: "Super + Alt + Space",    a: "Config" },
                                 { k: "Super + D",              a: "Dashboard" },
                                 { k: "Super + B",              a: "Browser" },
+                                { k: "Super + E",              a: "Files" },
                                 { k: "Super + Q",              a: "Close window" },
                                 { k: "Super + F",              a: "Fullscreen" },
                                 { k: "Super + H / V",          a: "Split direction" },

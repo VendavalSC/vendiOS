@@ -108,7 +108,7 @@ ShellRoot {
 
     // ── theme ────────────────────────────────────────────────────────────────
     property color accent: "#cba6f7"
-    property color panel:  Qt.rgba(0.043, 0.043, 0.071, 0.96)   // #0b0b12
+    property color panel:  Qt.rgba(0.043, 0.043, 0.071, 1.0)    // #0b0b12 — fully solid, never see-through
     property color fg:     "#cdd6f4"
     property color dim:    "#717189"
     property color alert:  "#f38ba8"
@@ -136,6 +136,7 @@ ShellRoot {
     property int activeWs: 1
     property var wsList: [{ id: 1, windows: 0 }]
     property string title: ""
+    property bool overviewActive: false   // exposé is open (drives Overview chrome)
 
     function applyWorkspaces(active, list) {
         activeWs = active;
@@ -144,7 +145,7 @@ ShellRoot {
 
     Process {
         id: wmSub
-        command: ["vendi-ctl", "subscribe", "workspace", "window"]
+        command: ["vendi-ctl", "subscribe", "workspace", "window", "overview"]
         running: true
         stdout: SplitParser {
             onRead: data => {
@@ -156,6 +157,8 @@ ShellRoot {
                         root.title = ev.title ?? "";
                     else if (ev.event === "window-title" && ev.focused)
                         root.title = ev.title ?? "";
+                    else if (ev.event === "overview")
+                        root.overviewActive = ev.active === true;
                 } catch (e) {}
             }
         }
@@ -215,7 +218,9 @@ ShellRoot {
     // ── audio (pipewire, live — no polling) ──────────────────────────────────
     PwObjectTracker { objects: [Pipewire.defaultAudioSink] }
     property var sinkAudio: Pipewire.defaultAudioSink?.audio ?? null
-    property int volume: sinkAudio ? Math.round(sinkAudio.volume * 100) : -1
+    // Clamp the displayed volume at 100 — pipewire can report >1.0 if something
+    // over-amplified the sink; the bar should never show 130%.
+    property int volume: sinkAudio ? Math.min(100, Math.round(sinkAudio.volume * 100)) : -1
     property bool muted: sinkAudio?.muted ?? false
     function setVolume(pct) {
         if (!sinkAudio) return;
@@ -223,21 +228,117 @@ ShellRoot {
         sinkAudio.volume = Math.max(0, Math.min(1, pct / 100));
     }
 
+    // ── backlight (brightnessctl) ────────────────────────────────────────────
+    // brightnessctl -m → "name,class,current,percent,max" (percent has a % sign).
+    // -1 means no backlight device (desktop / VM) — the slider hides itself.
+    property int brightness: -1
+    property bool hasBacklight: brightness >= 0
+    Process {
+        id: brightnessGet
+        command: ["brightnessctl", "-m", "-c", "backlight"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const f = text.trim().split(",");
+                if (f.length >= 4) {
+                    const pct = parseInt(f[3]);
+                    if (!isNaN(pct)) root.brightness = pct;
+                }
+            }
+        }
+    }
+    function setBrightness(pct) {
+        const v = Math.max(1, Math.min(100, Math.round(pct)));
+        root.brightness = v;            // optimistic — slider tracks the drag
+        Quickshell.execDetached(["brightnessctl", "set", v + "%"]);
+    }
+
+    // ── keyboard backlight (leds class, *kbd_backlight*) ──────────────────────
+    // Often only a handful of steps (0..max), so we drive it by raw level and
+    // present it as a percentage of max. Empty kbdDev → no device → slider hides.
+    property string kbdDev: ""
+    property int kbdMax: 0
+    property int kbdLevel: 0
+    property bool hasKbdBacklight: kbdDev !== "" && kbdMax > 0
+    property int kbdPct: kbdMax > 0 ? Math.round(100 * kbdLevel / kbdMax) : 0
+    Process {
+        id: kbdGet
+        command: ["sh", "-c",
+            "d=$(ls /sys/class/leds 2>/dev/null | grep -i kbd_backlight | head -1); " +
+            "[ -z \"$d\" ] && exit 0; " +
+            "echo \"$d\"; cat /sys/class/leds/$d/brightness; cat /sys/class/leds/$d/max_brightness"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const l = text.trim().split("\n");
+                if (l.length >= 3) {
+                    root.kbdDev = l[0];
+                    root.kbdLevel = parseInt(l[1]) || 0;
+                    root.kbdMax = parseInt(l[2]) || 0;
+                }
+            }
+        }
+    }
+    function setKbdBacklight(pct) {
+        if (!hasKbdBacklight) return;
+        const lvl = Math.round(Math.max(0, Math.min(1, pct / 100)) * kbdMax);
+        root.kbdLevel = lvl;            // optimistic
+        Quickshell.execDetached(["brightnessctl", "-d", kbdDev, "set", String(lvl)]);
+    }
+
     // volume OSD: external changes bulge the right notch for a moment.
     // Armed late so the initial pipewire binding doesn't flash it at startup.
     property bool osdShow: false
     property bool osdArmed: false
+    property string osdKind: "volume"   // "volume" | "brightness"
     Timer { interval: 4000; running: true; onTriggered: root.osdArmed = true }
     Timer { id: osdTimer; interval: 1400; onTriggered: root.osdShow = false }
     Connections {
         target: root.sinkAudio
-        function onVolumeChanged() { root.pokeOsd() }
-        function onMutedChanged()  { root.pokeOsd() }
+        function onVolumeChanged() { root.pokeOsd("volume") }
+        function onMutedChanged()  { root.pokeOsd("volume") }
     }
-    function pokeOsd() {
+    function pokeOsd(kind) {
         if (!osdArmed) return;
+        osdKind = kind || "volume";
         osdShow = true;
         osdTimer.restart();
+    }
+
+    // ── screen-brightness OSD ─────────────────────────────────────────────────
+    // The XF86MonBrightness keys run brightnessctl, which writes the backlight
+    // sysfs file. Watch that file so the bar flashes a brightness OSD (and keeps
+    // root.brightness live) — there's no D-Bus signal for backlight changes.
+    property string backlightPath: ""
+    property int    backlightMax: 1
+    Process {
+        id: backlightFind
+        running: true
+        command: ["sh", "-c",
+            "d=$(ls /sys/class/backlight 2>/dev/null | head -1); " +
+            "[ -n \"$d\" ] && { echo \"/sys/class/backlight/$d\"; cat \"/sys/class/backlight/$d/max_brightness\"; }"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const l = text.trim().split("\n");
+                if (l.length >= 2) {
+                    root.backlightPath = l[0];
+                    root.backlightMax = parseInt(l[1]) || 1;
+                }
+            }
+        }
+    }
+    FileView {
+        path: root.backlightPath !== "" ? root.backlightPath + "/brightness" : ""
+        watchChanges: root.backlightPath !== ""
+        onFileChanged: reload()
+        onLoaded: {
+            const v = parseInt(text().trim());
+            if (isNaN(v) || root.backlightMax <= 0) return;
+            const pct = Math.round(100 * v / root.backlightMax);
+            const changed = pct !== root.brightness;
+            root.brightness = pct;            // keep the slider live + reactive
+            if (changed) root.pokeOsd("brightness");
+        }
     }
 
     // ── battery (upower) ─────────────────────────────────────────────────────
@@ -1029,9 +1130,11 @@ ShellRoot {
                 opacity: panelWin.rightMode === "osd" ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: 140 } }
 
+                readonly property bool bri: root.osdKind === "brightness"
                 Glyph {
-                    text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
-                    color: root.muted ? root.dim : root.accent
+                    text: osdRow.bri ? "󰃟"
+                        : root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
+                    color: (!osdRow.bri && root.muted) ? root.dim : root.accent
                     font.pixelSize: 15
                 }
                 Rectangle {
@@ -1040,14 +1143,18 @@ ShellRoot {
                     radius: 3
                     color: Qt.rgba(1, 1, 1, 0.10)
                     Rectangle {
-                        width: parent.width * Math.max(0, root.volume) / 100
+                        width: parent.width * Math.max(0, Math.min(100, osdRow.bri ? root.brightness : root.volume)) / 100
                         height: parent.height
                         radius: 3
-                        color: root.muted ? root.dim : root.accent
+                        color: (!osdRow.bri && root.muted) ? root.dim : root.accent
                         Behavior on width { NumberAnimation { duration: 100 } }
                     }
                 }
-                Mono { text: root.muted ? "muted" : root.volume + "%"; Layout.preferredWidth: 44 }
+                Mono {
+                    text: osdRow.bri ? root.brightness + "%"
+                        : root.muted ? "muted" : root.volume + "%"
+                    Layout.preferredWidth: 44
+                }
             }
 
             // ── notification toast (right notch swells around it) ───────────
@@ -1299,40 +1406,72 @@ ShellRoot {
                         Mono { text: (root.volume < 0 ? "—" : root.volume + "%"); Layout.preferredWidth: 38 }
                     }
 
-                    // cpu / mem bars
-                    ColumnLayout {
+                    // screen brightness slider — only when there's a backlight device
+                    RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
-                        RowLayout {
-                            Layout.fillWidth: true; spacing: 10
-                            Glyph { text: "󰻠" }
+                        spacing: 10
+                        visible: root.hasBacklight
+                        Glyph { text: "󰃟"; color: root.fg }
+                        Rectangle {
+                            id: briTrack
+                            Layout.fillWidth: true
+                            height: 8
+                            radius: 4
+                            color: Qt.rgba(1, 1, 1, 0.10)
                             Rectangle {
-                                Layout.fillWidth: true; height: 8; radius: 4
-                                color: Qt.rgba(1, 1, 1, 0.10)
-                                Rectangle {
-                                    width: parent.width * root.cpu / 100
-                                    height: parent.height; radius: 4
-                                    color: root.cpu > 85 ? root.alert : root.accent
-                                    Behavior on width { NumberAnimation { duration: 300 } }
-                                }
+                                width: Math.max(8, parent.width * Math.max(0, root.brightness) / 100)
+                                height: parent.height
+                                radius: 4
+                                color: root.accent
+                                Behavior on width { NumberAnimation { duration: 80 } }
                             }
-                            Mono { text: Math.round(root.cpu) + "%"; Layout.preferredWidth: 38 }
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                function setBri(mx) {
+                                    root.setBrightness(
+                                        Math.max(0, Math.min(1, mx / briTrack.width)) * 100);
+                                }
+                                onPressed: m => setBri(m.x - 6)
+                                onPositionChanged: m => { if (pressed) setBri(m.x - 6) }
+                            }
                         }
-                        RowLayout {
-                            Layout.fillWidth: true; spacing: 10
-                            Glyph { text: "󰍛" }
+                        Mono { text: root.brightness + "%"; Layout.preferredWidth: 38 }
+                    }
+
+                    // keyboard backlight slider — only when a *kbd_backlight led exists
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        visible: root.hasKbdBacklight
+                        Glyph { text: "󰌌"; color: root.fg }
+                        Rectangle {
+                            id: kbdTrack
+                            Layout.fillWidth: true
+                            height: 8
+                            radius: 4
+                            color: Qt.rgba(1, 1, 1, 0.10)
                             Rectangle {
-                                Layout.fillWidth: true; height: 8; radius: 4
-                                color: Qt.rgba(1, 1, 1, 0.10)
-                                Rectangle {
-                                    width: parent.width * root.mem / 100
-                                    height: parent.height; radius: 4
-                                    color: root.mem > 85 ? root.alert : root.accent
-                                    Behavior on width { NumberAnimation { duration: 300 } }
-                                }
+                                width: Math.max(8, parent.width * Math.max(0, root.kbdPct) / 100)
+                                height: parent.height
+                                radius: 4
+                                color: root.accent
+                                Behavior on width { NumberAnimation { duration: 80 } }
                             }
-                            Mono { text: Math.round(root.mem) + "%"; Layout.preferredWidth: 38 }
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                function setKbd(mx) {
+                                    root.setKbdBacklight(
+                                        Math.max(0, Math.min(1, mx / kbdTrack.width)) * 100);
+                                }
+                                onPressed: m => setKbd(m.x - 6)
+                                onPositionChanged: m => { if (pressed) setKbd(m.x - 6) }
+                            }
                         }
+                        Mono { text: root.kbdPct + "%"; Layout.preferredWidth: 38 }
                     }
 
                     // notification history
@@ -1437,6 +1576,17 @@ ShellRoot {
                 }
             }
             }
+        }
+    }
+
+    // Overview chrome — one fullscreen overlay per screen, shown while the
+    // compositor's exposé is open (bar.overviewActive).
+    Variants {
+        model: Quickshell.screens
+        Overview {
+            required property var modelData
+            screen: modelData
+            bar: root
         }
     }
 }
