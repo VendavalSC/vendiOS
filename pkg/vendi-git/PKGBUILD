@@ -2,7 +2,7 @@
 pkgname=vendi-git
 _pkgname=vendi
 pkgver=r1
-pkgrel=3
+pkgrel=4
 pkgdesc="vendiOS CLI, installer, vendiwm compositor, supporting libraries (git)"
 arch=('x86_64')
 url="https://github.com/VendavalSC/vendiOS"
@@ -70,12 +70,13 @@ build() {
 package() {
     cd "${_pkgname}"
 
-    # Bash CLIs (installer / boot helpers / session launcher)
+    # Bash CLIs (installer / boot helpers / session launcher / dispatcher)
     install -Dm755 archiso/airootfs/usr/bin/vendi          "${pkgdir}/usr/bin/vendi"
     install -Dm755 archiso/airootfs/usr/bin/vendi-install  "${pkgdir}/usr/bin/vendi-install"
     install -Dm755 archiso/airootfs/usr/bin/vendi-boot     "${pkgdir}/usr/bin/vendi-boot"
     install -Dm755 archiso/airootfs/usr/bin/vendi-welcome  "${pkgdir}/usr/bin/vendi-welcome"
     install -Dm755 archiso/airootfs/usr/bin/vendi-session  "${pkgdir}/usr/bin/vendi-session"
+    install -Dm755 archiso/airootfs/usr/bin/vendi-launcher "${pkgdir}/usr/bin/vendi-launcher"
 
     # Rust binaries (compositor + control plane + bar)
     install -Dm755 src/target/release/vendiwm     "${pkgdir}/usr/bin/vendiwm"
@@ -89,9 +90,25 @@ package() {
     install -Dm644 archiso/airootfs/usr/lib/vendi/disk.sh   "${pkgdir}/usr/lib/vendi/disk.sh"
     install -Dm644 archiso/airootfs/usr/lib/vendi/system.sh "${pkgdir}/usr/lib/vendi/system.sh"
 
-    # branding
-    install -Dm644 archiso/airootfs/usr/share/vendios/logo.txt \
-        "${pkgdir}/usr/share/vendios/logo.txt"
-    install -Dm644 archiso/airootfs/usr/share/vendios/shard.txt \
-        "${pkgdir}/usr/share/vendios/shard.txt"
+    # Desktop configs + assets (system-wide). These are what make the bar,
+    # lock, themes and portals actually work — without them the quickshell
+    # bars report "could not find config directory". Shipping them here means
+    # `yay -S vendi-git` updates the whole desktop, no reinstall needed.
+    install -d "${pkgdir}/etc/xdg" "${pkgdir}/usr/share"
+    cp -a archiso/airootfs/etc/xdg/quickshell "${pkgdir}/etc/xdg/quickshell"
+    cp -a archiso/airootfs/etc/xdg/waybar     "${pkgdir}/etc/xdg/waybar"
+    [ -d archiso/airootfs/etc/xdg/xdg-desktop-portal-wlr ] && \
+        cp -a archiso/airootfs/etc/xdg/xdg-desktop-portal-wlr "${pkgdir}/etc/xdg/xdg-desktop-portal-wlr"
+    [ -d archiso/airootfs/etc/xdg-desktop-portal ] && \
+        cp -a archiso/airootfs/etc/xdg-desktop-portal "${pkgdir}/etc/xdg-desktop-portal"
+    [ -f archiso/airootfs/etc/xdg/mimeapps.list ] && \
+        install -Dm644 archiso/airootfs/etc/xdg/mimeapps.list "${pkgdir}/etc/xdg/mimeapps.list"
+
+    # branding + plymouth theme
+    cp -a archiso/airootfs/usr/share/vendios "${pkgdir}/usr/share/vendios"
+    [ -d archiso/airootfs/usr/share/plymouth/themes/vendios ] && {
+        install -d "${pkgdir}/usr/share/plymouth/themes"
+        cp -a archiso/airootfs/usr/share/plymouth/themes/vendios \
+            "${pkgdir}/usr/share/plymouth/themes/vendios"
+    }
 }
