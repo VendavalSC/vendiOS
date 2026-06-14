@@ -499,12 +499,30 @@ sys_install_vendi_cli() {
     # vendi-ctl IPC, vendi-demo test client). All shipped from the live ISO's
     # /usr/bin since the airootfs is built with them in place.
     for bin in vendi vendi-install vendi-boot vendi-welcome vendi-session \
-               vendiwm vendi-ctl vendi-demo vendibar vendi-menu; do
+               vendiwm vendi-ctl vendi-demo vendibar vendi-menu vendi-launcher; do
         [[ -f /usr/bin/$bin ]] && install -m 755 /usr/bin/$bin /mnt/usr/bin/$bin
     done
     for lib in ui.sh disk.sh system.sh; do
         [[ -f /usr/lib/vendi/$lib ]] && \
             install -m 644 /usr/lib/vendi/$lib /mnt/usr/lib/vendi/$lib
+    done
+
+    # vendiOS desktop configs + assets, system-wide. Online installs also get
+    # these from the vendi-git AUR package, but copying them here makes an
+    # OFFLINE install complete — without it the quickshell bars report
+    # "could not find config directory". These are clean config templates from
+    # the live image (NO personal data — the live root has no user accounts).
+    #   quickshell/  → vendibar-pro (notch) + vendilock configs
+    #   waybar/      → Hyprland-fallback bar config
+    #   *-portal*    → screen-share / portal routing for wlroots
+    #   vendios/     → branding art (shard/logo)
+    local tree
+    for tree in /etc/xdg/quickshell /etc/xdg/waybar \
+                /etc/xdg/xdg-desktop-portal-wlr /etc/xdg-desktop-portal \
+                /usr/share/vendios; do
+        [[ -d "$tree" ]] || continue
+        mkdir -p "/mnt${tree}"
+        cp -a "${tree}/." "/mnt${tree}/"
     done
 }
 
@@ -534,7 +552,7 @@ sys_install_aur_helper() {
         yay -S vendi-git --noconfirm \
             --mflags "--noconfirm" \
             --answerclean=N --answerdiff=N \
-            --overwrite="/usr/bin/vendi*,/usr/lib/vendi/*,/usr/share/vendios/*"
+            --overwrite="/usr/bin/vendi*,/usr/lib/vendi/*,/usr/share/vendios/*,/etc/xdg/quickshell/*,/etc/xdg/waybar/*,/etc/xdg/xdg-desktop-portal-wlr/*"
     '
     local rc=$?
 

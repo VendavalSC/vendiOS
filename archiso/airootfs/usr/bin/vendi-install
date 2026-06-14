@@ -715,6 +715,15 @@ step_install() {
         _log "offline: skipping AUR (vendi binaries already staged)"
     fi
 
+    # ── 16b. fix home ownership ───────────────────────────────
+    # Everything written into the user's home so far ran as root (bar choice,
+    # theme state, zsh/fastfetch config, Pictures, .hushlogin), so it's all
+    # root-owned — which makes the user-run bar/`vendi` fail with "permission
+    # denied" on ~/.config/vendi/*. Hand the whole home back to the user.
+    _status 92 "Fixing home permissions"
+    _log "chown /home/${CFG_USER}"
+    chroot_run chown -R "${CFG_USER}:${CFG_USER}" "/home/${CFG_USER}" >>"$INSTALL_LOG" 2>&1 || true
+
     # ── 17. bootloader ────────────────────────────────────────
     _status 93 "Installing Limine bootloader"
     _log "limine"
