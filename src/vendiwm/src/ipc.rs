@@ -414,6 +414,12 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
                             None => o.change_current_state(
                                 None, None, Some(smithay::output::Scale::Integer(1)), None),
                         }
+                        // Re-arrange layer surfaces (the bar) for the new logical
+                        // output size. Without this the bar keeps its old width and
+                        // overflows the screen once the renderer applies the scale;
+                        // arrange() reconfigures it, and the resize→commit cycle
+                        // picks up the new fractional scale via the commit handler.
+                        smithay::desktop::layer_map_for_output(&o).arrange();
                     }
                     state.relayout();
                     tracing::info!("config reloaded");
