@@ -132,27 +132,23 @@ if $CLEAN; then
     done
     [[ -d "$WORK" ]] && rm -rf "$WORK"
 else
-    # incremental: drop only the steps that depend on airootfs content
-    # so package installation is reused but customization reruns
-    for marker in \
-        base._make_custom_airootfs \
-        base._make_customize_airootfs \
-        base._cleanup_pacstrap_dir \
-        base._check_if_initramfs_has_ucode \
-        base._make_pkglist \
-        base._make_version \
-        base._make_boot_on_iso9660 \
-        base._make_bootmode_bios.syslinux \
-        base._make_bootmode_uefi.systemd-boot \
-        base._make_boot_on_fat \
-        base._make_common_grubenv_and_loopbackcfg \
-        base._prepare_airootfs_image \
-        base._mkairootfs_squashfs
-    do
-        rm -f "${WORK}/${marker}"
-    done
-    # also restore airootfs from a clean state by re-copying profile files
-    # (mkarchiso will overlay profile airootfs on top of the installed packages)
+    # Incremental: reuse the expensive pacstrap of the live root, but force
+    # EVERYTHING downstream of it to rebuild — the profile airootfs overlay,
+    # customize, squashfs and the ISO image. mkarchiso's stage-marker names
+    # vary by version, so rather than guess them, delete every stage marker
+    # except the three pacstrap/work-dir ones. (The previous hard-coded list
+    # named markers that didn't exist, so the airootfs overlay never re-copied
+    # and stale content shipped.)
+    if [[ -d "$WORK" ]]; then
+        find "$WORK" -maxdepth 1 -type f -name '*._*' \
+            ! -name 'base._make_packages' \
+            ! -name 'base._make_pacman_conf' \
+            ! -name 'base._make_work_dir' \
+            -delete
+        # The overlay is rsync'd onto the pacstrapped root; wipe the previous
+        # overlay's vendi files so renamed/removed files don't linger.
+        rm -rf "${WORK}/x86_64/airootfs/opt/vendios" 2>/dev/null || true
+    fi
 fi
 
 mkarchiso \
