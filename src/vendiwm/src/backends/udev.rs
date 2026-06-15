@@ -841,6 +841,9 @@ pub struct DeviceState {
     pub border_prog:  GlesPixelProgram,
     /// Separable gaussian blur pass (frosted glass behind vendi-menu).
     pub blur_prog:    GlesTexProgram,
+    /// Frosted-glass material shader (rounded crop of blurred desktop, lifted
+    /// toward white so translucent windows read as bright glass, not dark).
+    pub frost_prog:   GlesTexProgram,
     /// Circular wallpaper-reveal shader (wallpaper switch transition).
     pub reveal_prog:  GlesTexProgram,
     /// Ping-pong offscreen targets for the blur, at 1/4 output size.
@@ -950,6 +953,14 @@ impl UdevData {
             crate::render::BLUR_FRAG,
             &[UniformName::new("dir", UniformType::_2f)],
         ).map_err(|e| anyhow::anyhow!("compile blur shader: {e:?}"))?;
+        let frost_prog = renderer.compile_custom_texture_shader(
+            crate::render::FROST_TEX_FRAG,
+            &[
+                UniformName::new("size",    UniformType::_2f),
+                UniformName::new("radius",  UniformType::_1f),
+                UniformName::new("lighten", UniformType::_1f),
+            ],
+        ).map_err(|e| anyhow::anyhow!("compile frost shader: {e:?}"))?;
         let reveal_prog = renderer.compile_custom_texture_shader(
             crate::render::REVEAL_FRAG,
             &[
@@ -986,6 +997,7 @@ impl UdevData {
             rounded_prog,
             border_prog,
             blur_prog,
+            frost_prog,
             reveal_prog,
             blur_texs: None,
             tex_stash: HashMap::new(),
@@ -1406,6 +1418,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let rounded_prog = device.rounded_prog.clone();
     let border_prog  = device.border_prog.clone();
     let blur_prog    = device.blur_prog.clone();
+    let frost_prog   = device.frost_prog.clone();
     let reveal_prog  = device.reveal_prog.clone();
     let blur_texs     = &mut device.blur_texs;
     let tex_stash     = &mut device.tex_stash;
@@ -1498,6 +1511,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     const WS_MS:    f32 = 300.0;
     const MORPH_MS: f32 = 230.0;
     const DRAG_MS:  f32 = 120.0;
+    // Frosted glass (blur on): the composite-alpha floor for windows so the
+    // frost shows through even when the user hasn't cycled opacity, and how far
+    // the frosted backdrop is lifted toward white so it reads bright, not dark.
+    const FROST_WINDOW_ALPHA: f32 = 0.86;
+    const FROST_LIGHTEN: f32 = 0.24;
     fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t).powi(3) }
     // Smooth accel + decel — used for the screensaver slide so neither the
     // entrance nor the exit yanks or crawls.
@@ -1826,8 +1844,15 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             .find(|(w, _)| w == window)
             .and_then(|(_, t)| *t)
             .map(|t| (now.duration_since(t).as_secs_f32() * 1000.0 / OPEN_MS).min(1.0));
-        let alpha = ws_alpha * open_t.map(ease_out).unwrap_or(1.0)
-            * crate::state::window_opacity(window, theme.opacity);
+        // When blur is on, floor the window's composite alpha so the frosted
+        // backdrop is always visible — blur is an independent on/off toggle, not
+        // something you have to pair with a separate transparency mode. The
+        // opacity-cycle (super+shift+o) still wins when set lower.
+        let mut win_opa = crate::state::window_opacity(window, theme.opacity);
+        if theme.blur && fullscreen.as_ref() != Some(window) {
+            win_opa = win_opa.min(FROST_WINDOW_ALPHA);
+        }
+        let alpha = ws_alpha * open_t.map(ease_out).unwrap_or(1.0) * win_opa;
         // Super+drag pick-up: ease in a slight grow while the grab holds,
         // and ease it back out after release (put-down).
         let drag_scale: f64 = state.drag.as_ref()
@@ -1957,26 +1982,13 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             ));
         }
 
-        // Frosted glass: a translucent window gets a blurred slab of the
-        // desktop spliced in directly behind it (index = just below the window
-        // we only pushed). Gated on the window's persistent opacity, not the
-        // composite alpha, so open/workspace animations don't trigger it.
-        // Translucent two ways: compositor opacity (cycle-opacity) OR the
-        // client drawing itself see-through (e.g. Alacritty opacity=0.9), which
-        // shows up as the surface not declaring a full opaque region.
-        let client_translucent = window.wl_surface().and_then(|surf| {
-            smithay::backend::renderer::utils::with_renderer_surface_state(&surf, |st| {
-                let sz = st.surface_size().unwrap_or_default();
-                match st.opaque_regions() {
-                    None => true,
-                    Some(regs) => !regs.iter().any(|r|
-                        r.loc.x <= 0 && r.loc.y <= 0 && r.size.w >= sz.w && r.size.h >= sz.h),
-                }
-            })
-        }).unwrap_or(false);
-        let translucent = crate::state::window_opacity(window, theme.opacity) < 0.99
-            || client_translucent;
-        if theme.blur && !is_fullscreen && translucent {
+        // Frosted glass: when blur is on, splice a blurred slab of the desktop
+        // directly behind every (non-fullscreen) window (index = just below the
+        // window we only pushed). The composite-alpha floor above guarantees the
+        // window is translucent enough for the frost to show, so this no longer
+        // depends on detecting client-side alpha — which was unreliable and made
+        // blur appear only in some opacity modes.
+        if theme.blur && !is_fullscreen {
             blur_windows.push((elements.len(), target, radius));
         }
     }
@@ -2449,7 +2461,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                         None,
                         Kind::Unspecified,
                     );
-                    let patch = crate::render::BlurElement::new(inner, rounded_prog.clone(), rad);
+                    let patch = crate::render::BlurElement::new(inner, frost_prog.clone(), rad, FROST_LIGHTEN);
                     let at = idx.min(elements.len());
                     elements.insert(at, OutputRenderElements::Blur(patch));
                 }
@@ -2472,7 +2484,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                         Kind::Unspecified,
                     );
                     // 16px matches the menu card's CSS border-radius.
-                    let patch = crate::render::BlurElement::new(inner, rounded_prog.clone(), 16.0);
+                    let patch = crate::render::BlurElement::new(inner, frost_prog.clone(), 16.0, FROST_LIGHTEN);
                     elements.insert(blur_mark + i, OutputRenderElements::Blur(patch));
                 }
             }

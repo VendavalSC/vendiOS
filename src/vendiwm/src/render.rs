@@ -76,6 +76,65 @@ void main() {
 }
 "#;
 
+/// Frosted-glass material (texture shader): the rounded-corner crop of the
+/// blurred desktop, lifted toward a light, faintly desaturated tone. A plain
+/// gaussian blur of the (dark) wallpaper reads as a dark smear behind a
+/// translucent window; `lighten` blends it toward white so it looks like real
+/// frosted glass instead. `lighten` 0 == identical to the rounded shader.
+pub const FROST_TEX_FRAG: &str = r#"#version 100
+//_DEFINES
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision mediump float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+uniform vec2 size;
+uniform float radius;
+uniform float lighten;
+
+float rounded_box(vec2 p, vec2 half_size, float r) {
+    vec2 q = abs(p) - half_size + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+void main() {
+    vec4 color = texture2D(tex, v_coords);
+#if defined(NO_ALPHA_MULTIPLIER)
+    color.a = 1.0;
+#endif
+    // Material lift: gently desaturate, then blend toward white so the frost
+    // brightens the dark desktop rather than darkening the window over it.
+    vec3 rgb = color.rgb;
+    float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
+    rgb = mix(rgb, vec3(luma), 0.20);
+    rgb = mix(rgb, vec3(1.0), lighten);
+    color.rgb = rgb;
+    vec2 p = (v_coords - vec2(0.5)) * size;
+    float d = rounded_box(p, size * 0.5, radius);
+    float mask = 1.0 - smoothstep(-1.0, 1.0, d);
+    color *= alpha * mask;
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        color = vec4(0.0, 0.3, 0.0, 0.2) + color * 0.8;
+#endif
+    gl_FragColor = color;
+}
+"#;
+
 /// Separable gaussian blur pass (texture shader). `dir` carries the sample
 /// step in UV space — (r/w, 0) for the horizontal pass, (0, r/h) for the
 /// vertical one. Run over a downscaled copy of the desktop; the downscale
@@ -448,6 +507,7 @@ pub struct BlurElement {
     inner:   TextureRenderElement<GlesTexture>,
     program: GlesTexProgram,
     radius:  f32,
+    lighten: f32,
 }
 
 impl BlurElement {
@@ -455,8 +515,9 @@ impl BlurElement {
         inner: TextureRenderElement<GlesTexture>,
         program: GlesTexProgram,
         radius: f32,
+        lighten: f32,
     ) -> Self {
-        Self { inner, program, radius }
+        Self { inner, program, radius, lighten }
     }
 }
 
@@ -492,6 +553,7 @@ impl RenderElement<GlesRenderer> for BlurElement {
             vec![
                 Uniform::new("size", (dst.size.w as f32, dst.size.h as f32)),
                 Uniform::new("radius", self.radius),
+                Uniform::new("lighten", self.lighten),
             ],
         );
         let res = RenderElement::<GlesRenderer>::draw(
