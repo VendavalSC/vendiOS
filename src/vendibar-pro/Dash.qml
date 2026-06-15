@@ -55,10 +55,13 @@ Item {
         refresh();
         pageFx.restart();
     }
+    // The room slides home on a spring (same physics as the notch) so the
+    // page-turn feels like one continuous motion with the island; opacity
+    // catches up a touch faster so the new room is legible before it settles.
     ParallelAnimation {
         id: pageFx
-        NumberAnimation { target: pages; property: "opacity"; to: 1; duration: 230; easing.type: Easing.OutCubic }
-        NumberAnimation { target: pages; property: "xoff"; to: 0; duration: 260; easing.type: Easing.OutCubic }
+        NumberAnimation { target: pages; property: "opacity"; to: 1; duration: 170; easing.type: Easing.OutCubic }
+        SpringAnimation { target: pages; property: "xoff"; to: 0; spring: 6.4; damping: 0.62; mass: 0.7; epsilon: 0.25 }
     }
 
     Keys.onEscapePressed: dash.requestClose()
