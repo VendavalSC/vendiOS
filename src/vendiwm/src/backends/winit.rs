@@ -114,7 +114,7 @@ pub fn run() -> Result<()> {
     let config = crate::config::Config::load()
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "config load failed; using empty keybinds");
-            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, outputs: Vec::new() }
+            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, idle_screensaver_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, outputs: Vec::new() }
         });
 
     let mut state = State {
@@ -158,6 +158,11 @@ pub fn run() -> Result<()> {
         last_activity: std::time::Instant::now(),
         auto_lock_fired: false,
         screen_off: false,
+        screensaver_child: None,
+        screensaver: None,
+        screensaver_fired: false,
+        screensaver_t: None,
+        screensaver_closing: None,
         open_anims: Vec::new(),
         ws_anim: None,
         geo_anims: Vec::new(),

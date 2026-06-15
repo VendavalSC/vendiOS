@@ -58,6 +58,10 @@ pub enum Request {
     Wallpaper     { path: String },
     /// Re-read vendiwm.kdl and apply theme + binds live, no restart.
     ReloadConfig,
+    /// Start the video screensaver immediately (a forced preview — bypasses
+    /// the battery/no-video gate so `vendi screensaver test` always shows it).
+    /// Any input dismisses it, same as the idle-triggered one.
+    Screensaver,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,6 +370,22 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
         Request::Lock => {
             state.lock_session();
             Response::Ok { ok: true }
+        }
+        Request::Screensaver => {
+            // Forced preview: only meaningful if not already up and not locked.
+            if state.screensaver_child.is_some() || state.is_locked() || state.vlock {
+                Response::Ok { ok: true }
+            } else {
+                state.screensaver_fired = true;
+                match std::process::Command::new("vendi-screensaver")
+                    .arg("start")
+                    .env("VENDI_SCREENSAVER_FORCE", "1")
+                    .spawn()
+                {
+                    Ok(child) => { state.screensaver_child = Some(child); Response::Ok { ok: true } }
+                    Err(e) => { state.screensaver_fired = false; Response::Error { error: e.to_string() } }
+                }
+            }
         }
         Request::ReloadConfig => {
             match crate::config::Config::load() {

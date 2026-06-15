@@ -974,6 +974,63 @@ _display_position() {
     vendi-ctl output position "$name" "$nx" "$ny" && _ok "${name}: ${side} of ${rname} (${nx},${ny})"
 }
 
+# ── screensaver ───────────────────────────────────────────────────────────────
+# Pick the looping video the compositor plays after idle (off on battery by
+# default). Standalone — not the lock screen. Library: ~/Videos/Screensavers,
+# active video persisted to ~/.config/vendi/screensaver (mirrors wallpaper).
+_ss_state() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/vendi/screensaver"; }
+_ss_dir()   { echo "$HOME/Videos/Screensavers"; }
+_ss_current() { local s; s=$(_ss_state); [[ -f "$s" ]] && head -n1 "$s"; }
+
+cmd_screensaver() {
+    local sub=${1:-pick}
+    local state dir; state=$(_ss_state); dir=$(_ss_dir)
+    mkdir -p "$(dirname "$state")" "$dir"
+    case "$sub" in
+        off|none|clear)
+            : > "$state"; _ok "screensaver off" ;;
+        test|preview)
+            local v; v=$(_ss_current)
+            [[ -n "$v" && -f "$v" ]] || { _err "no screensaver set — run 'vendi screensaver'"; return 1; }
+            _info "playing ${v##*/} fullscreen — move the mouse or press a key to stop"
+            # Route through the compositor so the preview is the real thing:
+            # fullscreen above the bar, dismissed on any input.
+            vendi-ctl screensaver ;;
+        list)
+            _header "screensaver"
+            local cur; cur=$(_ss_current)
+            shopt -s nullglob
+            local found=0 f
+            for f in "$dir"/*.{mp4,mkv,webm,mov,m4v,avi}; do
+                found=1; local mark=" "; [[ "$f" == "$cur" ]] && mark="●"
+                printf "  %s %s\n" "$mark" "${f##*/}"
+            done
+            shopt -u nullglob
+            [[ "$found" == 0 ]] && _info "no videos in ${dir}" ;;
+        pick|"")
+            command -v fzf >/dev/null || { _err "fzf not available"; return 1; }
+            shopt -s nullglob
+            local vids=("$dir"/*.{mp4,mkv,webm,mov,m4v,avi})
+            shopt -u nullglob
+            [[ ${#vids[@]} -gt 0 ]] || { _err "no videos in ${dir} — drop some in there first"; return 1; }
+            local cur; cur=$(_ss_current)
+            local choice
+            choice=$(printf '%s\n' "off — disable" "${vids[@]}" \
+                | awk -v cur="$cur" '{ if($0=="off — disable"){print "\t"$0} else {m=($0==cur)?"●":" "; n=$0; sub(/.*\//,"",n); printf "%s\t%s %s\n",$0,m,n} }' \
+                | _fzf "screensaver> " --delimiter='\t' --with-nth=2 --header="enter set · esc cancel") || return 0
+            local sel; sel=$(printf '%s' "$choice" | cut -f1)
+            [[ -z "$sel" ]] && return 0
+            if [[ "$sel" == "off — disable" ]]; then : > "$state"; _ok "screensaver off"
+            else echo "$sel" > "$state"; _ok "screensaver: ${sel##*/}"; fi ;;
+        *)
+            # treat the arg as a path to set directly
+            local p="$sub"
+            [[ -f "$p" ]] || { _err "not a file: ${p}"; return 1; }
+            realpath "$p" > "$state" 2>/dev/null || echo "$p" > "$state"
+            _ok "screensaver: ${p##*/}" ;;
+    esac
+}
+
 cmd_help() {
     _logo
     printf "\n  ${OVERLAY}Minimal. Modern. Yours.${R}\n\n"
@@ -995,6 +1052,7 @@ cmd_help() {
     _cmd "bt"       "pair and connect bluetooth devices"
     _cmd "audio"    "pick output sink, volume, mute"
     _cmd "power"    "switch power profile"
+    _cmd "screensaver" "pick the idle video screensaver (~/Videos/Screensavers)"
     _cmd "fingerprint" "enroll a fingerprint to unlock (swipe at the lock)"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"
@@ -1016,6 +1074,7 @@ case "${1:-help}" in
     bt|bluetooth) cmd_bt ;;
     audio)    cmd_audio ;;
     power)    cmd_power ;;
+    screensaver|saver|ss) shift; cmd_screensaver "$@" ;;
     fingerprint|finger|fp) shift; cmd_fingerprint "$@" ;;
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;

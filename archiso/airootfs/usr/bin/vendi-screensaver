@@ -1,0 +1,69 @@
+#!/bin/bash
+# vendi-screensaver — fullscreen video screensaver (mpv).
+#
+# Standalone and deliberately NOT tied to vendilock: the lock screen would
+# ruin a screensaver's aesthetic, so this is its own thing. The compositor
+# (vendiwm) spawns `vendi-screensaver start` on idle and dismisses it on the
+# next input; `vendi screensaver test` runs it directly for a look.
+#
+# Config lives in ~/.config/vendi/screensaver — a single line holding the
+# chosen video path (mirrors ~/.config/vendi/wallpaper). No video set, no
+# screensaver. The library is ~/Videos/Screensavers.
+set -euo pipefail
+
+STATE="${XDG_CONFIG_HOME:-$HOME/.config}/vendi/screensaver"
+
+# Don't drain the battery playing video to nobody — skip on battery unless the
+# caller explicitly forces it (VENDI_SCREENSAVER_FORCE=1, as `test` does).
+_on_battery() {
+    local online
+    for ps in /sys/class/power_supply/*/online; do
+        [[ -r "$ps" ]] || continue
+        online=$(< "$ps")
+        [[ "$online" == "1" ]] && return 1   # a mains supply is online → not on battery
+    done
+    # No mains supply reported online → on battery (or unknown; play it safe).
+    return 0
+}
+
+video=""
+[[ -f "$STATE" ]] && video="$(head -n1 "$STATE")"
+
+case "${1:-start}" in
+    start)
+        [[ -n "$video" && -f "$video" ]] || { echo "no screensaver video set" >&2; exit 0; }
+        if [[ "${VENDI_SCREENSAVER_FORCE:-0}" != "1" ]] && _on_battery; then
+            echo "on battery — screensaver skipped" >&2
+            exit 0
+        fi
+        # Looping, silent, chromeless, cursor hidden, HW-decoded where possible.
+        # The compositor dismisses it on the next input; q/ESC stay bound as a
+        # fallback (and so the manual `test` is always escapable).
+        # Pick a video output that actually displays. With a VAAPI driver
+        # present we use the hardware GL path (--vo=gpu, zero-copy, smooth);
+        # otherwise fall back to software wl_shm, which needs no EGL/dmabuf and
+        # always renders (slower, but the only thing that works on a box with
+        # no working GL). --gpu-context=wayland is required either way: vendiOS
+        # is Wayland-only, and mpv otherwise tries the X11 context and crashes.
+        vo_args=(--gpu-context=wayland --vo=gpu --hwdec=auto)
+        if ! compgen -G "/usr/lib/dri/*_drv_video.so" >/dev/null 2>&1; then
+            vo_args=(--vo=wlshm)
+        fi
+        # --no-input-* so mpv never reacts on its own (no ESC-to-unfullscreen,
+        # no key handling): the compositor owns dismissal and renders it
+        # fullscreen regardless of mpv's window state.
+        exec mpv \
+            --really-quiet --no-config \
+            --loop-file=inf --no-audio \
+            --no-osc --no-osd-bar --osd-level=0 \
+            --no-input-default-bindings --input-conf=/dev/null \
+            --no-input-cursor --cursor-autohide=always \
+            "${vo_args[@]}" \
+            --fullscreen --panscan=1.0 \
+            "$video"
+        ;;
+    *)
+        echo "usage: vendi-screensaver [start]" >&2
+        exit 2
+        ;;
+esac

@@ -158,6 +158,20 @@ pub struct State {
     // The render loop skips output while set; input clears it and wakes them.
     pub screen_off:            bool,
 
+    // Video screensaver (vendi-screensaver → mpv). When idle crosses the
+    // threshold the idle timer spawns the launcher and keeps the child here so
+    // any input can kill it. `screensaver` holds the mpv window once it maps
+    // (matched by client PID) — the render loop draws it fullscreen above
+    // everything. `screensaver_fired` keeps spawning to once per idle stretch.
+    pub screensaver_child:     Option<std::process::Child>,
+    pub screensaver:           Option<Window>,
+    pub screensaver_fired:     bool,
+    // When the screensaver window appeared (drives the fade-in) and, once
+    // dismissed, when the fade-out began (mpv stays alive until it finishes,
+    // so the last frame dissolves instead of snapping away).
+    pub screensaver_t:         Option<std::time::Instant>,
+    pub screensaver_closing:   Option<std::time::Instant>,
+
     // Window-open animations. The Instant is None until the window's first
     // frame actually renders — starting the clock at new_toplevel would burn
     // most of the animation during the configure round-trip, so windows
@@ -298,6 +312,14 @@ impl CompositorHandler for State {
             .cloned();
         if let Some(window) = window {
             window.on_commit();
+
+            // The screensaver lives outside the tiling tree, so nothing else
+            // schedules a frame for it. Pump one redraw per committed frame so
+            // mpv's video composites at its own rate — no busy-loop (which
+            // would steal CPU from mpv's software decode), no frozen black.
+            if self.screensaver.as_ref() == Some(&window) {
+                self.pending_redraw = true;
+            }
 
             // Title-change detection → IPC event for the bar.
             if let Some(toplevel) = window.toplevel() {
@@ -445,6 +467,29 @@ impl XdgShellHandler for State {
         surface.with_pending_state(|s| { s.states.set(xdg_toplevel::State::Activated); });
         let window = Window::new_wayland_window(surface);
         let id = window_id(&window);
+        // Screensaver capture: we spawned vendi-screensaver and are waiting for
+        // its window. The first toplevel to map while that's true is it — keep
+        // it out of the tiling tree (the render loop draws it fullscreen above
+        // everything) so it never flickers in as a tile or steals layout.
+        if self.screensaver_child.is_some() && self.screensaver.is_none() {
+            let size = self.space.outputs().next()
+                .and_then(|o| self.space.output_geometry(o))
+                .map(|g| g.size)
+                .unwrap_or_else(|| (1920, 1080).into());
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|s| {
+                    s.states.set(xdg_toplevel::State::Fullscreen);
+                    s.size = Some(size);
+                });
+                toplevel.send_configure();
+            }
+            self.space.map_element(window.clone(), (0, 0), false);
+            self.screensaver = Some(window);
+            self.screensaver_t = Some(std::time::Instant::now());
+            self.screensaver_closing = None;
+            tracing::info!("screensaver window captured");
+            return;
+        }
         self.workspaces.active().tree.insert(window.clone());
         self.workspaces.active().focus_floating = None;
         self.open_anims.push((window.clone(), None));
@@ -459,6 +504,21 @@ impl XdgShellHandler for State {
         tracing::info!("new toplevel inserted");
     }
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // The screensaver window lives outside the tiling tree; if it died on
+        // its own (mpv quit via the q/ESC fallback, or the loop ended), forget
+        // it and reap the child so the idle timer can re-arm.
+        if self.screensaver.as_ref().and_then(|w| w.toplevel()) == Some(&surface) {
+            self.space.unmap_elem(&self.screensaver.take().unwrap());
+            if let Some(mut child) = self.screensaver_child.take() {
+                let _ = child.wait();
+            }
+            self.screensaver_t = None;
+            self.screensaver_closing = None;
+            self.screensaver_fired = false;
+            self.last_activity = std::time::Instant::now();
+            self.pending_redraw = true;
+            return;
+        }
         let window = self.workspaces.all_windows().into_iter()
             .find(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false));
         let id = window.as_ref().map(window_id).unwrap_or(0);
@@ -894,6 +954,47 @@ impl State {
             });
         }
         self.relayout();
+    }
+
+    /// Tear down a running screensaver immediately: kill mpv and forget its
+    /// window. Used when there's no time to fade (screen-off, or mpv died on
+    /// its own). Returns true if anything was actually torn down.
+    pub fn dismiss_screensaver(&mut self) -> bool {
+        if self.screensaver_child.is_none() && self.screensaver.is_none() {
+            return false;
+        }
+        if let Some(mut child) = self.screensaver_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.screensaver = None;
+        self.screensaver_t = None;
+        self.screensaver_closing = None;
+        self.screensaver_fired = false;
+        self.pending_redraw = true;
+        true
+    }
+
+    /// Begin dismissing the screensaver on input: start the fade-out (mpv keeps
+    /// playing so its last frame dissolves) rather than snapping it away. The
+    /// render loop kills mpv once the fade completes. Returns true if a
+    /// screensaver was up, so the caller can swallow that first input event.
+    pub fn begin_screensaver_dismiss(&mut self) -> bool {
+        if self.screensaver.is_none() && self.screensaver_child.is_none() {
+            return false;
+        }
+        // Grace period: ignore the keypress that launched it (and any stray
+        // event right as it appears) so it doesn't dismiss the instant it
+        // shows. Until the window has actually mapped, stay in grace too.
+        match self.screensaver_t {
+            Some(t0) if t0.elapsed().as_millis() >= 700 => {}
+            _ => return false,
+        }
+        if self.screensaver_closing.is_none() {
+            self.screensaver_closing = Some(std::time::Instant::now());
+            self.pending_redraw = true;
+        }
+        true
     }
 
     pub fn toggle_fullscreen(&mut self) {

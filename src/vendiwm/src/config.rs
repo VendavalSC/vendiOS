@@ -161,6 +161,10 @@ pub struct IdleBlock {
     /// (0 = never). Any input wakes them.
     #[knus(child, unwrap(argument))]
     pub screen_off_after: Option<i64>,
+    /// Seconds of inactivity before the video screensaver starts (0 = never).
+    /// Any input dismisses it. The launcher self-skips on battery / no video.
+    #[knus(child, unwrap(argument))]
+    pub screensaver_after: Option<i64>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -297,6 +301,8 @@ pub struct Config {
     pub idle_lock_secs: u64,
     /// Power displays off (DPMS) after N seconds idle (0 = disabled).
     pub idle_screen_off_secs: u64,
+    /// Start the video screensaver after N seconds idle (0 = disabled).
+    pub idle_screensaver_secs: u64,
     /// Keyboard / xkb settings, applied at startup and on reload.
     pub kb_layout:  String,
     pub kb_variant: String,
@@ -383,12 +389,15 @@ impl Config {
             theme.wallpaper = Some(p);
         }
 
-        // Idle auto-lock + screen-off: built-in default, then user override.
+        // Idle auto-lock + screen-off + screensaver: built-in default, then
+        // user override. Screensaver fires before screen-off by default.
         let mut idle_lock_secs: u64 = 600;
         let mut idle_screen_off_secs: u64 = 660;
+        let mut idle_screensaver_secs: u64 = 300;
         for blk in [default_idle, user_idle].into_iter().flatten() {
             if let Some(v) = blk.lock_after        { idle_lock_secs = v.max(0) as u64; }
             if let Some(v) = blk.screen_off_after  { idle_screen_off_secs = v.max(0) as u64; }
+            if let Some(v) = blk.screensaver_after { idle_screensaver_secs = v.max(0) as u64; }
         }
 
         // Keyboard: defaults, then built-in config, then user override.
@@ -429,6 +438,7 @@ impl Config {
 
         Ok(Self {
             keybinds, keybinds_pretty, theme, idle_lock_secs, idle_screen_off_secs,
+            idle_screensaver_secs,
             kb_layout, kb_variant, kb_options, repeat_delay, repeat_rate, outputs,
         })
     }

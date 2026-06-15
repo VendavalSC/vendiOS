@@ -414,6 +414,7 @@ pub fn run() -> Result<()> {
         session,
         primary_gpu: primary_gpu_node,
         drm_devices: HashMap::new(),
+        dmabuf_global: None,
     };
 
     // 5. Open primary GPU. This brings up DRM/GBM/EGL/GlesRenderer and
@@ -448,6 +449,29 @@ pub fn run() -> Result<()> {
         match dev.renderer.egl_context().display().bind_wl_display(&display_handle) {
             Ok(_)  => tracing::info!("EGL hardware-acceleration enabled (wl_drm bound)"),
             Err(e) => tracing::warn!(?e, "failed to bind wl_display — EGL clients may not work"),
+        }
+    }
+
+    // linux-dmabuf v4 with default feedback advertising the primary GPU's
+    // render node. WITHOUT this, Mesa EGL clients (mpv, Firefox, games) can't
+    // discover the device — they hit "failed to get driver name for fd -1" and
+    // silently fall back to software rendering. wl_drm (bound above) is the
+    // deprecated legacy path that modern Mesa no longer relies on; this global
+    // is what actually gives clients hardware acceleration.
+    {
+        use smithay::wayland::dmabuf::DmabufFeedbackBuilder;
+        let formats: Option<Vec<_>> = app.udev.drm_devices.get(&primary_gpu_node)
+            .map(|dev| dev.renderer.egl_context().dmabuf_render_formats().iter().copied().collect());
+        if let Some(formats) = formats {
+            match DmabufFeedbackBuilder::new(primary_gpu_node.dev_id(), formats).build() {
+                Ok(feedback) => {
+                    let global = app.state.dmabuf_state
+                        .create_global_with_default_feedback::<State>(&display_handle, &feedback);
+                    app.udev.dmabuf_global = Some(global);
+                    tracing::info!("linux-dmabuf v4 global up — clients can use the GPU");
+                }
+                Err(e) => tracing::warn!(?e, "dmabuf feedback build failed; clients stay software-only"),
+            }
         }
     }
 
@@ -555,6 +579,16 @@ pub fn run() -> Result<()> {
                 app.state.last_activity = std::time::Instant::now();
                 return TimeoutAction::ToDuration(TICK);
             }
+            // Reap a screensaver launcher that exited without mapping a window
+            // (self-skipped on battery / no video, or mpv failed) so a later
+            // unrelated window isn't mistaken for the screensaver.
+            if app.state.screensaver.is_none() {
+                if let Some(child) = app.state.screensaver_child.as_mut() {
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        app.state.screensaver_child = None;
+                    }
+                }
+            }
             let idle = app.state.last_activity.elapsed().as_secs();
             let lock_secs = app.state.config.idle_lock_secs;
             if lock_secs > 0
@@ -571,8 +605,31 @@ pub fn run() -> Result<()> {
                     tracing::warn!(?e, "auto-lock spawn failed");
                 }
             }
+            // Video screensaver: fires before screen-off. The launcher itself
+            // skips on battery / when no video is set, so the compositor can
+            // arm it unconditionally. One spawn per idle stretch (input resets).
+            let saver_secs = app.state.config.idle_screensaver_secs;
+            if saver_secs > 0
+                && !app.state.screensaver_fired
+                && app.state.screensaver_child.is_none()
+                && !app.state.is_locked()
+                && !app.state.vlock
+                && !app.state.screen_off
+                && idle >= saver_secs
+            {
+                app.state.screensaver_fired = true;
+                match std::process::Command::new("vendi-screensaver").arg("start").spawn() {
+                    Ok(child) => {
+                        app.state.screensaver_child = Some(child);
+                        tracing::info!(idle_secs = saver_secs, "screensaver started");
+                    }
+                    Err(e) => tracing::warn!(?e, "screensaver spawn failed"),
+                }
+            }
             let off_secs = app.state.config.idle_screen_off_secs;
             if off_secs > 0 && !app.state.screen_off && idle >= off_secs {
+                // No point playing video to a screen that's about to go dark.
+                app.state.dismiss_screensaver();
                 app.state.screen_off = true;
                 sleep_outputs(app);
             }
@@ -678,7 +735,7 @@ fn build_state(
 
     let config = crate::config::Config::load().unwrap_or_else(|e| {
         tracing::warn!(?e, "config load failed; using empty keybinds");
-        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, outputs: Vec::new() }
+        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, idle_screensaver_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, outputs: Vec::new() }
     });
 
     let mut seat_state = SeatState::new();
@@ -738,6 +795,11 @@ fn build_state(
         last_activity:          std::time::Instant::now(),
         auto_lock_fired:        false,
         screen_off:             false,
+        screensaver_child:      None,
+        screensaver:            None,
+        screensaver_fired:      false,
+        screensaver_t:          None,
+        screensaver_closing:    None,
         open_anims:             Vec::new(),
         ws_anim:                None,
         geo_anims:              Vec::new(),
@@ -759,6 +821,9 @@ pub struct UdevData {
     pub session:      LibSeatSession,
     pub primary_gpu:  DrmNode,
     pub drm_devices:  HashMap<DrmNode, DeviceState>,
+    /// linux-dmabuf v4 global advertising the primary GPU to clients. Held so
+    /// it stays alive for the session (clients need it for hardware EGL).
+    pub dmabuf_global: Option<smithay::wayland::dmabuf::DmabufGlobal>,
 }
 
 pub struct DeviceState {
@@ -1350,6 +1415,28 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let surface  = device.surfaces.get_mut(&crtc)
         .ok_or_else(|| anyhow::anyhow!("surface not found"))?;
 
+    // Screensaver: once the dismiss fade-out finishes, kill mpv for real.
+    // While one is on screen, keep requesting redraws so the fade animates
+    // smoothly even when mpv's (software) frames trickle in slowly.
+    const SCREENSAVER_FADE_MS: f32 = 700.0;
+    if state.screensaver_closing
+        .map(|c| c.elapsed().as_secs_f32() * 1000.0 >= SCREENSAVER_FADE_MS)
+        .unwrap_or(false)
+    {
+        state.dismiss_screensaver();
+    }
+    // Only pump extra redraws while a fade is actually animating. Doing it for
+    // the whole screensaver lifetime busy-loops the compositor and starves
+    // mpv's (software) decode — that's what made fullscreen playback choppy.
+    // Steady-state playback rides mpv's own frame callbacks.
+    let fade_active = state.screensaver_closing.is_some()
+        || state.screensaver_t
+            .map(|t| t.elapsed().as_secs_f32() * 1000.0 < SCREENSAVER_FADE_MS)
+            .unwrap_or(false);
+    if fade_active {
+        state.pending_redraw = true;
+    }
+
     // Wallpaper changed over IPC: rebuild this output's buffer once, keep
     // the old one around for the bloom transition (reveal grows out of the
     // pointer — that's where the user clicked the thumbnail).
@@ -1594,6 +1681,31 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     }
     // Screenshots skip everything up to here (i.e. the cursor).
     let after_cursor = elements.len();
+
+    // Screensaver: the captured mpv window, full-bleed above the bar and every
+    // desktop window (just under the cursor). No rounding or border — it's a
+    // video, not a tile. Any input tears it down before the next frame.
+    if let Some(ss) = state.screensaver.clone() {
+        if smithay::utils::IsAlive::alive(&ss) {
+            // Fade in on appear, fade out on dismiss (ease-out both ways).
+            // Single render_elements call at the computed alpha — rendering the
+            // same surface twice in one frame corrupts it (black screen).
+            let ss_alpha = if let Some(c) = state.screensaver_closing {
+                1.0 - ease_out((c.elapsed().as_secs_f32() * 1000.0 / SCREENSAVER_FADE_MS).min(1.0))
+            } else if let Some(t0) = state.screensaver_t {
+                ease_out((t0.elapsed().as_secs_f32() * 1000.0 / SCREENSAVER_FADE_MS).min(1.0))
+            } else {
+                1.0
+            };
+            let render_loc = (smithay::utils::Point::<i32, smithay::utils::Logical>::from((0, 0))
+                - ss.geometry().loc).to_physical_precise_round(scale);
+            let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                ss.render_elements(renderer, render_loc, scale, ss_alpha);
+            for elem in surfaces.into_iter().rev() {
+                elements.insert(after_cursor, OutputRenderElements::Layer(elem));
+            }
+        }
+    }
 
     // Upper layers (Top/Overlay) → above windows but below the cursor.
     elements.extend(upper_layer_elems.into_iter().map(OutputRenderElements::Layer));
@@ -2398,9 +2510,24 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
     if !matches!(event, InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }) {
         app.state.last_activity = std::time::Instant::now();
         app.state.auto_lock_fired = false;
+        // Re-arm the screensaver for the next idle stretch. Without this, a run
+        // that self-skipped (on battery / no video set) leaves screensaver_fired
+        // stuck true and the screensaver never fires again.
+        app.state.screensaver_fired = false;
         if app.state.screen_off {
             app.state.screen_off = false;
             wake_outputs(app);
+        }
+        // A running screensaver starts fading out on the first real input.
+        // We must NOT swallow keyboard events: the compositor tracks key
+        // repeat by press/release, and eating a release leaves the key "stuck
+        // down" auto-repeating into the focused app. So swallow only pointer /
+        // touch (no repeat) — a dismissing click/tap shouldn't also land on
+        // whatever's underneath; a dismissing keystroke harmlessly does.
+        if app.state.begin_screensaver_dismiss()
+            && !matches!(event, InputEvent::Keyboard { .. })
+        {
+            return;
         }
     }
     let state = &mut app.state;

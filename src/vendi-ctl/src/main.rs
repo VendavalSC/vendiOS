@@ -32,6 +32,7 @@ fn main() -> Result<()> {
         "list-windows"     => ipc_call(json!({"cmd": "list-windows"})),
         "list-workspaces"  => ipc_call(json!({"cmd": "list-workspaces"})),
         "lock"             => lock_cmd(),
+        "screensaver"      => ipc_call(json!({"cmd": "screensaver"})),
         "reload"           => ipc_call(json!({"cmd": "reload-config"})),
         "workspace"        => workspace_cmd(&args[1..]),
         "split"            => split_cmd(&args[1..]),
