@@ -956,9 +956,11 @@ impl UdevData {
         let frost_prog = renderer.compile_custom_texture_shader(
             crate::render::FROST_TEX_FRAG,
             &[
-                UniformName::new("size",    UniformType::_2f),
-                UniformName::new("radius",  UniformType::_1f),
-                UniformName::new("lighten", UniformType::_1f),
+                UniformName::new("size",        UniformType::_2f),
+                UniformName::new("radius",      UniformType::_1f),
+                UniformName::new("lighten",     UniformType::_1f),
+                UniformName::new("coord_off",   UniformType::_2f),
+                UniformName::new("coord_scale", UniformType::_2f),
             ],
         ).map_err(|e| anyhow::anyhow!("compile frost shader: {e:?}"))?;
         let reveal_prog = renderer.compile_custom_texture_shader(
@@ -2470,11 +2472,12 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                         None,
                         Kind::Unspecified,
                     );
-                    // Round the frost corners tighter than the window's so the
-                    // quarter-res-upscaled (soft, slightly oversized) corner tucks
-                    // behind the window's crisp corner instead of poking out.
+                    // Same corner radius as the window so the frost rounds to the
+                    // exact same curve and never pokes past it.
+                    let coff = [src.loc.x as f32 / qw as f32, src.loc.y as f32 / qh as f32];
+                    let cscale = [src.size.w as f32 / qw as f32, src.size.h as f32 / qh as f32];
                     let patch = crate::render::BlurElement::new(
-                        inner, frost_prog.clone(), rad + DOWN as f32, FROST_LIGHTEN);
+                        inner, frost_prog.clone(), rad, FROST_LIGHTEN, coff, cscale);
                     let at = idx.min(elements.len());
                     elements.insert(at, OutputRenderElements::Blur(patch));
                 }
@@ -2497,7 +2500,10 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                         Kind::Unspecified,
                     );
                     // 16px matches the menu card's CSS border-radius.
-                    let patch = crate::render::BlurElement::new(inner, frost_prog.clone(), 16.0, FROST_LIGHTEN);
+                    let coff = [src.loc.x as f32 / qw as f32, src.loc.y as f32 / qh as f32];
+                    let cscale = [src.size.w as f32 / qw as f32, src.size.h as f32 / qh as f32];
+                    let patch = crate::render::BlurElement::new(
+                        inner, frost_prog.clone(), 16.0, FROST_LIGHTEN, coff, cscale);
                     elements.insert(blur_mark + i, OutputRenderElements::Blur(patch));
                 }
             }

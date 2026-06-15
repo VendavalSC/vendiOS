@@ -105,6 +105,13 @@ uniform float tint;
 uniform vec2 size;
 uniform float radius;
 uniform float lighten;
+// The blurred desktop is sampled through a src crop, so v_coords spans the
+// crop sub-rectangle in texture UV, NOT 0..1 across this element. coord_off /
+// coord_scale are that crop's UV origin/extent — dividing maps v_coords back to
+// 0..1 so the rounded-corner mask lands on the element's real corners (without
+// this the frost stayed a square and its corners poked past the rounded window).
+uniform vec2 coord_off;
+uniform vec2 coord_scale;
 
 float rounded_box(vec2 p, vec2 half_size, float r) {
     vec2 q = abs(p) - half_size + r;
@@ -123,7 +130,8 @@ void main() {
     rgb = mix(rgb, vec3(luma), 0.12);
     rgb = mix(rgb, vec3(1.0), lighten);
     color.rgb = rgb;
-    vec2 p = (v_coords - vec2(0.5)) * size;
+    vec2 n = (v_coords - coord_off) / coord_scale;
+    vec2 p = (n - vec2(0.5)) * size;
     float d = rounded_box(p, size * 0.5, radius);
     float mask = 1.0 - smoothstep(-1.0, 1.0, d);
     color *= alpha * mask;
@@ -504,10 +512,14 @@ impl RenderElement<GlesRenderer> for RevealElement {
 /// Frosted-glass patch: a crop of the blurred desktop texture, drawn through
 /// the rounded-corner shader so it hugs the card it sits behind (vendi-menu).
 pub struct BlurElement {
-    inner:   TextureRenderElement<GlesTexture>,
-    program: GlesTexProgram,
-    radius:  f32,
-    lighten: f32,
+    inner:    TextureRenderElement<GlesTexture>,
+    program:  GlesTexProgram,
+    radius:   f32,
+    lighten:  f32,
+    // UV crop (origin, extent) of this patch within the blurred texture, so the
+    // shader can normalize v_coords to 0..1 and round the right corners.
+    coord_off:   [f32; 2],
+    coord_scale: [f32; 2],
 }
 
 impl BlurElement {
@@ -516,8 +528,10 @@ impl BlurElement {
         program: GlesTexProgram,
         radius: f32,
         lighten: f32,
+        coord_off: [f32; 2],
+        coord_scale: [f32; 2],
     ) -> Self {
-        Self { inner, program, radius, lighten }
+        Self { inner, program, radius, lighten, coord_off, coord_scale }
     }
 }
 
@@ -554,6 +568,8 @@ impl RenderElement<GlesRenderer> for BlurElement {
                 Uniform::new("size", (dst.size.w as f32, dst.size.h as f32)),
                 Uniform::new("radius", self.radius),
                 Uniform::new("lighten", self.lighten),
+                Uniform::new("coord_off", self.coord_off),
+                Uniform::new("coord_scale", self.coord_scale),
             ],
         );
         let res = RenderElement::<GlesRenderer>::draw(
