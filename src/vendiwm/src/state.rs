@@ -1353,8 +1353,13 @@ impl State {
         match phase {
             TouchPhase::WindowMove => { self.pointer_location = pos; self.drag_update(); }
             TouchPhase::Pending => {
-                let moved = (pos.x - down.x).hypot(pos.y - down.y);
-                if moved > SLOP {
+                let dx = pos.x - down.x;
+                let dy = pos.y - down.y;
+                // A downward, vertically-dominant pull from the top edge is a
+                // control-center gesture (handled above at 50px) — don't let it
+                // turn into a left-drag before it gets there.
+                let edge_pull = from_edge && dy > 0.0 && dy > dx.abs();
+                if dx.hypot(dy) > SLOP && !edge_pull {
                     // Crossed into a drag: press left at the start, then track.
                     if let Some(t) = self.touch.as_mut() { t.phase = TouchPhase::Dragging; }
                     self.emul_button(0x110, true, time);
@@ -1419,6 +1424,7 @@ impl State {
         const LONG_PRESS_MS: u128 = 450;
         let Some(t) = self.touch.as_ref() else { return };
         if t.phase != TouchPhase::Pending { return; }
+        if t.from_edge { return; } // edge touches are control-center pulls, not right-clicks
         if t.down_instant.elapsed().as_millis() < LONG_PRESS_MS { return; }
         let pos = t.cur_pos;
         let time = t.down_time.wrapping_add(LONG_PRESS_MS as u32);
