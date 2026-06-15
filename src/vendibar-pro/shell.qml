@@ -483,6 +483,29 @@ ShellRoot {
         onFileChanged: reload()
     }
 
+    // ── screensaver videos (~/Videos/Screensavers) ───────────────────────────
+    property var screensavers: []
+    property string currentScreensaver: ""
+    function rescanScreensavers() { ssList.running = true; }
+    Process {
+        id: ssList
+        command: ["sh", "-c",
+            "ls -1 \"$HOME\"/Videos/Screensavers/*.mp4 \"$HOME\"/Videos/Screensavers/*.mkv " +
+            "\"$HOME\"/Videos/Screensavers/*.webm \"$HOME\"/Videos/Screensavers/*.mov " +
+            "\"$HOME\"/Videos/Screensavers/*.m4v \"$HOME\"/Videos/Screensavers/*.avi 2>/dev/null"]
+        running: true
+        property var acc: []
+        stdout: SplitParser { onRead: l => { if (l.trim()) ssList.acc.push(l.trim()); } }
+        onStarted: acc = []
+        onExited: { root.screensavers = acc; acc = []; }
+    }
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/vendi/screensaver"
+        watchChanges: true
+        onLoaded: root.currentScreensaver = text().trim()
+        onFileChanged: reload()
+    }
+
     // ── notifications (we ARE the daemon) ────────────────────────────────────
     // toasts: live queue shown in the right notch (newest first served).
     // notifHistory: plain snapshots for the control center (safe after the

@@ -42,6 +42,7 @@ Item {
         tasksFile.reload();
         if (tab === 5) outputsProc.running = true;
         if (bar) bar.rescanWallpapers();
+        if (bar) bar.rescanScreensavers();
         forceActiveFocus();
     }
 
@@ -320,6 +321,7 @@ Item {
                     { g: "󰸉", t: "Wallpapers" },
                     { g: "󰒓", t: "Config" },
                     { g: "󰍹", t: "Displays" },
+                    { g: "󰕧", t: "Screensaver" },
                 ]
                 Rectangle {
                     required property var modelData
@@ -1712,6 +1714,121 @@ Item {
                             }
                         }
                     }
+                }
+            }
+
+            // ════ SCREENSAVER ══════════════════════════════════════════════
+            ColumnLayout {
+                spacing: 12
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Mono {
+                        text: (dash.bar?.screensavers?.length ?? 0) + " in ~/Videos/Screensavers"
+                        color: dash.dim
+                    }
+                    Item { Layout.fillWidth: true }
+                    Rectangle {
+                        visible: (dash.bar?.currentScreensaver ?? "") !== ""
+                        implicitWidth: ssPvRow.implicitWidth + 26; implicitHeight: 30; radius: 15
+                        color: ssPvHover.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                        HoverHandler { id: ssPvHover; cursorShape: Qt.PointingHandCursor }
+                        TapHandler {
+                            onTapped: { dash.requestClose(); Quickshell.execDetached(["vendi-ctl", "screensaver"]); }
+                        }
+                        RowLayout {
+                            id: ssPvRow
+                            anchors.centerIn: parent
+                            spacing: 7
+                            Glyph { text: "󰐊"; color: dash.accent; font.pixelSize: 12 }
+                            Mono { text: "Preview"; font.pixelSize: 11 }
+                        }
+                    }
+                    Rectangle {
+                        id: ssTabToggle
+                        property bool on: (dash.bar?.currentScreensaver ?? "") !== ""
+                        implicitWidth: 50; implicitHeight: 30; radius: 15
+                        color: on ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.9)
+                                  : Qt.rgba(1, 1, 1, 0.10)
+                        Behavior on color { ColorAnimation { duration: 150 } }
+                        Rectangle {
+                            width: 24; height: 24; radius: 12; color: "#ffffff"
+                            y: 3
+                            x: ssTabToggle.on ? parent.width - width - 3 : 3
+                            Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                        }
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        TapHandler {
+                            onTapped: {
+                                if (ssTabToggle.on)
+                                    Quickshell.execDetached(["vendi", "screensaver", "off"]);
+                                else if ((dash.bar?.screensavers?.length ?? 0) > 0)
+                                    Quickshell.execDetached(["vendi", "screensaver", dash.bar.screensavers[0]]);
+                            }
+                        }
+                    }
+                }
+
+                ListView {
+                    id: ssListView
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    spacing: 8
+                    interactive: contentHeight > height
+                    boundsBehavior: Flickable.StopAtBounds
+                    model: dash.bar?.screensavers ?? []
+                    delegate: Rectangle {
+                        id: ssRow
+                        required property var modelData
+                        property bool current: modelData === (dash.bar?.currentScreensaver ?? "")
+                        width: ssListView.width
+                        height: 48
+                        radius: 12
+                        color: current ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.16)
+                             : ssRowHover.hovered ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.04)
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                        border.width: 1
+                        border.color: current ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.5)
+                                              : dash.cardBr
+                        HoverHandler { id: ssRowHover; cursorShape: Qt.PointingHandCursor }
+                        TapHandler {
+                            onTapped: Quickshell.execDetached(["vendi", "screensaver", ssRow.modelData])
+                        }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 14
+                            anchors.rightMargin: 14
+                            spacing: 12
+                            Glyph {
+                                text: "󰕧"
+                                color: ssRow.current ? dash.accent : dash.dim
+                                font.pixelSize: 16
+                            }
+                            Mono {
+                                Layout.fillWidth: true
+                                text: {
+                                    const n = ssRow.modelData.split("/").pop();
+                                    return n.replace(/\.(mp4|mkv|webm|mov|m4v|avi)$/i, "");
+                                }
+                                font.pixelSize: 12
+                                elide: Text.ElideRight
+                            }
+                            Rectangle {
+                                visible: ssRow.current
+                                width: 22; height: 22; radius: 11; color: dash.accent
+                                Mono { anchors.centerIn: parent; text: "󰄬"; color: "#0b0b12"; font.pixelSize: 12 }
+                            }
+                        }
+                    }
+                }
+                Mono {
+                    visible: (dash.bar?.screensavers?.length ?? 0) === 0
+                    text: "drop videos in ~/Videos/Screensavers  (mp4 · mkv · webm · mov)"
+                    color: dash.dim
+                    Layout.alignment: Qt.AlignHCenter
                 }
             }
         }
