@@ -1412,6 +1412,9 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     const MORPH_MS: f32 = 230.0;
     const DRAG_MS:  f32 = 120.0;
     fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t).powi(3) }
+    // Silkier decel than cubic — a longer, gentler tail so slides and layout
+    // morphs glide to rest (the macOS feel) instead of braking late.
+    fn ease_out_quint(t: f32) -> f32 { 1.0 - (1.0 - t).powi(5) }
     // Spring-ish: overshoots the target by ~10% then settles — the iOS feel.
     fn ease_out_back(t: f32) -> f32 {
         const C1: f32 = 1.70158;
@@ -1443,7 +1446,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // The incoming desk fades in and slides from the side it lives on.
     let (ws_alpha, ws_scale, ws_off) = match ws_progress.filter(|p| *p < 1.0) {
         Some(p) => {
-            let e = ease_out(p);
+            let e = ease_out_quint(p);
             (0.25 + 0.75 * e, 0.97 + 0.03 * e as f64, (ws_dir as f32 * 46.0 * (1.0 - e)).round() as i32)
         }
         None => (1.0, 1.0, 0),
@@ -1720,7 +1723,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         let target = state.geo_anims.iter()
             .find(|(w, _, _)| w == window)
             .map(|(_, old, t)| {
-                let e = ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / MORPH_MS).min(1.0));
+                let e = ease_out_quint((now.duration_since(*t).as_secs_f32() * 1000.0 / MORPH_MS).min(1.0));
                 let l = |a: i32, b: i32| (a as f32 + (b - a) as f32 * e).round() as i32;
                 smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
                     (l(old.loc.x, dest.loc.x) + ws_off, l(old.loc.y, dest.loc.y)).into(),
