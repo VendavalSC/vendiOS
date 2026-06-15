@@ -636,11 +636,11 @@ ShellRoot {
             // of restarting. Tuned for the iOS dynamic-island feel: quick to
             // move, a whisper of overshoot, clean settle. `epsilon` is in px so
             // it stops cleanly without a long crawling tail.
-            Behavior on lw { SpringAnimation { spring: 4.6; damping: 0.46; mass: 0.9; epsilon: 0.25 } }
-            Behavior on cw { SpringAnimation { spring: 4.2; damping: 0.40; mass: 1.0; epsilon: 0.25 } }
-            Behavior on rw { SpringAnimation { spring: 4.2; damping: 0.40; mass: 1.0; epsilon: 0.25 } }
-            Behavior on ch { SpringAnimation { spring: 3.8; damping: 0.34; mass: 1.0; epsilon: 0.3 } }
-            Behavior on rh { SpringAnimation { spring: 3.8; damping: 0.34; mass: 1.0; epsilon: 0.3 } }
+            Behavior on lw { SpringAnimation { spring: 7.0; damping: 0.62; mass: 0.8; epsilon: 0.4 } }
+            Behavior on cw { SpringAnimation { spring: 6.4; damping: 0.58; mass: 0.85; epsilon: 0.4 } }
+            Behavior on rw { SpringAnimation { spring: 6.4; damping: 0.58; mass: 0.85; epsilon: 0.4 } }
+            Behavior on ch { SpringAnimation { spring: 6.0; damping: 0.55; mass: 0.85; epsilon: 0.5 } }
+            Behavior on rh { SpringAnimation { spring: 6.0; damping: 0.55; mass: 0.85; epsilon: 0.5 } }
             onLwChanged: silhouette.requestPaint()
             onCwChanged: { silhouette.requestPaint(); root.centerW = cw; }
             Component.onCompleted: root.centerW = cw
