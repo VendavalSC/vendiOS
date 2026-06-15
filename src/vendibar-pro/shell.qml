@@ -636,11 +636,17 @@ ShellRoot {
             // of restarting. Tuned for the iOS dynamic-island feel: quick to
             // move, a whisper of overshoot, clean settle. `epsilon` is in px so
             // it stops cleanly without a long crawling tail.
-            Behavior on lw { SpringAnimation { spring: 7.0; damping: 0.62; mass: 0.8; epsilon: 0.4 } }
-            Behavior on cw { SpringAnimation { spring: 6.4; damping: 0.58; mass: 0.85; epsilon: 0.4 } }
-            Behavior on rw { SpringAnimation { spring: 6.4; damping: 0.58; mass: 0.85; epsilon: 0.4 } }
-            Behavior on ch { SpringAnimation { spring: 6.0; damping: 0.55; mass: 0.85; epsilon: 0.5 } }
-            Behavior on rh { SpringAnimation { spring: 6.0; damping: 0.55; mass: 0.85; epsilon: 0.5 } }
+            // epsilon is the stop threshold in px. Kept large so the spring
+            // doesn't crawl the asymptotic last few percent — that tail is
+            // invisible on a 270px-tall reveal but reads as a clunky slow-down
+            // on open. Cutting it makes open arrive as crisply as close.
+            Behavior on lw { SpringAnimation { spring: 9.6; damping: 0.64; mass: 0.70; epsilon: 2.5 } }
+            Behavior on cw { SpringAnimation { spring: 9.0; damping: 0.62; mass: 0.70; epsilon: 2.5 } }
+            // Right notch travels less than the center, so the same spring
+            // finishes quicker and reads as too fast — soften it to match.
+            Behavior on rw { SpringAnimation { spring: 7.4; damping: 0.64; mass: 0.78; epsilon: 2.5 } }
+            Behavior on ch { SpringAnimation { spring: 9.0; damping: 0.62; mass: 0.68; epsilon: 4.0 } }
+            Behavior on rh { SpringAnimation { spring: 7.4; damping: 0.64; mass: 0.78; epsilon: 4.0 } }
             onLwChanged: silhouette.requestPaint()
             onCwChanged: { silhouette.requestPaint(); root.centerW = cw; }
             Component.onCompleted: root.centerW = cw
