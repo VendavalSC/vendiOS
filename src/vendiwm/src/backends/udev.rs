@@ -1492,7 +1492,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         } else {
             Vec::new()
         };
-    let ov_e = ease_out(
+    let ov_e = ease_out_quint(
         (now.duration_since(state.overview_t).as_secs_f32() * 1000.0 / OVERVIEW_MS).min(1.0),
     );
     let mut wallpaper_alpha = if locked { 0.30 } else if state.overview { 1.0 - 0.55 * ov_e } else { 0.45 + 0.55 * ov_e };
@@ -1611,7 +1611,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // Close ghosts — above live windows (the dying window was usually on top).
     let ctx = smithay::backend::renderer::Renderer::context_id(renderer);
     for (eid, tex, geo, t) in closing_anims.iter().filter(|_| !locked) {
-        let e = ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / CLOSE_MS).min(1.0));
+        let e = ease_out_quint((now.duration_since(*t).as_secs_f32() * 1000.0 / CLOSE_MS).min(1.0));
         let shrink = 1.0 - 0.15 * e as f64;
         let size = smithay::utils::Size::<i32, smithay::utils::Logical>::from((
             ((geo.size.w as f64 * shrink) as i32).max(1),
