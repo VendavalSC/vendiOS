@@ -12,8 +12,9 @@ use smithay::{
     desktop::{LayerSurface, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
     input::{
         Seat, SeatHandler, SeatState,
-        pointer::CursorImageStatus,
+        pointer::{CursorImageStatus, MotionEvent, ButtonEvent},
     },
+    backend::input::ButtonState,
     utils::{IsAlive, Logical, Point, Rectangle, SERIAL_COUNTER, Serial},
     reexports::wayland_server::{
         Client,
@@ -118,6 +119,11 @@ pub struct State {
     // In-flight touchpad swipe: (finger count, accumulated dx, dy).
     // 3 fingers horizontal = workspace switch; 4 fingers vertical = menus.
     pub swipe:                 Option<(u32, f64, f64)>,
+
+    // Single-finger touchscreen → pointer emulation. The first finger down
+    // drives a synthetic mouse (tap = left click, drag = left-button drag,
+    // long-press = right click, Super-held = window move). See TouchEmul.
+    pub touch:                 Option<TouchEmul>,
 
     // Overview (exposé): all windows of the active workspace laid out in a
     // centered grid over a dimmed wallpaper. Render-only — the space keeps
@@ -245,6 +251,36 @@ pub struct Drag {
     pub start_rect:  Rectangle<i32, Logical>,
     // When the grab began — the renderer eases in a slight pick-up scale.
     pub started:     std::time::Instant,
+}
+
+/// Single-finger touch→pointer emulation. vendiOS targets laptops with a
+/// touchscreen (keyboard always present), so touch acts like the mouse rather
+/// than delivering native wl_touch: tap = left click, a drag past a small
+/// threshold = left-button drag (scroll/select), a stationary hold = right
+/// click (context menus), and Super held at touch-down = window move (the same
+/// grab as Super+LeftDrag with a mouse). Only the first finger emulates; extra
+/// fingers are ignored here (multi-finger gestures are handled separately).
+pub struct TouchEmul {
+    /// The libinput slot of the finger we're tracking (the first one down).
+    pub slot:        Option<smithay::backend::input::TouchSlot>,
+    pub down_pos:    Point<f64, Logical>,
+    pub down_time:   u32,
+    pub down_instant: std::time::Instant,
+    pub cur_pos:     Point<f64, Logical>,
+    pub phase:       TouchPhase,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum TouchPhase {
+    /// Finger down, not yet moved far or held long — could become tap / drag /
+    /// long-press. No button has been sent to the client yet.
+    Pending,
+    /// Moved past the threshold: left button is held and we're dragging.
+    Dragging,
+    /// Super was held at touch-down: driving a window-move grab (`self.drag`).
+    WindowMove,
+    /// A gesture already resolved (long-press fired); swallow until lift.
+    Consumed,
 }
 
 // ── per-client data ──────────────────────────────────────────────────────────
@@ -1154,6 +1190,159 @@ impl State {
             ws.tree.focus_window(&window);
         }
         self.update_keyboard_focus();
+    }
+
+    /// Begin a Super+drag grab on the window under the pointer, mirroring the
+    /// mouse rules: left (0x110) moves, right (0x111) resizes; only floating
+    /// windows move/resize freely, tiled windows take a right-drag split-ratio
+    /// trade. Returns true if a grab started. Shared by the mouse PointerButton
+    /// handler and the touch emulation (touch always passes left = move).
+    pub fn try_begin_super_drag(&mut self, code: u32) -> bool {
+        const BTN_RIGHT: u32 = 0x111;
+        let pos = self.pointer_location;
+        let Some(window) = self.space.element_under(pos).map(|(w, _)| w.clone()) else { return false };
+        let floating_rect = self.workspaces.active_ref().floating.iter()
+            .find(|(w, _)| w == &window).map(|(_, r)| *r);
+        let tiled = floating_rect.is_none() && self.workspaces.active_ref().tree.contains(&window);
+        let drag = match (floating_rect, tiled, code) {
+            (Some(start_rect), _, _) => Some(Drag {
+                window: window.clone(), resize: code == BTN_RIGHT, tile_resize: false,
+                start_ptr: pos, start_rect, started: std::time::Instant::now(),
+            }),
+            (None, true, BTN_RIGHT) => Some(Drag {
+                window: window.clone(), resize: true, tile_resize: true,
+                start_ptr: pos, start_rect: Default::default(), started: std::time::Instant::now(),
+            }),
+            _ => None,
+        };
+        if let Some(drag) = drag {
+            self.focus_window_at_cursor();
+            self.drag = Some(drag);
+            true
+        } else {
+            false
+        }
+    }
+
+    // ── touchscreen → pointer emulation ──────────────────────────────────────
+    // vendiOS is a laptop-with-touchscreen target, so touch acts like the mouse.
+    // ~8px slop separates a tap from a drag; a 450ms still hold is a right click.
+    fn emul_motion(&mut self, pos: Point<f64, Logical>, time: u32) {
+        let Some(pointer) = self.seat.get_pointer() else { return };
+        self.pointer_location = pos;
+        let under = self.surface_under(pos);
+        pointer.motion(self, under, &MotionEvent {
+            location: pos, serial: SERIAL_COUNTER.next_serial(), time,
+        });
+        pointer.frame(self);
+        self.pending_redraw = true;
+    }
+
+    fn emul_button(&mut self, code: u32, pressed: bool, time: u32) {
+        let Some(pointer) = self.seat.get_pointer() else { return };
+        pointer.button(self, &ButtonEvent {
+            button: code,
+            state:  if pressed { ButtonState::Pressed } else { ButtonState::Released },
+            serial: SERIAL_COUNTER.next_serial(),
+            time,
+        });
+        pointer.frame(self);
+    }
+
+    /// First finger down. `super_held` mirrors the keyboard Super modifier — if
+    /// set and a window is grabbed, this becomes a window move (no client press).
+    pub fn touch_down(
+        &mut self,
+        slot: Option<smithay::backend::input::TouchSlot>,
+        pos: Point<f64, Logical>,
+        time: u32,
+        super_held: bool,
+    ) {
+        if self.touch.is_some() { return; } // only the first finger emulates
+        self.emul_motion(pos, time);
+        self.focus_window_at_cursor();
+        let phase = if super_held && self.try_begin_super_drag(0x110) {
+            TouchPhase::WindowMove
+        } else {
+            TouchPhase::Pending
+        };
+        self.touch = Some(TouchEmul {
+            slot, down_pos: pos, down_time: time, down_instant: std::time::Instant::now(),
+            cur_pos: pos, phase,
+        });
+    }
+
+    pub fn touch_motion(
+        &mut self,
+        slot: Option<smithay::backend::input::TouchSlot>,
+        pos: Point<f64, Logical>,
+        time: u32,
+    ) {
+        const SLOP: f64 = 8.0;
+        let Some(t) = self.touch.as_ref() else { return };
+        if t.slot != slot { return; } // ignore other fingers
+        let phase = t.phase;
+        let down = t.down_pos;
+        if let Some(t) = self.touch.as_mut() { t.cur_pos = pos; }
+        match phase {
+            TouchPhase::WindowMove => { self.pointer_location = pos; self.drag_update(); }
+            TouchPhase::Pending => {
+                let moved = (pos.x - down.x).hypot(pos.y - down.y);
+                if moved > SLOP {
+                    // Crossed into a drag: press left at the start, then track.
+                    if let Some(t) = self.touch.as_mut() { t.phase = TouchPhase::Dragging; }
+                    self.emul_button(0x110, true, time);
+                }
+                self.emul_motion(pos, time);
+            }
+            TouchPhase::Dragging => self.emul_motion(pos, time),
+            TouchPhase::Consumed => {}
+        }
+    }
+
+    pub fn touch_up(
+        &mut self,
+        slot: Option<smithay::backend::input::TouchSlot>,
+        time: u32,
+    ) {
+        let Some(t) = self.touch.as_ref() else { return };
+        if t.slot != slot { return; }
+        let phase = t.phase;
+        let pos = t.cur_pos;
+        self.touch = None;
+        match phase {
+            TouchPhase::Pending => {
+                // A tap: a full left click in place.
+                self.emul_motion(pos, time);
+                self.emul_button(0x110, true, time);
+                self.emul_button(0x110, false, time);
+            }
+            TouchPhase::Dragging => self.emul_button(0x110, false, time),
+            TouchPhase::WindowMove => {
+                if let Some(drag) = self.drag.take() {
+                    if !drag.resize {
+                        self.drag_release = Some((drag.window, std::time::Instant::now()));
+                    }
+                }
+                self.pending_redraw = true;
+            }
+            TouchPhase::Consumed => {}
+        }
+    }
+
+    /// Per-tick check: a finger held still past the long-press threshold fires a
+    /// right click (context menu), then swallows input until the finger lifts.
+    pub fn touch_tick(&mut self) {
+        const LONG_PRESS_MS: u128 = 450;
+        let Some(t) = self.touch.as_ref() else { return };
+        if t.phase != TouchPhase::Pending { return; }
+        if t.down_instant.elapsed().as_millis() < LONG_PRESS_MS { return; }
+        let pos = t.cur_pos;
+        let time = t.down_time.wrapping_add(LONG_PRESS_MS as u32);
+        if let Some(t) = self.touch.as_mut() { t.phase = TouchPhase::Consumed; }
+        self.emul_motion(pos, time);
+        self.emul_button(0x111, true, time);
+        self.emul_button(0x111, false, time);
     }
 
     /// Focus a window by its compositor id (IPC). Switches workspace if needed.

@@ -749,10 +749,9 @@ fn build_state(
     seat.add_keyboard(xkb, config.repeat_delay, config.repeat_rate)
         .context("add keyboard to seat")?;
     let _ = seat.add_pointer();
-    // Touchscreen: advertise wl_touch so touch-aware clients get native
-    // touch events (real touchscreens emit Touch* events, not absolute
-    // pointer motion, so without this a tap reaches nothing).
-    let _ = seat.add_touch();
+    // No wl_touch: vendiOS emulates the mouse from the touchscreen (see
+    // State::touch_down) so every desktop app — not just touch-aware ones —
+    // gets tap=click, drag, long-press=right-click, and Super+drag to move.
 
     Ok(State {
         compositor_state,
@@ -781,6 +780,7 @@ fn build_state(
         window_titles:          Default::default(),
         rule_checked:           Default::default(),
         drag:                   None,
+        touch:                  None,
         drag_release:           None,
         swipe:                  None,
         overview:               false,
@@ -1449,6 +1449,14 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             .map(|t| t.elapsed().as_secs_f32() * 1000.0 < SCREENSAVER_FADE_MS)
             .unwrap_or(false);
     if fade_active {
+        state.pending_redraw = true;
+    }
+
+    // Touch long-press → right click. The 5s TICK timer is far too coarse, so
+    // poll per-frame: while a finger is held (pending), keep redrawing so we
+    // reach the ~450ms threshold, then touch_tick fires the synthetic click.
+    state.touch_tick();
+    if matches!(state.touch.as_ref().map(|t| t.phase), Some(crate::state::TouchPhase::Pending)) {
         state.pending_redraw = true;
     }
 
@@ -2820,43 +2828,12 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                     .map(|k| k.modifier_state().logo)
                     .unwrap_or(false);
                 let code = event.button_code();
-                if logo && (code == BTN_LEFT || code == BTN_RIGHT) {
-                    let pos = state.pointer_location;
-                    let target = state.space.element_under(pos).map(|(w, _)| w.clone());
-                    if let Some(window) = target {
-                        let floating_rect = state.workspaces.active_ref().floating.iter()
-                            .find(|(w, _)| w == &window)
-                            .map(|(_, r)| *r);
-                        let tiled = floating_rect.is_none()
-                            && state.workspaces.active_ref().tree.contains(&window);
-                        // Move/resize drags only act on floating windows —
-                        // tiles stay tiled (Super+RightDrag still trades
-                        // split ratios, KDE-style).
-                        let drag = match (floating_rect, tiled, code) {
-                            (Some(start_rect), _, _) => Some(crate::state::Drag {
-                                window:      window.clone(),
-                                resize:      code == BTN_RIGHT,
-                                tile_resize: false,
-                                start_ptr:   pos,
-                                start_rect,
-                                started:     std::time::Instant::now(),
-                            }),
-                            (None, true, BTN_RIGHT) => Some(crate::state::Drag {
-                                window:      window.clone(),
-                                resize:      true,
-                                tile_resize: true,
-                                start_ptr:   pos,
-                                start_rect:  Default::default(),
-                                started:     std::time::Instant::now(),
-                            }),
-                            _ => None,
-                        };
-                        if let Some(drag) = drag {
-                            state.focus_window_at_cursor();
-                            state.drag = Some(drag);
-                            return;   // the client never sees this press
-                        }
-                    }
+                // Super+LeftDrag = move, Super+RightDrag = resize (floating free,
+                // tiled trades split ratios). Shared with touch emulation.
+                if logo && (code == BTN_LEFT || code == BTN_RIGHT)
+                    && state.try_begin_super_drag(code)
+                {
+                    return;   // the client never sees this press
                 }
                 state.focus_window_at_cursor();
             }
@@ -2952,58 +2929,37 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             }
         }
 
-        // ── touchscreen ────────────────────────────────────────────────────
-        // Real touchscreens emit Touch* events (not absolute pointer motion),
-        // so they're delivered to touch-aware clients via wl_touch. A first
-        // touch also focuses/raises the window under it, like a tap-to-click.
+        // ── touchscreen (single-finger pointer emulation) ───────────────────
+        // vendiOS targets laptops with a touchscreen, so touch acts like the
+        // mouse instead of delivering native wl_touch: tap = click, drag =
+        // left-drag, still hold = right click, Super-held = window move. The
+        // tap/drag/long-press machine lives in State (touch_down/motion/up/tick).
         InputEvent::TouchDown { event } => {
             if state.vlock { return; }
             use smithay::backend::input::TouchEvent as _;
-            let Some(touch) = state.seat.get_touch() else { return };
             let Some(output) = state.space.outputs().next().cloned() else { return };
             let Some(geo) = state.space.output_geometry(&output) else { return };
             let pos = event.position_transformed(geo.size) + geo.loc.to_f64();
-            state.pointer_location = pos;
-            state.focus_window_at_cursor();
-            let under = state.surface_under(pos);
-            touch.down(state, under, &smithay::input::touch::DownEvent {
-                slot:     event.slot(),
-                location: pos,
-                serial:   SERIAL_COUNTER.next_serial(),
-                time:     InputEventTrait::time_msec(&event),
-            });
-            state.pending_redraw = true;
+            let super_held = state.seat.get_keyboard()
+                .map(|k| k.modifier_state().logo).unwrap_or(false);
+            state.touch_down(Some(event.slot()), pos, InputEventTrait::time_msec(&event), super_held);
         }
         InputEvent::TouchMotion { event } => {
             if state.vlock { return; }
             use smithay::backend::input::TouchEvent as _;
-            let Some(touch) = state.seat.get_touch() else { return };
             let Some(output) = state.space.outputs().next().cloned() else { return };
             let Some(geo) = state.space.output_geometry(&output) else { return };
             let pos = event.position_transformed(geo.size) + geo.loc.to_f64();
-            let under = state.surface_under(pos);
-            touch.motion(state, under, &smithay::input::touch::MotionEvent {
-                slot:     event.slot(),
-                location: pos,
-                time:     InputEventTrait::time_msec(&event),
-            });
+            state.touch_motion(Some(event.slot()), pos, InputEventTrait::time_msec(&event));
         }
         InputEvent::TouchUp { event } => {
             if state.vlock { return; }
             use smithay::backend::input::TouchEvent as _;
-            let Some(touch) = state.seat.get_touch() else { return };
-            touch.up(state, &smithay::input::touch::UpEvent {
-                slot:   event.slot(),
-                serial: SERIAL_COUNTER.next_serial(),
-                time:   InputEventTrait::time_msec(&event),
-            });
+            state.touch_up(Some(event.slot()), InputEventTrait::time_msec(&event));
         }
-        InputEvent::TouchFrame { .. } => {
-            if state.vlock { return; }
-            if let Some(touch) = state.seat.get_touch() { touch.frame(state); }
-        }
+        InputEvent::TouchFrame { .. } => {}
         InputEvent::TouchCancel { .. } => {
-            if let Some(touch) = state.seat.get_touch() { touch.cancel(state); }
+            if state.touch.take().is_some() { state.pending_redraw = true; }
         }
 
         _ => {}
