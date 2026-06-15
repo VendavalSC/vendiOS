@@ -124,6 +124,10 @@ pub struct State {
     // drives a synthetic mouse (tap = left click, drag = left-button drag,
     // long-press = right click, Super-held = window move). See TouchEmul.
     pub touch:                 Option<TouchEmul>,
+    // All fingers currently on the touchscreen, and any multi-finger gesture
+    // accumulating across them (3-finger horizontal swipe = workspace).
+    pub touch_points:          HashMap<smithay::backend::input::TouchSlot, Point<f64, Logical>>,
+    pub touch_gesture:         Option<TouchGesture>,
 
     // Overview (exposé): all windows of the active workspace laid out in a
     // centered grid over a dimmed wallpaper. Render-only — the space keeps
@@ -262,12 +266,25 @@ pub struct Drag {
 /// fingers are ignored here (multi-finger gestures are handled separately).
 pub struct TouchEmul {
     /// The libinput slot of the finger we're tracking (the first one down).
-    pub slot:        Option<smithay::backend::input::TouchSlot>,
+    pub slot:        smithay::backend::input::TouchSlot,
     pub down_pos:    Point<f64, Logical>,
     pub down_time:   u32,
     pub down_instant: std::time::Instant,
     pub cur_pos:     Point<f64, Logical>,
     pub phase:       TouchPhase,
+    /// Touch started at the very top screen edge — a downward drag from here
+    /// pulls the control center instead of acting as a pointer drag.
+    pub from_edge:   bool,
+}
+
+/// Multi-finger touchscreen gesture in progress (2+ fingers). Accumulates the
+/// summed finger travel; a 3-finger horizontal swipe switches workspaces.
+#[derive(Clone, Copy)]
+pub struct TouchGesture {
+    pub fingers: usize,
+    pub dx:      f64,
+    pub dy:      f64,
+    pub fired:   bool,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -1249,16 +1266,51 @@ impl State {
         pointer.frame(self);
     }
 
+    /// Abandon an in-progress single-finger emulation (a second finger landed,
+    /// or the gesture was cancelled): release a held button / end a move grab.
+    fn cancel_touch_emul(&mut self, time: u32) {
+        let Some(t) = self.touch.take() else { return };
+        match t.phase {
+            TouchPhase::Dragging => self.emul_button(0x110, false, time),
+            TouchPhase::WindowMove => {
+                if let Some(drag) = self.drag.take() {
+                    if !drag.resize {
+                        self.drag_release = Some((drag.window, std::time::Instant::now()));
+                    }
+                }
+                self.pending_redraw = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Forget all touch state (TouchCancel, or session lock).
+    pub fn touch_reset(&mut self) {
+        self.touch = None;
+        self.touch_points.clear();
+        self.touch_gesture = None;
+    }
+
     /// First finger down. `super_held` mirrors the keyboard Super modifier — if
     /// set and a window is grabbed, this becomes a window move (no client press).
     pub fn touch_down(
         &mut self,
-        slot: Option<smithay::backend::input::TouchSlot>,
+        slot: smithay::backend::input::TouchSlot,
         pos: Point<f64, Logical>,
         time: u32,
         super_held: bool,
     ) {
-        if self.touch.is_some() { return; } // only the first finger emulates
+        self.touch_points.insert(slot, pos);
+        // Two or more fingers → multi-finger gesture, not a pointer. Drop any
+        // single-finger emulation already underway and track the gesture.
+        if self.touch_points.len() >= 2 || self.touch_gesture.is_some() {
+            self.cancel_touch_emul(time);
+            let fingers = self.touch_gesture.map(|g| g.fingers.max(self.touch_points.len()))
+                .unwrap_or(self.touch_points.len());
+            self.touch_gesture = Some(TouchGesture { fingers, dx: 0.0, dy: 0.0, fired: false });
+            return;
+        }
+        if self.touch.is_some() { return; }
         self.emul_motion(pos, time);
         self.focus_window_at_cursor();
         let phase = if super_held && self.try_begin_super_drag(0x110) {
@@ -1268,22 +1320,36 @@ impl State {
         };
         self.touch = Some(TouchEmul {
             slot, down_pos: pos, down_time: time, down_instant: std::time::Instant::now(),
-            cur_pos: pos, phase,
+            cur_pos: pos, phase, from_edge: pos.y <= 8.0,
         });
     }
 
     pub fn touch_motion(
         &mut self,
-        slot: Option<smithay::backend::input::TouchSlot>,
+        slot: smithay::backend::input::TouchSlot,
         pos: Point<f64, Logical>,
         time: u32,
     ) {
         const SLOP: f64 = 8.0;
+        // Multi-finger gesture: accumulate each finger's travel, no pointer.
+        let prev = self.touch_points.insert(slot, pos);
+        if let Some(g) = self.touch_gesture.as_mut() {
+            if let Some(prev) = prev { g.dx += pos.x - prev.x; g.dy += pos.y - prev.y; }
+            return;
+        }
         let Some(t) = self.touch.as_ref() else { return };
-        if t.slot != slot { return; } // ignore other fingers
+        if t.slot != slot { return; }
         let phase = t.phase;
         let down = t.down_pos;
+        let from_edge = t.from_edge;
         if let Some(t) = self.touch.as_mut() { t.cur_pos = pos; }
+        // Top-edge pull (swipe down from the very top) → open the control center.
+        if from_edge && phase == TouchPhase::Pending && pos.y - down.y > 50.0 {
+            if let Some(t) = self.touch.as_mut() { t.phase = TouchPhase::Consumed; }
+            let _ = std::process::Command::new("sh").arg("-c")
+                .arg("quickshell -c vendibar-pro ipc call panel showControl").spawn();
+            return;
+        }
         match phase {
             TouchPhase::WindowMove => { self.pointer_location = pos; self.drag_update(); }
             TouchPhase::Pending => {
@@ -1302,9 +1368,26 @@ impl State {
 
     pub fn touch_up(
         &mut self,
-        slot: Option<smithay::backend::input::TouchSlot>,
+        slot: smithay::backend::input::TouchSlot,
         time: u32,
     ) {
+        self.touch_points.remove(&slot);
+        // Resolve a multi-finger gesture as fingers lift: 3-finger horizontal
+        // swipe switches workspace. Summed travel ≈ fingers × per-finger dist.
+        if let Some(g) = self.touch_gesture {
+            if !g.fired && g.fingers >= 3 {
+                let thr = 60.0 * g.fingers as f64;
+                if g.dx.abs() >= thr && g.dx.abs() > g.dy.abs() {
+                    let forward = g.dx < 0.0; // swipe left → next workspace
+                    if let Some(id) = self.workspaces.adjacent_id(forward) {
+                        self.switch_workspace(id);
+                    }
+                    if let Some(g) = self.touch_gesture.as_mut() { g.fired = true; }
+                }
+            }
+            if self.touch_points.is_empty() { self.touch_gesture = None; }
+            return;
+        }
         let Some(t) = self.touch.as_ref() else { return };
         if t.slot != slot { return; }
         let phase = t.phase;

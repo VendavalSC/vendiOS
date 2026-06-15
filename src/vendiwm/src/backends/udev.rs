@@ -781,6 +781,8 @@ fn build_state(
         rule_checked:           Default::default(),
         drag:                   None,
         touch:                  None,
+        touch_points:           Default::default(),
+        touch_gesture:          None,
         drag_release:           None,
         swipe:                  None,
         overview:               false,
@@ -2942,7 +2944,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             let pos = event.position_transformed(geo.size) + geo.loc.to_f64();
             let super_held = state.seat.get_keyboard()
                 .map(|k| k.modifier_state().logo).unwrap_or(false);
-            state.touch_down(Some(event.slot()), pos, InputEventTrait::time_msec(&event), super_held);
+            state.touch_down(event.slot(), pos, InputEventTrait::time_msec(&event), super_held);
         }
         InputEvent::TouchMotion { event } => {
             if state.vlock { return; }
@@ -2950,16 +2952,19 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
             let Some(output) = state.space.outputs().next().cloned() else { return };
             let Some(geo) = state.space.output_geometry(&output) else { return };
             let pos = event.position_transformed(geo.size) + geo.loc.to_f64();
-            state.touch_motion(Some(event.slot()), pos, InputEventTrait::time_msec(&event));
+            state.touch_motion(event.slot(), pos, InputEventTrait::time_msec(&event));
         }
         InputEvent::TouchUp { event } => {
             if state.vlock { return; }
             use smithay::backend::input::TouchEvent as _;
-            state.touch_up(Some(event.slot()), InputEventTrait::time_msec(&event));
+            state.touch_up(event.slot(), InputEventTrait::time_msec(&event));
         }
         InputEvent::TouchFrame { .. } => {}
         InputEvent::TouchCancel { .. } => {
-            if state.touch.take().is_some() { state.pending_redraw = true; }
+            if state.touch.is_some() || state.touch_gesture.is_some() {
+                state.touch_reset();
+                state.pending_redraw = true;
+            }
         }
 
         _ => {}

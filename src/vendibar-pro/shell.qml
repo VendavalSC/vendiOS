@@ -104,6 +104,8 @@ ShellRoot {
             root.modulesHidden = false;
             if (root.chromeGone) { root.chromeGone = false; root.chromeReturn(); }
         }
+        // Compositor top-edge touch swipe → open the control center.
+        function showControl(): void { if (!panelWin.rightOpen) panelWin.toggleRight(); }
     }
 
     // ── theme ────────────────────────────────────────────────────────────────

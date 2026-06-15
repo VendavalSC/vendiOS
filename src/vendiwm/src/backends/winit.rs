@@ -147,6 +147,8 @@ pub fn run() -> Result<()> {
         drag_release: None,
         swipe: None,
         touch: None,
+        touch_points: Default::default(),
+        touch_gesture: None,
         overview: false,
         overview_t: std::time::Instant::now(),
         screenshot: None,
