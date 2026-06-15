@@ -1616,8 +1616,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // so the lock blob can replace the live center notch with no ghost
     // left in the blurred backdrop (and no flicker at the swap).
     let mut bar_layer_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
-    // Logical rects that want a blurred-desktop slab behind them.
+    // Logical rects that want a blurred-desktop slab behind them (the menu).
     let mut blur_rects: Vec<smithay::utils::Rectangle<i32, smithay::utils::Logical>> = Vec::new();
+    // Translucent windows that want a frosted backdrop: (insert index into
+    // `elements` — directly below the window, logical rect, corner radius).
+    let mut blur_windows: Vec<(usize, smithay::utils::Rectangle<i32, smithay::utils::Logical>, f32)> = Vec::new();
     // A fullscreen window hides the Top layer (the bar) — only Overlay
     // surfaces (e.g. a lock screen) stay above it, per the wlr spec.
     let fullscreen_active = state.workspaces.active_ref().fullscreen.is_some();
@@ -1952,6 +1955,29 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             elements.push(OutputRenderElements::Window(
                 RelocateRenderElement::from_element(rescaled, off, Relocate::Relative),
             ));
+        }
+
+        // Frosted glass: a translucent window gets a blurred slab of the
+        // desktop spliced in directly behind it (index = just below the window
+        // we only pushed). Gated on the window's persistent opacity, not the
+        // composite alpha, so open/workspace animations don't trigger it.
+        // Translucent two ways: compositor opacity (cycle-opacity) OR the
+        // client drawing itself see-through (e.g. Alacritty opacity=0.9), which
+        // shows up as the surface not declaring a full opaque region.
+        let client_translucent = window.wl_surface().and_then(|surf| {
+            smithay::backend::renderer::utils::with_renderer_surface_state(&surf, |st| {
+                let sz = st.surface_size().unwrap_or_default();
+                match st.opaque_regions() {
+                    None => true,
+                    Some(regs) => !regs.iter().any(|r|
+                        r.loc.x <= 0 && r.loc.y <= 0 && r.size.w >= sz.w && r.size.h >= sz.h),
+                }
+            })
+        }).unwrap_or(false);
+        let translucent = crate::state::window_opacity(window, theme.opacity) < 0.99
+            || client_translucent;
+        if theme.blur && !is_fullscreen && translucent {
+            blur_windows.push((elements.len(), target, radius));
         }
     }
 
@@ -2298,7 +2324,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // passes, and a rounded crop of the result is slid in directly beneath
     // each requesting surface. The 4x downscale does half the softening and
     // keeps the passes cheap enough for virgl.
-    if !blur_rects.is_empty() {
+    if !blur_rects.is_empty() || !blur_windows.is_empty() {
         use smithay::backend::renderer::{Bind, Frame, Offscreen, Renderer as _, Texture};
         use smithay::backend::renderer::element::Element as _;
         const DOWN: i32 = 4;
@@ -2400,6 +2426,33 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
             // Rounded crops of the blurred desktop, one per requesting rect,
             // spliced in directly beneath the menu.
             if blurred {
+                // Frosted backdrops behind translucent windows. Insert in
+                // descending index order so each splice doesn't shift the
+                // not-yet-placed (lower) indices.
+                let mut bw = blur_windows.clone();
+                bw.sort_by(|a, b| b.0.cmp(&a.0));
+                for (idx, r, rad) in bw {
+                    let src = smithay::utils::Rectangle::<f64, smithay::utils::Logical>::new(
+                        (r.loc.x as f64 / DOWN as f64, r.loc.y as f64 / DOWN as f64).into(),
+                        (r.size.w as f64 / DOWN as f64, r.size.h as f64 / DOWN as f64).into(),
+                    );
+                    let inner = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
+                        smithay::backend::renderer::element::Id::new(),
+                        ctx.clone(),
+                        (r.loc.x as f64, r.loc.y as f64),
+                        texa.clone(),
+                        1,
+                        Transform::Normal,
+                        Some(1.0),
+                        Some(src),
+                        Some(r.size),
+                        None,
+                        Kind::Unspecified,
+                    );
+                    let patch = crate::render::BlurElement::new(inner, rounded_prog.clone(), rad);
+                    let at = idx.min(elements.len());
+                    elements.insert(at, OutputRenderElements::Blur(patch));
+                }
                 for (i, r) in blur_rects.iter().enumerate() {
                     let src = smithay::utils::Rectangle::<f64, smithay::utils::Logical>::new(
                         (r.loc.x as f64 / DOWN as f64, r.loc.y as f64 / DOWN as f64).into(),
