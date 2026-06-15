@@ -1514,8 +1514,8 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // Frosted glass (blur on): the composite-alpha floor for windows so the
     // frost shows through even when the user hasn't cycled opacity, and how far
     // the frosted backdrop is lifted toward white so it reads bright, not dark.
-    const FROST_WINDOW_ALPHA: f32 = 0.86;
-    const FROST_LIGHTEN: f32 = 0.24;
+    const FROST_WINDOW_ALPHA: f32 = 0.88;
+    const FROST_LIGHTEN: f32 = 0.09;
     fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t).powi(3) }
     // Smooth accel + decel — used for the screensaver slide so neither the
     // entrance nor the exit yanks or crawls.
@@ -2470,7 +2470,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                         None,
                         Kind::Unspecified,
                     );
-                    let patch = crate::render::BlurElement::new(inner, frost_prog.clone(), rad, FROST_LIGHTEN);
+                    // Round the frost corners tighter than the window's so the
+                    // quarter-res-upscaled (soft, slightly oversized) corner tucks
+                    // behind the window's crisp corner instead of poking out.
+                    let patch = crate::render::BlurElement::new(
+                        inner, frost_prog.clone(), rad + DOWN as f32, FROST_LIGHTEN);
                     let at = idx.min(elements.len());
                     elements.insert(at, OutputRenderElements::Blur(patch));
                 }

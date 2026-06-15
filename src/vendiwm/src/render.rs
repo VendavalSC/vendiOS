@@ -120,7 +120,7 @@ void main() {
     // brightens the dark desktop rather than darkening the window over it.
     vec3 rgb = color.rgb;
     float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
-    rgb = mix(rgb, vec3(luma), 0.20);
+    rgb = mix(rgb, vec3(luma), 0.12);
     rgb = mix(rgb, vec3(1.0), lighten);
     color.rgb = rgb;
     vec2 p = (v_coords - vec2(0.5)) * size;
