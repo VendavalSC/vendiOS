@@ -631,11 +631,16 @@ ShellRoot {
                 : rightMode === "toast"
                     ? Math.max(root.barH, toastCol.implicitHeight + root.stripH + 26)
                 : root.barH
-            Behavior on lw { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
-            Behavior on cw { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
-            Behavior on rw { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
-            Behavior on ch { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
-            Behavior on rh { NumberAnimation { duration: 280; easing.type: Easing.OutBack } }
+            // Spring physics, not timed curves — interruptible and velocity
+            // aware, so redirecting mid-flight (open→close→open) flows instead
+            // of restarting. Tuned for the iOS dynamic-island feel: quick to
+            // move, a whisper of overshoot, clean settle. `epsilon` is in px so
+            // it stops cleanly without a long crawling tail.
+            Behavior on lw { SpringAnimation { spring: 4.6; damping: 0.46; mass: 0.9; epsilon: 0.25 } }
+            Behavior on cw { SpringAnimation { spring: 4.2; damping: 0.40; mass: 1.0; epsilon: 0.25 } }
+            Behavior on rw { SpringAnimation { spring: 4.2; damping: 0.40; mass: 1.0; epsilon: 0.25 } }
+            Behavior on ch { SpringAnimation { spring: 3.8; damping: 0.34; mass: 1.0; epsilon: 0.3 } }
+            Behavior on rh { SpringAnimation { spring: 3.8; damping: 0.34; mass: 1.0; epsilon: 0.3 } }
             onLwChanged: silhouette.requestPaint()
             onCwChanged: { silhouette.requestPaint(); root.centerW = cw; }
             Component.onCompleted: root.centerW = cw
