@@ -16,6 +16,12 @@ BASE_PKGS=(
     btrfs-progs e2fsprogs dosfstools
     openssh reflector
     pipewire pipewire-audio pipewire-alsa pipewire-pulse wireplumber
+    # Audio firmware + mixer configs. Modern Arch split the Sound Open Firmware
+    # out of linux-firmware: without sof-firmware the DSP-based codecs on Intel
+    # Gemini/Apollo/Comet Lake (and most laptops since ~2019) load no audio at
+    # all. alsa-ucm-conf carries the per-machine routing PipeWire needs to find
+    # the speakers; alsa-utils gives alsamixer/alsactl for diagnosing mutes.
+    sof-firmware alsa-ucm-conf alsa-utils
     hyprland xdg-desktop-portal-hyprland xdg-desktop-portal-gtk
     waybar wofi mako foot alacritty quickshell
     brightnessctl playerctl grim slurp wl-clipboard swaylock
