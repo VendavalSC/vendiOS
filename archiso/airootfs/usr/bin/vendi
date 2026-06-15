@@ -68,9 +68,19 @@ cmd_update() {
     reflector --latest 15 --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null \
         && _ok "mirrors updated" || _warn "reflector failed, using cached mirrors"
     echo
+    # The compositor binary can't hot-swap — the running vendiwm keeps the old
+    # code until a full session restart. Note its mtime so we can tell the user
+    # to relogin if this upgrade replaced it.
+    local wm_before; wm_before=$(stat -c %Y /usr/bin/vendiwm 2>/dev/null)
     _step "upgrading packages…"
     pacman -Syu
     _ok "system up to date"
+    local wm_after; wm_after=$(stat -c %Y /usr/bin/vendiwm 2>/dev/null)
+    if [[ -n "$wm_after" && "$wm_before" != "$wm_after" ]]; then
+        echo
+        _warn "the compositor (vendiwm) was updated"
+        _info "log out and back in to load it — the running session keeps the old one"
+    fi
 }
 
 cmd_clean() {
