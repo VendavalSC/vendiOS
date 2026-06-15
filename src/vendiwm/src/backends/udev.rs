@@ -2365,13 +2365,22 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
                 theme.background[0], theme.background[1], theme.background[2], 1.0,
             );
 
-            // Pass 0: desktop (elements below blur_mark are the menu itself
-            // and the cursor — skipped) into texa, downscaled, back-to-front.
+            // Pass 0: the backdrop (wallpaper + anything below blur_mark stays
+            // out — that's the menu/cursor) into texa, downscaled, back-to-front.
+            // Window *content and borders* are skipped: the frost crop sits
+            // BEHIND its window, so including the window would blur the window's
+            // own pixels into its backdrop (the terminal text looked blurry).
+            // What's left is the wallpaper — exactly "what's behind" for tiled
+            // windows, which don't overlap.
             let scene = (|| -> std::result::Result<(), smithay::backend::renderer::gles::GlesError> {
                 let mut fb = renderer.bind(texa)?;
                 let mut frame = renderer.render(&mut fb, qsize, Transform::Normal)?;
                 frame.clear(theme_clear, &[full])?;
                 for elem in elements[blur_mark..].iter().rev() {
+                    if matches!(elem,
+                        OutputRenderElements::Window(_) | OutputRenderElements::Pixel(_)) {
+                        continue;
+                    }
                     let src = elem.src();
                     let dst = elem.geometry(scale);
                     let dst = smithay::utils::Rectangle::<i32, smithay::utils::Physical>::new(
