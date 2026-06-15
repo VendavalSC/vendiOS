@@ -319,6 +319,12 @@ impl CompositorHandler for State {
             // would steal CPU from mpv's software decode), no frozen black.
             if self.screensaver.as_ref() == Some(&window) {
                 self.pending_redraw = true;
+                // Start the slide-in clock on mpv's FIRST committed frame, not
+                // at capture — mpv's startup latency would otherwise eat most
+                // of the slide and the video would just appear in place.
+                if self.screensaver_t.is_none() {
+                    self.screensaver_t = Some(std::time::Instant::now());
+                }
             }
 
             // Title-change detection → IPC event for the bar.
@@ -485,7 +491,9 @@ impl XdgShellHandler for State {
             }
             self.space.map_element(window.clone(), (0, 0), false);
             self.screensaver = Some(window);
-            self.screensaver_t = Some(std::time::Instant::now());
+            // Slide-in clock is set on mpv's first committed frame (see commit
+            // handler), not here — avoids the slide elapsing during startup.
+            self.screensaver_t = None;
             self.screensaver_closing = None;
             tracing::info!("screensaver window captured");
             return;
@@ -967,7 +975,13 @@ impl State {
             let _ = child.kill();
             let _ = child.wait();
         }
-        self.screensaver = None;
+        // Unmap from the space immediately. Otherwise the window lingers there
+        // (until the client disconnect is processed) and, no longer being the
+        // tracked screensaver, the normal window loop would render it full-screen
+        // for a few frames — the post-dismiss flash.
+        if let Some(w) = self.screensaver.take() {
+            self.space.unmap_elem(&w);
+        }
         self.screensaver_t = None;
         self.screensaver_closing = None;
         self.screensaver_fired = false;

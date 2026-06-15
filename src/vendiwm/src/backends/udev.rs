@@ -1418,7 +1418,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // Screensaver: once the dismiss fade-out finishes, kill mpv for real.
     // While one is on screen, keep requesting redraws so the fade animates
     // smoothly even when mpv's (software) frames trickle in slowly.
-    const SCREENSAVER_FADE_MS: f32 = 700.0;
+    const SCREENSAVER_FADE_MS: f32 = 550.0;
     if state.screensaver_closing
         .map(|c| c.elapsed().as_secs_f32() * 1000.0 >= SCREENSAVER_FADE_MS)
         .unwrap_or(false)
@@ -1499,6 +1499,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     const MORPH_MS: f32 = 230.0;
     const DRAG_MS:  f32 = 120.0;
     fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t).powi(3) }
+    // Smooth accel + decel — used for the screensaver slide so neither the
+    // entrance nor the exit yanks or crawls.
+    fn ease_in_out(t: f32) -> f32 {
+        if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
+    }
     // Silkier decel than cubic — a longer, gentler tail so slides and layout
     // morphs glide to rest (the macOS feel) instead of braking late.
     fn ease_out_quint(t: f32) -> f32 { 1.0 - (1.0 - t).powi(5) }
@@ -1687,20 +1692,30 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // video, not a tile. Any input tears it down before the next frame.
     if let Some(ss) = state.screensaver.clone() {
         if smithay::utils::IsAlive::alive(&ss) {
-            // Fade in on appear, fade out on dismiss (ease-out both ways).
-            // Single render_elements call at the computed alpha — rendering the
-            // same surface twice in one frame corrupts it (black screen).
-            let ss_alpha = if let Some(c) = state.screensaver_closing {
-                1.0 - ease_out((c.elapsed().as_secs_f32() * 1000.0 / SCREENSAVER_FADE_MS).min(1.0))
+            // Slide in from the top on appear, retract up on dismiss. We
+            // animate GEOMETRY (not alpha) on purpose: the damage tracker
+            // follows position changes, so the WHOLE screen animates — an alpha
+            // fade only redrew self-updating widgets (the bar), never the
+            // static desktop behind. ease-out both ways.
+            let progress = if let Some(c) = state.screensaver_closing {
+                // Exit: smooth accel + decel (ease-out alone yanks then crawls).
+                ease_in_out((c.elapsed().as_secs_f32() * 1000.0 / SCREENSAVER_FADE_MS).min(1.0))
             } else if let Some(t0) = state.screensaver_t {
+                // Entrance: snappy, settles into place.
                 ease_out((t0.elapsed().as_secs_f32() * 1000.0 / SCREENSAVER_FADE_MS).min(1.0))
             } else {
                 1.0
             };
-            let render_loc = (smithay::utils::Point::<i32, smithay::utils::Logical>::from((0, 0))
+            let h = ss.geometry().size.h as f32;
+            let slide_y = if state.screensaver_closing.is_some() {
+                -((h * progress) as i32)          // 0 → -h : retract off the top
+            } else {
+                -((h * (1.0 - progress)) as i32)  // -h → 0 : drop down into place
+            };
+            let render_loc = (smithay::utils::Point::<i32, smithay::utils::Logical>::from((0, slide_y))
                 - ss.geometry().loc).to_physical_precise_round(scale);
             let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                ss.render_elements(renderer, render_loc, scale, ss_alpha);
+                ss.render_elements(renderer, render_loc, scale, 1.0);
             for elem in surfaces.into_iter().rev() {
                 elements.insert(after_cursor, OutputRenderElements::Layer(elem));
             }
@@ -1759,6 +1774,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let stacked: Vec<_> = if locked { Vec::new() } else { state.space.elements().cloned().collect() };
     let mut live_ids: Vec<u32> = Vec::with_capacity(stacked.len());
     for window in stacked.iter().rev() {
+        // The screensaver is in the space (for frame callbacks) but is drawn
+        // by its own block above (sliding, above the bar). Skip it here so it
+        // isn't ALSO rendered at its real position — that double-render is what
+        // left a second, static copy behind the sliding one.
+        if state.screensaver.as_ref() == Some(window) { continue; }
         let Some(geo) = state.space.element_geometry(window) else { continue };
 
         // Stash this frame's texture so a close next frame can ghost it.
