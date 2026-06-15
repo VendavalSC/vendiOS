@@ -1301,6 +1301,7 @@ impl State {
         super_held: bool,
     ) {
         self.touch_points.insert(slot, pos);
+        tracing::debug!(points = self.touch_points.len(), ?pos, "touch down");
         // Two or more fingers → multi-finger gesture, not a pointer. Drop any
         // single-finger emulation already underway and track the gesture.
         if self.touch_points.len() >= 2 || self.touch_gesture.is_some() {
@@ -1308,6 +1309,7 @@ impl State {
             let fingers = self.touch_gesture.map(|g| g.fingers.max(self.touch_points.len()))
                 .unwrap_or(self.touch_points.len());
             self.touch_gesture = Some(TouchGesture { fingers, dx: 0.0, dy: 0.0, fired: false });
+            tracing::debug!(fingers, "touch gesture begin");
             return;
         }
         if self.touch.is_some() { return; }
@@ -1320,7 +1322,7 @@ impl State {
         };
         self.touch = Some(TouchEmul {
             slot, down_pos: pos, down_time: time, down_instant: std::time::Instant::now(),
-            cur_pos: pos, phase, from_edge: pos.y <= 8.0,
+            cur_pos: pos, phase, from_edge: pos.y <= 40.0,
         });
     }
 
@@ -1343,11 +1345,20 @@ impl State {
         let down = t.down_pos;
         let from_edge = t.from_edge;
         if let Some(t) = self.touch.as_mut() { t.cur_pos = pos; }
-        // Top-edge pull (swipe down from the very top) → open the control center.
+        // Top-edge pull (swipe down from the top): from the right third opens
+        // the control center (it lives in the right notch), otherwise the
+        // dashboard (it expands from the center notch).
         if from_edge && phase == TouchPhase::Pending && pos.y - down.y > 50.0 {
             if let Some(t) = self.touch.as_mut() { t.phase = TouchPhase::Consumed; }
-            let _ = std::process::Command::new("sh").arg("-c")
-                .arg("quickshell -c vendibar-pro ipc call panel showControl").spawn();
+            let geo = self.space.outputs().next().and_then(|o| self.space.output_geometry(o));
+            let frac = geo.map(|g| (down.x - g.loc.x as f64) / g.size.w.max(1) as f64).unwrap_or(0.5);
+            let cmd = if frac > 0.66 {
+                "quickshell -c vendibar-pro ipc call panel showControl"
+            } else {
+                "quickshell -c vendibar-pro ipc call dash toggle"
+            };
+            tracing::debug!(frac, %cmd, "touch edge-pull");
+            let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
             return;
         }
         match phase {
@@ -1382,9 +1393,13 @@ impl State {
         if let Some(g) = self.touch_gesture {
             if !g.fired && g.fingers >= 3 {
                 let thr = 60.0 * g.fingers as f64;
-                if g.dx.abs() >= thr && g.dx.abs() > g.dy.abs() {
+                let horiz = g.dx.abs() >= thr && g.dx.abs() > g.dy.abs();
+                tracing::debug!(fingers = g.fingers, dx = g.dx, dy = g.dy, thr, horiz, "touch gesture resolve");
+                if horiz {
                     let forward = g.dx < 0.0; // swipe left → next workspace
-                    if let Some(id) = self.workspaces.adjacent_id(forward) {
+                    let adj = self.workspaces.adjacent_id(forward);
+                    tracing::debug!(forward, ?adj, "3-finger → workspace");
+                    if let Some(id) = adj {
                         self.switch_workspace(id);
                     }
                     if let Some(g) = self.touch_gesture.as_mut() { g.fired = true; }

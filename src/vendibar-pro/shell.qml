@@ -50,6 +50,8 @@ ShellRoot {
     // Dashboard (the expanded center notch) — super+d via vendi-launcher dash.
     signal dashToggle()
     signal dashOpen(int tab)
+    // Control center (right notch) — opened by the compositor's top-edge swipe.
+    signal controlToggle()
     IpcHandler {
         target: "dash"
         function toggle(): void { root.dashToggle(); }
@@ -104,8 +106,10 @@ ShellRoot {
             root.modulesHidden = false;
             if (root.chromeGone) { root.chromeGone = false; root.chromeReturn(); }
         }
-        // Compositor top-edge touch swipe → open the control center.
-        function showControl(): void { if (!panelWin.rightOpen) panelWin.toggleRight(); }
+        // Compositor top-edge touch swipe → open the control center. panelWin's
+        // id isn't in scope here (it lives in the panel delegate), so go via a
+        // root signal the panel connects to, like dashToggle/searchToggle.
+        function showControl(): void { root.controlToggle(); }
     }
 
     // ── theme ────────────────────────────────────────────────────────────────
@@ -713,6 +717,7 @@ ShellRoot {
             Connections {
                 target: root
                 function onDashToggle() { panelWin.toggleCenter(); }
+                function onControlToggle() { if (!panelWin.rightOpen) panelWin.toggleRight(); }
                 function onDashOpen(tab) {
                     dashItem.goTab(tab);
                     if (!panelWin.centerOpen) panelWin.toggleCenter();
