@@ -413,6 +413,18 @@ Item {
                                 }
                             }
                             Item { Layout.fillWidth: true }
+                            BatteryBadge {
+                                visible: dash.bar?.batVisible ?? false
+                                pct: dash.bar?.batShow ?? 100
+                                charging: dash.bar?.batChargeShow ?? false
+                                fg: dash.fg
+                                good: dash.good
+                                alert: dash.alert
+                                textColor: dash.bar?.panel ?? "#11111b"
+                                mono: dash.mono
+                                h: 18
+                                Layout.alignment: Qt.AlignVCenter
+                            }
                         }
                     }
 
