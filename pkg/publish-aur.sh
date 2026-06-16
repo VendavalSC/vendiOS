@@ -5,7 +5,10 @@ set -euo pipefail
 
 REPO=/home/vendi/vendiOS
 CLONE=~/aur-vendi-git
-MSG="${1:-26w25a: output scaling, fractional scale, vendi display, themed bars}"
+# Default the commit message to the PKGBUILD's actual pkgver so it can never
+# drift from the published version (pass an argument to override).
+_ver=$(sed -n 's/^pkgver=//p' "$REPO/pkg/vendi-git/PKGBUILD")
+MSG="${1:-snapshot $_ver}"
 
 # Load the (passphrase-protected) AUR key once for this run.
 if ! ssh-add -l >/dev/null 2>&1; then
