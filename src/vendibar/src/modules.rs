@@ -320,7 +320,7 @@ fn refresh_bluetooth(label: &gtk::Label) {
 
 /// Run a vendi TUI in a floating terminal (vendiwm floats app_id vendi-float).
 fn spawn_float(cmd: &[&str]) {
-    let _ = std::process::Command::new("alacritty")
+    let _ = std::process::Command::new("kitty")
         .args(["--class", "vendi-float", "-e"])
         .args(cmd)
         .spawn();

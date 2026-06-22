@@ -16,7 +16,7 @@ use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 
 const WIDTH: i32 = 380;
 /// Spawn a command in a floating terminal (vendiwm floats app_id vendi-float).
-const FLOAT_TERM: &str = "alacritty --class vendi-float -e";
+const FLOAT_TERM: &str = "kitty --class vendi-float -e";
 
 pub enum Entry {
     Menu(Rc<MenuDef>),
