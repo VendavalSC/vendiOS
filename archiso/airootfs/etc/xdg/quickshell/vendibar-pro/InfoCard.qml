@@ -20,22 +20,12 @@ Rectangle {
     radius: 16
     color: Qt.rgba(1, 1, 1, 0.05)
     border.width: 1
-    border.color: Qt.rgba(ic.tint.r, ic.tint.g, ic.tint.b, 0.35)
-
-    // accent edge
-    Rectangle {
-        anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-        width: 3; radius: 2
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: ic.tint }
-            GradientStop { position: 1.0; color: Qt.rgba(ic.tint.r, ic.tint.g, ic.tint.b, 0.3) }
-        }
-    }
+    border.color: Qt.rgba(1, 1, 1, 0.09)
 
     Column {
         id: body
         anchors { left: parent.left; right: parent.right; top: parent.top }
-        anchors.leftMargin: 18; anchors.rightMargin: 16; anchors.topMargin: 13
+        anchors.leftMargin: 16; anchors.rightMargin: 16; anchors.topMargin: 13
         spacing: 4
 
         Text {

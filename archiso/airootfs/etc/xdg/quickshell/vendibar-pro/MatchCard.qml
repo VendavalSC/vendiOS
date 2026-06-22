@@ -17,6 +17,8 @@ Rectangle {
     property string mono: "JetBrainsMonoNL Nerd Font"
 
     readonly property var scorers: card.scorers && card.scorers.length ? card.scorers : []
+    readonly property var homeScorers: card.homeScorers && card.homeScorers.length ? card.homeScorers : []
+    readonly property var awayScorers: card.awayScorers && card.awayScorers.length ? card.awayScorers : []
     readonly property string homeFlag: card.homeFlag ? String(card.homeFlag) : ""
     readonly property string awayFlag: card.awayFlag ? String(card.awayFlag) : ""
 
@@ -53,14 +55,17 @@ Rectangle {
             }
         }
 
-        // scoreline: badge+name | score - score | badge+name
+        // scoreline: each team = badge + name + its scorers; score centred up top
         Item {
-            width: parent.width; height: 80
+            width: parent.width
+            implicitHeight: Math.max(homeCol.implicitHeight, awayCol.implicitHeight, 64)
+            height: implicitHeight
 
             // ── home ──
             Column {
-                anchors { left: parent.left; verticalCenter: parent.verticalCenter }
-                width: 96; spacing: 6
+                id: homeCol
+                anchors { left: parent.left; top: parent.top }
+                width: (parent.width - 100) / 2; spacing: 5
                 Item {
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: 36; height: 36
@@ -79,15 +84,25 @@ Rectangle {
                     text: mc.card.home || ""; color: mc.fg; font.family: mc.mono; font.pixelSize: 13
                     wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
                 }
+                Repeater {
+                    model: mc.homeScorers
+                    delegate: Text {
+                        required property var modelData
+                        width: homeCol.width; horizontalAlignment: Text.AlignHCenter
+                        text: modelData; color: mc.dim; font.family: mc.mono; font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                }
             }
 
-            // ── score ──
+            // ── score (top, aligned with the badges) ──
             Row {
-                anchors.centerIn: parent
-                spacing: 16
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 0
+                spacing: 14
                 Text { text: mc.card.hs !== undefined ? String(mc.card.hs) : "–"; color: mc.fg
                        font.family: mc.mono; font.pixelSize: 38; font.weight: Font.Light }
-                Text { text: "-"; color: mc.dim; font.family: mc.mono; font.pixelSize: 28
+                Text { text: "-"; color: mc.dim; font.family: mc.mono; font.pixelSize: 26
                        anchors.verticalCenter: parent.verticalCenter }
                 Text { text: mc.card.as !== undefined ? String(mc.card.as) : "–"; color: mc.fg
                        font.family: mc.mono; font.pixelSize: 38; font.weight: Font.Light }
@@ -95,8 +110,9 @@ Rectangle {
 
             // ── away ──
             Column {
-                anchors { right: parent.right; verticalCenter: parent.verticalCenter }
-                width: 96; spacing: 6
+                id: awayCol
+                anchors { right: parent.right; top: parent.top }
+                width: (parent.width - 100) / 2; spacing: 5
                 Item {
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: 36; height: 36
@@ -115,6 +131,15 @@ Rectangle {
                     text: mc.card.away || ""; color: mc.fg; font.family: mc.mono; font.pixelSize: 13
                     wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
                 }
+                Repeater {
+                    model: mc.awayScorers
+                    delegate: Text {
+                        required property var modelData
+                        width: awayCol.width; horizontalAlignment: Text.AlignHCenter
+                        text: modelData; color: mc.dim; font.family: mc.mono; font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                }
             }
         }
 
@@ -125,10 +150,10 @@ Rectangle {
             text: mc.card.stage || ""; color: mc.dim; font.family: mc.mono; font.pixelSize: 12
         }
 
-        // scorers — stacked vertically, like a real match report
+        // scorers — fallback combined list (only if not split by team)
         Row {
             width: parent.width; spacing: 8
-            visible: mc.scorers.length > 0
+            visible: mc.scorers.length > 0 && mc.homeScorers.length === 0 && mc.awayScorers.length === 0
             topPadding: 2
             Text { text: "⚽"; color: mc.dim; font.pixelSize: 12 }
             Column {

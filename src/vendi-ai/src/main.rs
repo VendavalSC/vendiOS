@@ -363,7 +363,9 @@ fn show_match_tool(args: &Value) -> (String, Option<String>) {
         "comp": args["competition"].as_str().unwrap_or(""),
         "status": args["status"].as_str().unwrap_or(""),
         "stage": args["stage"].as_str().unwrap_or(""),
-        "scorers": args["scorers"].clone(),
+        "homeScorers": args["home_scorers"].clone(),
+        "awayScorers": args["away_scorers"].clone(),
+        "scorers": args["scorers"].clone(),  // fallback if not split by team
     })
     .to_string();
     (format!("Showed match card: {home} {hs}-{as_} {away}"), Some(card))
@@ -612,7 +614,7 @@ fn tool_defs() -> Value {
         f("read_file", "Read a small text file, e.g. a config under ~/.config/vendi/.", json!({
             "type":"object", "properties": { "path": { "type":"string" } }, "required": ["path"]
         })),
-        f("show_match", "Display a FOOTBALL/SPORTS MATCH RESULT card. Use this for any game score. Give both teams, both scores, the competition (e.g. \"FIFA World Cup 2026 · Yesterday\"), status (e.g. \"Full time\") and stage (e.g. \"Group stage · Group H\"). ALWAYS fill `scorers` with EVERY goal — one array entry per goal as \"Player MIN'\" (e.g. \"Lamine Yamal 10'\", \"Oyarzabal 21'\", \"Oyarzabal 24'\", \"Tambakti 49' (OG)\"). The TOTAL number of goals listed MUST equal home_score + away_score (include own goals, marked (OG)). Search the web for the goalscorers if you don't know them. Flags are added automatically from the team names for national teams; omit home_flag/away_flag.", json!({
+        f("show_match", "Display a FOOTBALL/SPORTS MATCH RESULT card. Use this for any game score. Give both teams, both scores, the competition (e.g. \"FIFA World Cup 2026 · Yesterday\"), status (e.g. \"Full time\") and stage (e.g. \"Group stage · Group H\"). Split the goalscorers BY TEAM: `home_scorers` = goals scored by the home team, `away_scorers` = goals by the away team — each entry \"Player MIN'\" (e.g. \"Lamine Yamal 10'\"). Put an own goal under the team it COUNTED FOR (mark it (OG)). The combined goal count MUST equal home_score + away_score. Search the web for the goalscorers if you don't know them. Flags are added automatically from the team names for national teams; omit home_flag/away_flag.", json!({
             "type":"object",
             "properties": {
                 "home": { "type":"string" }, "away": { "type":"string" },
@@ -620,7 +622,8 @@ fn tool_defs() -> Value {
                 "home_flag": { "type":"string" }, "away_flag": { "type":"string" },
                 "competition": { "type":"string" }, "status": { "type":"string" },
                 "stage": { "type":"string" },
-                "scorers": { "type":"array", "items": { "type":"string" } }
+                "home_scorers": { "type":"array", "items": { "type":"string" } },
+                "away_scorers": { "type":"array", "items": { "type":"string" } }
             },
             "required": ["home","away","home_score","away_score"]
         })),

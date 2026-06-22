@@ -761,7 +761,9 @@ ShellRoot {
 
             // the window grows with the tallest notch; the desktop never
             // reflows — expansions overlay it.
-            implicitHeight: Math.ceil(Math.max(root.barH, ch, rh)) + 4
+            // +room below the notch for the AI glow's bottom bleed (the input
+            // mask stays on the notch, so this extra area doesn't catch clicks).
+            implicitHeight: Math.ceil(Math.max(root.barH, ch, rh)) + 4 + (aiOpen ? 34 : 0)
             exclusiveZone: root.barH
 
             // only the notches take input — the gaps are click-through
