@@ -13,6 +13,22 @@ export XDG_CURRENT_DESKTOP=vendiwm
 export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_DESKTOP=vendiwm
 
+# Toolkit backends. Firefox/Mozilla, Qt and GTK run native Wayland (they handle
+# it well). Electron is deliberately LEFT on its X11 default → it runs under
+# XWayland: Chromium's native-Wayland path tries to allocate SCANOUT gbm buffers
+# the NVIDIA driver refuses, which crash-loops the GPU process and leaves a grey
+# window (Discord, etc.). XWayland uses GLX + ordinary buffers and just works.
+# (Do NOT set ELECTRON_OZONE_PLATFORM_HINT=wayland — that forces the broken path.)
+export MOZ_ENABLE_WAYLAND=1
+export QT_QPA_PLATFORM=wayland
+export GDK_BACKEND=wayland
+
+# Cursor theme + size, pinned so every client AND XWayland agree. Without a fixed
+# XCURSOR_SIZE, XWayland derives its own from the X DPI and ends up drawing a
+# bigger pointer than the Wayland apps (and the compositor's own cursor).
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=24
+
 # Stream the compositor's stderr to a flat log file — easier to inspect
 # off-disk than chasing it through greetd's journal.
 mkdir -p "${HOME}/logs"
@@ -52,13 +68,38 @@ spawn_desktop() {
     export WAYLAND_DISPLAY="$(basename "$sock")"
     # vendiwm binds its IPC socket adjacent to the wayland socket.
     export VENDIWM_SOCK="${sock_dir}/${WAYLAND_DISPLAY}.ipc.sock"
+    # XWayland: vendiwm starts the Xserver and exports DISPLAY, but it brings it
+    # up asynchronously after the compositor is live. Wait briefly for its socket
+    # (/tmp/.X11-unix/XN) so $DISPLAY is set in THIS session env — the bar and
+    # everything it launches (Electron apps run under XWayland) inherit it.
+    for _ in $(seq 1 40); do
+        xsock=$(ls -1 /tmp/.X11-unix/X* 2>/dev/null | head -1)
+        [[ -n "$xsock" ]] && { export DISPLAY=":${xsock##*/X}"; break; }
+        sleep 0.25
+    done
     # Hand the live display to the D-Bus activation env so dbus-activated
     # services (xdg-desktop-portal + the wlr backend) can reach the
-    # compositor when an app first asks to screen-share.
+    # compositor when an app first asks to screen-share, and so DISPLAY reaches
+    # dbus/systemd-activated X11 clients.
     if command -v dbus-update-activation-environment >/dev/null; then
         dbus-update-activation-environment --systemd \
-            WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
+            WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
     fi
+    # Bring up the systemd user graphical session. graphical-session.target
+    # refuses manual start, so a session target (vendiwm-session.target) pulls
+    # it in. This is what starts xdg-desktop-portal — nautilus, file dialogs and
+    # every app's "Open With" call the portal; without it the portal stays dead
+    # and those apps CRASH when they reach for it (the nautilus right-click bug).
+    if command -v systemctl >/dev/null; then
+        systemctl --user import-environment \
+            WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP 2>/dev/null || true
+        systemctl --user start vendiwm-session.target 2>/dev/null || true
+    fi
+    # Apply the right day/night wallpaper for the current time immediately on
+    # login — the timer's first fire can race the env import, so don't wait for
+    # it. No-op when dynamic wallpaper is off. (Compositor IPC is already up: we
+    # waited for its wayland socket above.)
+    ( sleep 2; vendi wallpaper dynamic apply >>"$LOG" 2>&1 || true ) &
     # Polkit authentication agent — the GUI password prompt for privileged
     # actions (mounting internal disks, changing system settings, etc.).
     # Without an agent running, those actions just fail with no prompt.

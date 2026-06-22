@@ -1737,7 +1737,7 @@ ShellRoot {
                         }
                         QuickAction {
                             glyph: "󰕾"; label: "Audio"
-                            run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"])
+                            run: () => Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "audio"])
                         }
                         QuickAction {
                             glyph: root.dnd ? "󰂛" : "󰂚"

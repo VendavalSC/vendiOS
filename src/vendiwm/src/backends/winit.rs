@@ -58,6 +58,7 @@ pub fn run() -> Result<()> {
     let xdg_shell_state      = XdgShellState::new::<State>(&dh);
     let shm_state            = ShmState::new::<State>(&dh, backend.renderer().shm_formats());
     let data_device_state    = DataDeviceState::new::<State>(&dh);
+    let _ = smithay::wayland::cursor_shape::CursorShapeManagerState::new::<State>(&dh);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
     let layer_shell_state    = smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<State>(&dh);
     let session_lock_state   = smithay::wayland::session_lock::SessionLockManagerState::new::<State, _>(&dh, |_| true);
@@ -114,10 +115,24 @@ pub fn run() -> Result<()> {
     let config = crate::config::Config::load()
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "config load failed; using empty keybinds");
-            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, idle_screensaver_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, outputs: Vec::new() }
+            crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, idle_screensaver_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, natural_scroll: None, tap_to_click: None, accel_speed: None, disable_while_typing: None, focus_follows_mouse: false, outputs: Vec::new(), window_rules: Vec::new() }
         });
 
+    #[cfg(feature = "xwayland")]
+    let xwayland_shell_state =
+        smithay::wayland::xwayland_shell::XWaylandShellState::new::<State>(&dh);
+
     let mut state = State {
+        display_handle: dh.clone(),
+        pending_output_modes: false,
+        #[cfg(feature = "xwayland")]
+        xwayland_shell_state,
+        #[cfg(feature = "xwayland")]
+        xwm: None,
+        #[cfg(feature = "xwayland")]
+        xdisplay: None,
+        #[cfg(feature = "udev")]
+        udev: None,
         compositor_state,
         xdg_shell_state,
         shm_state,
@@ -173,6 +188,7 @@ pub fn run() -> Result<()> {
         last_geos: std::collections::HashMap::new(),
         config,
         pointer_location: (0.0, 0.0).into(),
+        cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
         pending_dmabuf_imports: Vec::new(),
         pending_ipc_events: Vec::new(),
         pending_redraw: true,

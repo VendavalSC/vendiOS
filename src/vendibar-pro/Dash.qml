@@ -757,15 +757,15 @@ Item {
                                 }
                                 Tile {
                                     glyph: "󰤨"; label: "Wi-Fi"
-                                    run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "wifi"])
+                                    run: () => Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "wifi"])
                                 }
                                 Tile {
                                     glyph: "󰂯"; label: "Bluetooth"
-                                    run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "bt"])
+                                    run: () => Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "bt"])
                                 }
                                 Tile {
                                     glyph: "󰕾"; label: "Audio"
-                                    run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"])
+                                    run: () => Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "audio"])
                                 }
                                 Tile {
                                     glyph: "󰹑"; label: "Shot"
@@ -1483,7 +1483,7 @@ Item {
                                     run: () => {
                                         dash.requestClose();
                                         Quickshell.execDetached(["sh", "-c",
-                                            "alacritty -e \"${EDITOR:-nano}\" \"$HOME/.config/vendi/config\""]);
+                                            "kitty -e \"${EDITOR:-nano}\" \"$HOME/.config/vendi/config\""]);
                                     }
                                 }
                                 CfgRow {
@@ -1494,21 +1494,21 @@ Item {
                                     glyph: "󰕾"; label: "Audio"
                                     run: () => {
                                         dash.requestClose();
-                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"]);
+                                        Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "audio"]);
                                     }
                                 }
                                 CfgRow {
                                     glyph: "󰓅"; label: "Power profile"
                                     run: () => {
                                         dash.requestClose();
-                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "power"]);
+                                        Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "power"]);
                                     }
                                 }
                                 CfgRow {
                                     glyph: "󰏖"; label: "Install software"
                                     run: () => {
                                         dash.requestClose();
-                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "sh", "-c",
+                                        Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "sh", "-c",
                                             "pacman -Slq | fzf --multi --prompt='install> ' --preview 'pacman -Si {}' | xargs -ro sudo pacman -S; printf '\\n  done — any key closes '; read -rsn1"]);
                                     }
                                 }
@@ -1516,7 +1516,7 @@ Item {
                                     glyph: "󰚰"; label: "Update system"
                                     run: () => {
                                         dash.requestClose();
-                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "sh", "-c",
+                                        Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "sh", "-c",
                                             "sudo vendi update; printf '\\n  done — any key closes '; read -rsn1"]);
                                     }
                                 }

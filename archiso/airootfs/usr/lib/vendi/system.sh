@@ -22,8 +22,15 @@ BASE_PKGS=(
     # all. alsa-ucm-conf carries the per-machine routing PipeWire needs to find
     # the speakers; alsa-utils gives alsamixer/alsactl for diagnosing mutes.
     sof-firmware alsa-ucm-conf alsa-utils
-    hyprland xdg-desktop-portal-hyprland xdg-desktop-portal-gtk
-    waybar wofi mako foot alacritty quickshell
+    hyprland xdg-desktop-portal-hyprland xdg-desktop-portal-gtk xdg-desktop-portal-wlr
+    # gsettings-desktop-schemas: backs `vendi appearance` (color-scheme key the
+    # gtk portal exposes as org.freedesktop.appearance so Firefox/GTK follow
+    # light/dark live).
+    gsettings-desktop-schemas
+    waybar wofi mako foot alacritty kitty quickshell
+    # XWayland: run X11-only apps (Discord/Electron — which choke on NVIDIA's
+    # native-Wayland gbm scanout path) under the Xserver. vendiwm starts it.
+    xorg-xwayland
     brightnessctl playerctl grim slurp wl-clipboard swaylock
     polkit-kde-agent qt5-wayland qt6-wayland
     gtk3 gtk4 gtk4-layer-shell
@@ -184,6 +191,31 @@ EOF
 VENDI_SESSION=vendiwm
 EOF
 
+    # Systemd user session target. vendi-session starts this after the Wayland
+    # socket is up; it pulls in graphical-session.target (which refuses manual
+    # start), bringing up xdg-desktop-portal. The portal is mandatory: nautilus,
+    # GTK file dialogs and every "Open With" call it, and CRASH if it's dead.
+    mkdir -p /mnt/etc/systemd/user
+    cat > /mnt/etc/systemd/user/vendiwm-session.target <<'EOF'
+[Unit]
+Description=vendiwm graphical session
+BindsTo=graphical-session.target
+Before=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target
+EOF
+
+    # xdg-desktop-portal backend routing for vendiwm: gtk handles files / app
+    # chooser / settings; the wlroots backend handles ScreenCast + Screenshot
+    # (vendiwm speaks wlr-screencopy) so browser/OBS screen sharing works.
+    mkdir -p /mnt/usr/share/xdg-desktop-portal
+    cat > /mnt/usr/share/xdg-desktop-portal/vendiwm-portals.conf <<'EOF'
+[preferred]
+default=gtk
+org.freedesktop.impl.portal.ScreenCast=wlr
+org.freedesktop.impl.portal.Screenshot=wlr
+EOF
+
     # Make sure agetty doesn't fight greetd over tty1
     chroot_run systemctl mask getty@tty1.service >/dev/null 2>&1 || true
     chroot_run systemctl enable greetd.service   >/dev/null 2>&1 || true
@@ -277,6 +309,13 @@ sys_pacman_polish() {
     # ILoveCandy goes after Color
     grep -q '^ILoveCandy' /mnt/etc/pacman.conf || \
         sed -i '/^Color/a ILoveCandy' /mnt/etc/pacman.conf
+    # Enable the [multilib] repo (32-bit libs) so Steam, Wine, and many other
+    # apps install out of the box. Uncomment the stock commented block.
+    if grep -q '^#\[multilib\]' /mnt/etc/pacman.conf; then
+        sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /mnt/etc/pacman.conf
+    fi
+    # Refresh the dbs (incl. multilib) when online; harmless to skip offline.
+    chroot_run pacman -Sy --noconfirm >/dev/null 2>&1 || true
 }
 
 # ── firewall (UFW) ───────────────────────────────────────────────────────────
@@ -406,31 +445,78 @@ sys_graphics() {
         nvidia=1
         # nvidia-open-dkms: the open kernel modules (now the only packaged
         # NVIDIA driver in Arch), built via dkms against the stock `linux`
-        # kernel. Supports Turing (GTX 16xx / RTX 20xx) and newer; older cards
-        # need a legacy AUR driver. egl-wayland for the EGLStream fallback.
-        pkgs+=(nvidia-open-dkms nvidia-utils libva-nvidia-driver egl-wayland)
+        # kernel. Required for Turing (RTX 20xx) and newer — including Blackwell
+        # (RTX 50xx), which ONLY the open modules support. dkms + headers must
+        # be present for the build (linux-headers is in BASE_PKGS).
+        pkgs+=(nvidia-open-dkms nvidia-utils libva-nvidia-driver egl-wayland dkms)
     fi
 
     if [[ ${#pkgs[@]} -gt 0 ]]; then
         vendi_pkg_install "${pkgs[@]}" || true
     fi
 
-    if [[ $nvidia -eq 1 ]]; then
-        # early-KMS modules in the initramfs
-        local mc=/mnt/etc/mkinitcpio.conf
-        if ! grep -q 'nvidia_drm' "$mc"; then
-            if grep -qE '^MODULES=\(\)' "$mc"; then
-                sed -i 's/^MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' "$mc"
-            else
-                sed -i 's/^MODULES=(/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm /' "$mc"
-            fi
-        fi
-        # kernel param so DRM modesetting is on from boot
-        grep -q 'nvidia_drm.modeset' /mnt/boot/limine.conf 2>/dev/null || \
-            sed -i 's|\(^[[:space:]]*cmdline:.*\)|\1 nvidia_drm.modeset=1|' /mnt/boot/limine.conf
-        # rebuild the initramfs against the kernel modules + sync to FAT32 boot
-        chroot_run mkinitcpio -P || true
+    [[ $nvidia -eq 1 ]] || return 0
+
+    # ── NVIDIA: verify the DKMS module actually built ─────────────────────────
+    # A swallowed dkms failure used to leave a system that forced the nvidia
+    # boot path with no module behind it → black screen, no fallback. Detect it
+    # and shout into the install log so it's visible from the "view log" screen.
+    local built=0
+    compgen -G "/mnt/usr/lib/modules/*/updates/dkms/nvidia.ko*" >/dev/null 2>&1 && built=1
+    if [[ $built -eq 0 ]]; then
+        echo "[$(date +%T)] WARNING: nvidia-open-dkms module did NOT build — the" \
+             "installed driver may be older than this GPU. Update with a newer" \
+             "kernel/driver and run 'sudo mkinitcpio -P' to finish GPU setup." \
+             >> "${INSTALL_LOG:-/tmp/vendios-install.log}"
     fi
+
+    # ── early-KMS modules in the initramfs ────────────────────────────────────
+    local mc=/mnt/etc/mkinitcpio.conf
+    if ! grep -q 'nvidia_drm' "$mc"; then
+        if grep -qE '^MODULES=\(\)' "$mc"; then
+            sed -i 's/^MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' "$mc"
+        else
+            sed -i 's/^MODULES=(/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm /' "$mc"
+        fi
+    fi
+
+    # ── kernel params ─────────────────────────────────────────────────────────
+    # nvidia_drm.modeset=1   → DRM modesetting (mandatory for Wayland/GBM).
+    # NVreg_PreserveVideoMemoryAllocations=1 → keep VRAM across suspend so
+    #   resume isn't a black/corrupted screen (paired with the sleep services
+    #   enabled below). Without it, NVIDIA resume on Wayland is unreliable.
+    grep -q 'nvidia_drm.modeset' /mnt/boot/limine.conf 2>/dev/null || \
+        sed -i 's|\(^[[:space:]]*cmdline:.*\)|\1 nvidia_drm.modeset=1 nvidia.NVreg_PreserveVideoMemoryAllocations=1|' \
+            /mnt/boot/limine.conf
+
+    # ── module options (belt-and-suspenders with the cmdline) ─────────────────
+    cat > /mnt/etc/modprobe.d/nvidia.conf <<'NV'
+options nvidia_drm modeset=1
+options nvidia NVreg_PreserveVideoMemoryAllocations=1
+NV
+
+    # ── suspend/resume/hibernate services ─────────────────────────────────────
+    # Ship with nvidia-utils; needed so the compositor comes back cleanly after
+    # the machine sleeps. Best-effort (a missing unit just no-ops).
+    chroot_run systemctl enable nvidia-suspend.service nvidia-resume.service \
+        nvidia-hibernate.service >/dev/null 2>&1 || true
+
+    # ── Wayland session environment ───────────────────────────────────────────
+    # Vendor selection for GLX (XWayland) and VA-API hardware video on NVIDIA.
+    # These are safe on hybrid systems. GBM_BACKEND is intentionally NOT forced
+    # globally — modern NVIDIA exposes GBM natively and forcing it would break
+    # the iGPU/AMD render path on a multi-GPU box.
+    local envf=/mnt/etc/environment
+    grep -q '__GLX_VENDOR_LIBRARY_NAME' "$envf" 2>/dev/null || cat >> "$envf" <<'ENVV'
+
+# NVIDIA Wayland (added by vendiOS installer)
+__GLX_VENDOR_LIBRARY_NAME=nvidia
+LIBVA_DRIVER_NAME=nvidia
+NVD_BACKEND=direct
+ENVV
+
+    # rebuild the initramfs against the kernel modules + sync to FAT32 boot
+    chroot_run mkinitcpio -P || true
 }
 
 sys_root_password() {
@@ -1031,6 +1117,124 @@ cursor-color=cba6f7
 
 [mouse]
 hide-when-typing=yes
+EOF
+
+    # ── alacritty (the default terminal) ──────────────────────
+    # Ship a complete config at install time. Without it, alacritty starts on
+    # its built-in defaults (zero window padding → text jammed against the
+    # edge) until the user runs `vendi theme`. This mirrors what `vendi theme`
+    # writes (padding + font + theme.toml import) so the terminal looks right
+    # on first launch; theme.toml carries a Mocha default and is overwritten by
+    # `vendi theme` for live recolors.
+    local acfg="${home}/.config/alacritty"
+    mkdir -p "$acfg"
+    cat > "${acfg}/alacritty.toml" << 'EOF'
+[general]
+import = ["~/.config/alacritty/theme.toml"]
+
+[font]
+normal = { family = "JetBrainsMono Nerd Font", style = "Regular" }
+size = 12
+
+[window]
+padding = { x = 12, y = 10 }
+EOF
+    cat > "${acfg}/theme.toml" << 'EOF'
+# Catppuccin Mocha — overwritten by `vendi theme`
+[colors.primary]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+
+[colors.cursor]
+text   = "#1e1e2e"
+cursor = "#cba6f7"
+
+[colors.selection]
+text       = "#cdd6f4"
+background = "#313244"
+
+[colors.normal]
+black   = "#45475a"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#bac2de"
+
+[colors.bright]
+black   = "#585b70"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#a6adc8"
+EOF
+
+    # ── kitty (the default terminal) ──────────────────────────
+    # Drop-in for alacritty's look (same JetBrains Mono / padding / Mocha
+    # palette) plus kitty's upgrades: GPU rendering, inline images (kitty
+    # graphics protocol), and an animated gliding cursor trail. theme.conf
+    # carries the Mocha default and is overwritten by `vendi theme` (which
+    # SIGUSR1s kitty to recolor live). Window opacity is left to the compositor
+    # (vendiwm super+shift+o), not set here — same as alacritty.
+    local kcfg="${home}/.config/kitty"
+    mkdir -p "$kcfg"
+    cat > "${kcfg}/kitty.conf" << 'EOF'
+include theme.conf
+
+font_family      JetBrainsMono Nerd Font
+bold_font        auto
+italic_font      auto
+bold_italic_font auto
+font_size        12
+
+window_padding_width    10 12
+hide_window_decorations yes
+confirm_os_window_close 0
+
+cursor_shape                 block
+cursor_shape_unfocused       hollow
+cursor_blink_interval        0.6
+cursor_stop_blinking_after   0
+cursor_trail                 3
+cursor_trail_decay           0.1 0.4
+cursor_trail_start_threshold 1
+
+scrollback_lines  10000
+copy_on_select    yes
+enable_audio_bell no
+
+# shift+enter parity with the old alacritty bind (ESC + CR)
+map shift+enter send_text all \x1b\r
+EOF
+    cat > "${kcfg}/theme.conf" << 'EOF'
+# Catppuccin Mocha — overwritten by `vendi theme`
+foreground           #cdd6f4
+background           #1e1e2e
+selection_foreground #cdd6f4
+selection_background #313244
+cursor               #cba6f7
+cursor_text_color    #1e1e2e
+color0  #45475a
+color1  #f38ba8
+color2  #a6e3a1
+color3  #f9e2af
+color4  #89b4fa
+color5  #f5c2e7
+color6  #94e2d5
+color7  #bac2de
+color8  #585b70
+color9  #f38ba8
+color10 #a6e3a1
+color11 #f9e2af
+color12 #89b4fa
+color13 #f5c2e7
+color14 #94e2d5
+color15 #a6adc8
 EOF
 
     # ── swaylock (lock screen, Mocha) ─────────────────────────

@@ -25,6 +25,7 @@ import Quickshell.Services.Notifications
 import Quickshell.Services.SystemTray
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Effects
 
 ShellRoot {
     id: root
@@ -50,10 +51,22 @@ ShellRoot {
     // Dashboard (the expanded center notch) — super+d via vendi-launcher dash.
     signal dashToggle()
     signal dashOpen(int tab)
+    // Control center (right notch) — opened by the compositor's top-edge swipe.
+    signal controlToggle()
+    signal controlGoto(string page)
     IpcHandler {
         target: "dash"
         function toggle(): void { root.dashToggle(); }
         function open(tab: int): void { root.dashOpen(tab); }
+    }
+    // vendi AI — super+a expands the center notch into the Siri panel.
+    signal aiToggle()
+    signal aiSet(bool on)
+    IpcHandler {
+        target: "ai"
+        function toggle(): void { root.aiToggle(); }
+        function open(): void { root.aiSet(true); }
+        function close(): void { root.aiSet(false); }
     }
     function rescanWallpapers() { wpList.running = true; }
 
@@ -104,6 +117,18 @@ ShellRoot {
             root.modulesHidden = false;
             if (root.chromeGone) { root.chromeGone = false; root.chromeReturn(); }
         }
+        // Compositor top-edge touch swipe → open the control center. panelWin's
+        // id isn't in scope here (it lives in the panel delegate), so go via a
+        // root signal the panel connects to, like dashToggle/searchToggle.
+        function showControl(): void { root.controlToggle(); }
+        // Open the control center directly on a page ("main"/"wifi"/"bluetooth").
+        function gotoPage(page: string): void { root.controlGoto(page); }
+        // Preview the drawn battery on machines without one (testing/demo).
+        function batteryDemo(pct: int, charging: bool): void {
+            root.batDemo = pct; root.batDemoCharging = charging;
+            root.batteryNotch(pct, charging);
+        }
+        function batteryDemoOff(): void { root.batDemo = -1; }
     }
 
     // ── theme ────────────────────────────────────────────────────────────────
@@ -120,6 +145,7 @@ ShellRoot {
     property color dim:    "#717189"
     property color alert:  "#f38ba8"
     property color good:   "#a6e3a1"
+    property color warn:   "#f9e2af"
     property string mono:  "JetBrainsMonoNL Nerd Font"
 
     // geometry
@@ -358,15 +384,10 @@ ShellRoot {
     property int batWarned: 100   // lowest threshold already announced
     onBatteryChanged: {
         if (charging) { batWarned = 100; return; }
-        for (const th of [15, 5]) {
+        for (const th of [20, 10]) {
             if (battery <= th && batWarned > th) {
                 batWarned = th;
-                root.toasts = root.toasts.concat([{
-                    app: "battery", icon: "", image: "", n: null,
-                    summary: battery <= 5 ? "Battery critical" : "Battery low",
-                    body: battery + "% remaining — plug in soon",
-                }]);
-                toastTimer.restart();
+                root.batteryNotch(battery, false);
                 break;
             }
         }
@@ -374,23 +395,45 @@ ShellRoot {
     property bool charging: batDev
         ? batDev.state === UPowerDeviceState.Charging
         : false
+    onChargingChanged: if (charging && hasBattery) root.batteryNotch(battery, true)
+    // Demo override (IPC `panel batteryDemo <pct> <charging>`) so the drawn
+    // battery can be previewed on machines with no battery. -1 = off.
+    property int  batDemo: -1
+    property bool batDemoCharging: false
+    property int  batShow:       batDemo >= 0 ? batDemo : battery
+    property bool batChargeShow:  batDemo >= 0 ? batDemoCharging : charging
+    property bool batVisible:     hasBattery || batDemo >= 0
+
+    // Battery badge (iOS style): a solid colour-coded pill with the % inside —
+    // compact, no battery-icon outline. Green when charging, red at ≤20%,
+    // white/light otherwise. No animation — the colour is the whole cue.
+    component BatteryIndicator: BatteryBadge {
+        fg: root.fg
+        good: root.good
+        alert: root.alert
+        textColor: root.panel
+        mono: root.mono
+        h: 12.5
+    }
 
     // ── network ──────────────────────────────────────────────────────────────
     property string netIcon: "󰤭"
     Process {
         id: netProc
-        property bool found: false
+        // Note whether wifi / ethernet are actually connected, then pick the icon
+        // on exit (wifi wins). A bare ":connected" substring match used to let the
+        // "loopback:connected" line overwrite the wifi icon with the ethernet one.
+        property bool wifiUp: false
+        property bool ethUp:  false
         command: ["sh", "-c", "nmcli -t -f TYPE,STATE d 2>/dev/null | grep -v unmanaged"]
         stdout: SplitParser {
             onRead: line => {
-                if (line.includes(":connected")) {
-                    root.netIcon = line.startsWith("wifi") ? "󰤨" : "󰈀";
-                    netProc.found = true;
-                }
+                if (line.startsWith("wifi:connected")) netProc.wifiUp = true;
+                else if (line.startsWith("ethernet:connected")) netProc.ethUp = true;
             }
         }
-        onStarted: found = false
-        onExited: { if (!found) root.netIcon = "󰤭"; }
+        onStarted: { wifiUp = false; ethUp = false; }
+        onExited: root.netIcon = netProc.wifiUp ? "󰤨" : netProc.ethUp ? "󰈀" : "󰤭";
     }
     Timer {
         interval: 8000; running: true; repeat: true; triggeredOnStart: true
@@ -419,7 +462,7 @@ ShellRoot {
     property string weatherCond: ""    // "Partly cloudy"
     Process {
         id: wxProc
-        command: ["sh", "-c", "curl -sf --max-time 6 'https://wttr.in/?format=%c|%t|%C' | head -c 96"]
+        command: ["vendi-weather"]
         stdout: SplitParser {
             onRead: l => {
                 if (l.includes("Unknown")) return;
@@ -562,6 +605,18 @@ ShellRoot {
         toastTimer.restart();
     }
 
+    // iOS-style battery notch animation (NOT a notification): the right notch
+    // bulges into a "Charging" / "Low Battery" pill for a moment, then springs
+    // back. Fires on charger plug-in and on low battery (≤20%).
+    property bool batOsd: false
+    property int  batOsdPct: 100
+    property bool batOsdCharging: false
+    Timer { id: batOsdTimer; interval: 4000; onTriggered: root.batOsd = false }
+    function batteryNotch(pct, chg) {
+        batOsdPct = pct; batOsdCharging = chg;
+        batOsd = true; batOsdTimer.restart();
+    }
+
     // ── 1s heartbeat: clocks, media progress, active player ─────────────────
     Timer {
         interval: 1000; running: true; repeat: true; triggeredOnStart: true
@@ -586,9 +641,9 @@ ShellRoot {
             WlrLayershell.namespace: "vendibar-pro"
             // Search grabs the keyboard outright (type immediately); the
             // dashboard's task fields just need click-to-focus.
-            WlrLayershell.keyboardFocus: searchOpen
+            WlrLayershell.keyboardFocus: (searchOpen || aiOpen)
                 ? WlrKeyboardFocus.Exclusive
-                : centerOpen ? WlrKeyboardFocus.OnDemand
+                : (centerOpen || rightOpen) ? WlrKeyboardFocus.OnDemand
                 : WlrKeyboardFocus.None
 
             // ── expansion state ─────────────────────────────────────────────
@@ -597,19 +652,23 @@ ShellRoot {
             property bool powerOpen: false
             // Spotlight search lives in the center notch too (morphs it).
             property bool searchOpen: false
+            property bool aiOpen: false
             property string searchMode: "search"
             function toggleCenter() { centerOpen = !centerOpen; if (centerOpen) { rightOpen = false; powerOpen = false; searchOpen = false; } }
             function toggleRight()  { rightOpen = !rightOpen;  if (rightOpen) { centerOpen = false; powerOpen = false; searchOpen = false; } }
             function togglePower()  { powerOpen = !powerOpen;  if (powerOpen) { centerOpen = false; rightOpen = false; searchOpen = false; } }
             function openSearch(m)  { searchMode = m; searchOpen = true; centerOpen = false; rightOpen = false; powerOpen = false; }
             function closeSearch()  { searchOpen = false; }
+            function openAi()  { aiOpen = true; centerOpen = false; rightOpen = false; powerOpen = false; searchOpen = false; }
+            function closeAi() { aiOpen = false; }
             // Only ever one panel open at a time — opening any one closes the
             // rest, however it was opened (toggle, keybind, click). Guards only
             // fire on the true edge, so there's no feedback loop.
-            onCenterOpenChanged: if (centerOpen) { rightOpen = false; powerOpen = false; searchOpen = false; }
-            onRightOpenChanged:  if (rightOpen)  { centerOpen = false; powerOpen = false; searchOpen = false; }
-            onPowerOpenChanged:  if (powerOpen)  { centerOpen = false; rightOpen = false; searchOpen = false; }
-            onSearchOpenChanged: if (searchOpen) { centerOpen = false; rightOpen = false; powerOpen = false; }
+            onCenterOpenChanged: if (centerOpen) { rightOpen = false; powerOpen = false; searchOpen = false; aiOpen = false; }
+            onRightOpenChanged:  { if (rightOpen)  { centerOpen = false; powerOpen = false; searchOpen = false; aiOpen = false; } else { control.ccPage = "main"; } }
+            onPowerOpenChanged:  if (powerOpen)  { centerOpen = false; rightOpen = false; searchOpen = false; aiOpen = false; }
+            onSearchOpenChanged: if (searchOpen) { centerOpen = false; rightOpen = false; powerOpen = false; aiOpen = false; }
+            onAiOpenChanged:     if (aiOpen)     { centerOpen = false; rightOpen = false; powerOpen = false; searchOpen = false; }
 
             // right notch mode: power menu wins, then control center, then
             // toasts, then the volume OSD
@@ -632,11 +691,31 @@ ShellRoot {
             // they shrink a little and stop kissing the island — they don't
             // vanish, and spring back when it collapses. (Scaling on a tiny
             // screen is never going to be roomy; this just adds breathing space.)
-            property bool centerExpanded: centerOpen || searchOpen
+            property bool centerExpanded: centerOpen || searchOpen || aiOpen
+            // Side notches (clock/date/weather/workspaces) retreat for the
+            // dashboard and search, but STAY while the AI panel is open — the AI
+            // notch only takes the center, so the clock can keep showing.
+            property bool sideRetract: centerOpen || searchOpen
+            // The side notches retreat the instant the island opens, but on
+            // *close* they must regrow first and only then reveal their text /
+            // icons — otherwise the content pops in over a half-sprung notch.
+            // `sideHidden` hides instantly on open and lifts after the spring
+            // has settled on close; the collapsible content keys its opacity to
+            // it (while its `visible` still keys to centerExpanded for width).
+            property bool sideHidden: false
+            onSideRetractChanged: {
+                if (sideRetract) { sideHidden = true; sideRevealTimer.stop(); }
+                else sideRevealTimer.restart();
+            }
+            Timer {
+                id: sideRevealTimer; interval: 520
+                onTriggered: if (!panelWin.sideRetract) panelWin.sideHidden = false
+            }
             property real lw: root.modulesHidden ? 0
                 : leftRow.implicitWidth + root.pad * 2
             property real cw: centerOpen ? Math.min(880, panelWin.width - 120)
                 : searchOpen ? Math.min(640, panelWin.width - 120)
+                : aiOpen ? Math.min(660, panelWin.width - 120)
                 : centerRow.implicitWidth + root.pad * 2 + (centerHover.hovered ? 10 : 0)
             property real rw: root.modulesHidden ? 0
                 : rightMode === "control" ? 400
@@ -646,10 +725,13 @@ ShellRoot {
                 : rightRow.implicitWidth + root.pad * 2 + (rightHover.hovered ? 10 : 0)
             property real ch: centerOpen ? Math.min(620, panelWin.screen.height - 100)
                 : searchOpen ? Math.min(panelWin.screen.height - 80, root.stripH + searchItem.wantHeight)
+                : aiOpen ? Math.min(panelWin.screen.height - 80, root.barH + aiItem.wantHeight)
                 : root.barH
             property real rh: rightMode === "control"
-                    ? 312 + (root.notifHistory.length > 0
-                             ? 30 + Math.min(root.notifHistory.length, 3) * 22 : 0)
+                    ? (control.ccPage !== "main" ? 470
+                       : 312 + (root.batVisible ? 30 : 0)
+                       + (root.notifHistory.length > 0
+                             ? 30 + Math.min(root.notifHistory.length, 3) * 22 : 0))
                 : rightMode === "power" ? 224
                 : rightMode === "toast"
                     ? Math.max(root.barH, toastCol.implicitHeight + root.stripH + 26)
@@ -664,11 +746,11 @@ ShellRoot {
             // invisible on a 270px-tall reveal but reads as a clunky slow-down
             // on open. Cutting it makes open arrive as crisply as close.
             Behavior on lw { SpringAnimation { spring: 9.6; damping: 0.64; mass: 0.70; epsilon: 2.5 } }
-            Behavior on cw { SpringAnimation { spring: 9.0; damping: 0.62; mass: 0.70; epsilon: 2.5 } }
+            Behavior on cw { SpringAnimation { spring: 7.6; damping: 0.66; mass: 0.82; epsilon: 2.5 } }
             // Right notch travels less than the center, so the same spring
             // finishes quicker and reads as too fast — soften it to match.
             Behavior on rw { SpringAnimation { spring: 7.4; damping: 0.64; mass: 0.78; epsilon: 2.5 } }
-            Behavior on ch { SpringAnimation { spring: 9.0; damping: 0.62; mass: 0.68; epsilon: 4.0 } }
+            Behavior on ch { SpringAnimation { spring: 7.6; damping: 0.66; mass: 0.80; epsilon: 4.0 } }
             Behavior on rh { SpringAnimation { spring: 7.4; damping: 0.64; mass: 0.78; epsilon: 4.0 } }
             onLwChanged: silhouette.requestPaint()
             onCwChanged: { silhouette.requestPaint(); root.centerW = cw; }
@@ -711,6 +793,8 @@ ShellRoot {
             Connections {
                 target: root
                 function onDashToggle() { panelWin.toggleCenter(); }
+                function onControlToggle() { if (!panelWin.rightOpen) panelWin.toggleRight(); }
+                function onControlGoto(page) { control.ccPage = page; if (!panelWin.rightOpen) panelWin.toggleRight(); }
                 function onDashOpen(tab) {
                     dashItem.goTab(tab);
                     if (!panelWin.centerOpen) panelWin.toggleCenter();
@@ -720,6 +804,14 @@ ShellRoot {
                         panelWin.closeSearch();
                     else
                         panelWin.openSearch(mode);
+                }
+                function onAiToggle() {
+                    if (panelWin.aiOpen) panelWin.closeAi();
+                    else panelWin.openAi();
+                }
+                function onAiSet(on) {
+                    if (on) panelWin.openAi();
+                    else panelWin.closeAi();
                 }
             }
 
@@ -740,6 +832,41 @@ ShellRoot {
                 target: chromeSlide; property: "y"
                 from: -(root.barH + 30); to: 0
                 duration: 340; easing.type: Easing.OutCubic
+            }
+
+            // ── AI notch glow — a cool accent bloom that breathes behind the
+            //    center notch while the AI panel is open (bleeds past the edges)
+            Item {
+                id: aiGlowSrc
+                visible: false
+                layer.enabled: true
+                x: (panelWin.width - panelWin.cw) / 2 - 36
+                y: root.stripH - 30
+                width: panelWin.cw + 72
+                height: panelWin.ch - root.stripH + 56
+                Rectangle {
+                    anchors.fill: parent; anchors.margins: 34
+                    radius: 30
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: root.accent }
+                        GradientStop { position: 1.0; color: Qt.hsla((root.accent.hslHue + 0.12) % 1.0, 0.7, 0.62, 1) }
+                    }
+                }
+            }
+            MultiEffect {
+                source: aiGlowSrc
+                x: aiGlowSrc.x; y: aiGlowSrc.y
+                width: aiGlowSrc.width; height: aiGlowSrc.height
+                blurEnabled: true; blur: 1.0; blurMax: 44; autoPaddingEnabled: true
+                opacity: panelWin.aiOpen ? 0.55 : 0
+                Behavior on opacity { NumberAnimation { duration: 380; easing.type: Easing.InOutSine } }
+                transformOrigin: Item.Center
+                SequentialAnimation on scale {
+                    running: panelWin.aiOpen; loops: Animation.Infinite
+                    NumberAnimation { from: 1.0; to: 1.035; duration: 1900; easing.type: Easing.InOutSine }
+                    NumberAnimation { from: 1.035; to: 1.0; duration: 1900; easing.type: Easing.InOutSine }
+                }
             }
 
             // ── silhouette ──────────────────────────────────────────────────
@@ -873,11 +1000,17 @@ ShellRoot {
                     }
                 }
 
-                Sep { visible: root.title.length > 0 && !panelWin.centerExpanded }
+                Sep {
+                    visible: root.title.length > 0 && !panelWin.sideRetract
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                }
                 Mono {
                     text: root.title.length > 42 ? root.title.slice(0, 42) + "…" : root.title
-                    visible: root.title.length > 0 && !panelWin.centerExpanded
+                    visible: root.title.length > 0 && !panelWin.sideRetract
                     color: root.dim
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
                 }
             }
 
@@ -888,11 +1021,23 @@ ShellRoot {
                 y: root.stripH
                 height: root.barH - root.stripH
                 spacing: 10
+                // Keep the clock/date/weather visible as a header while the AI
+                // panel is open (AI content sits below it); only the dashboard
+                // and search fully hide it.
                 opacity: (panelWin.centerOpen || panelWin.searchOpen) ? 0 : 1
                 // opacity 0 still eats clicks — the dashboard / search live in
                 // this exact strip, so actually drop the row from input
                 visible: opacity > 0
                 Behavior on opacity { NumberAnimation { duration: 140 } }
+                property color batTone: root.batOsdCharging ? root.good : root.alert
+                // battery alert, left wing: "Charging" / "Low Battery" — flanks
+                // the clock and expands the notch to the sides, iOS-island style.
+                Mono {
+                    visible: root.batOsd
+                    text: root.batOsdCharging ? "Charging" : "Low Battery"
+                    font.bold: true
+                    color: root.fg
+                }
                 // screen-recording pill — blinking red dot + elapsed time;
                 // click it to stop the recording (brainshell-style).
                 Item {
@@ -1015,6 +1160,48 @@ ShellRoot {
                         }
                     }
                 }
+                // battery alert, right wing: percentage + a real battery icon
+                // (rounded-rectangle body, level fill, little square terminal).
+                Row {
+                    visible: root.batOsd
+                    spacing: 6
+                    Layout.alignment: Qt.AlignVCenter
+                    Mono {
+                        text: root.batOsdPct + "%"
+                        font.bold: true
+                        color: centerRow.batTone
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Item {
+                        width: 25; height: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        Rectangle {
+                            id: batBody
+                            width: 22; height: 12; radius: 2.5
+                            color: "transparent"
+                            border.width: 1.5
+                            border.color: centerRow.batTone
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.leftMargin: 2
+                                anchors.verticalCenter: parent.verticalCenter
+                                height: parent.height - 4
+                                width: Math.max(2, (parent.width - 4) * Math.max(0, Math.min(100, root.batOsdPct)) / 100)
+                                radius: 1
+                                color: centerRow.batTone
+                                Behavior on width { NumberAnimation { duration: 220 } }
+                            }
+                        }
+                        // little square terminal on the right
+                        Rectangle {
+                            anchors.left: batBody.right
+                            anchors.leftMargin: 1
+                            anchors.verticalCenter: batBody.verticalCenter
+                            width: 2.5; height: 4; radius: 0.5
+                            color: centerRow.batTone
+                        }
+                    }
+                }
                 TapHandler { onTapped: panelWin.toggleCenter() }
                 HoverHandler { id: centerHover; cursorShape: Qt.PointingHandCursor }
             }
@@ -1083,6 +1270,33 @@ ShellRoot {
                 }
             }
 
+            // ── vendi AI (expanded center notch) — the notch becomes the Siri
+            //    panel; AiContent.qml fills it (super+a) ───────────────────────
+            Item {
+                id: aiBox
+                x: (panelWin.width - panelWin.cw) / 2
+                y: root.barH                       // below the clock/date header
+                width: panelWin.cw
+                height: panelWin.ch - root.barH
+                clip: true
+                visible: opacity > 0
+                opacity: panelWin.aiOpen ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+                TapHandler { onTapped: {} }   // swallow clicks inside
+
+                AiContent {
+                    id: aiItem
+                    anchors.fill: parent
+                    active: panelWin.aiOpen
+                    accent: root.accent
+                    panelColor: root.panel
+                    fg: root.fg
+                    dim: root.dim
+                    mono: root.mono
+                    onRequestClose: panelWin.closeAi()
+                }
+            }
+
             // ── right notch collapsed row ───────────────────────────────────
             RowLayout {
                 id: rightRow
@@ -1107,7 +1321,9 @@ ShellRoot {
                 // system tray (icons only; click = activate)
                 RowLayout {
                     spacing: 8
-                    visible: SystemTray.items.values.length > 0 && !panelWin.centerExpanded
+                    visible: SystemTray.items.values.length > 0 && !panelWin.sideRetract
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
                     Repeater {
                         model: SystemTray.items
                         IconImage {
@@ -1120,41 +1336,31 @@ ShellRoot {
                         }
                     }
                 }
-                Sep { visible: SystemTray.items.values.length > 0 && !panelWin.centerExpanded }
+                Sep {
+                    visible: SystemTray.items.values.length > 0 && !panelWin.sideRetract
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                }
 
                 // quiet icon cluster — no numbers in the corner; the control
                 // center carries the detail. Hidden while the island is open so
                 // the right pill collapses to just the power button.
                 RowLayout {
                     spacing: 11
-                    visible: !panelWin.centerExpanded
+                    visible: !panelWin.sideRetract
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
                     Glyph { text: root.netIcon; font.pixelSize: 14 }
                     Glyph {
                         text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
                         color: root.muted ? root.dim : root.fg
                         font.pixelSize: 14
                     }
-                    RowLayout {
-                        spacing: 4
-                        visible: root.hasBattery
-                        Glyph {
-                            text: root.charging ? "󰂄"
-                                : root.battery > 90 ? "󰁹"
-                                : root.battery > 70 ? "󰂂"
-                                : root.battery > 50 ? "󰂁"
-                                : root.battery > 30 ? "󰁿"
-                                : root.battery > 15 ? "󰁽"
-                                : "󰁺"
-                            color: root.charging ? root.good
-                                 : root.battery <= 20 ? root.alert : root.fg
-                            font.pixelSize: 14
-                        }
-                        Mono {
-                            text: root.battery + "%"
-                            font.pixelSize: 11
-                            color: root.charging ? root.good
-                                 : root.battery <= 20 ? root.alert : root.dim
-                        }
+                    BatteryIndicator {
+                        visible: root.batVisible
+                        pct: root.batShow
+                        charging: root.batChargeShow
+                        Layout.alignment: Qt.AlignVCenter
                     }
                     Glyph {
                         text: root.notifHistory.length > 0 ? "󰂚" : "󰂜"
@@ -1164,7 +1370,11 @@ ShellRoot {
                     TapHandler { onTapped: panelWin.toggleRight() }
                 }
 
-                Sep { visible: !panelWin.centerExpanded }
+                Sep {
+                    visible: !panelWin.sideRetract
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                }
                 Mono {
                     text: "󰐥"
                     color: root.accent
@@ -1394,6 +1604,10 @@ ShellRoot {
             // ── control center (expanded right notch) ───────────────────────
             Item {
                 id: control
+                // Which page the control center is showing: the main grid, or a
+                // Wi-Fi / Bluetooth sub-page slid in over it. Reset to main when
+                // the center closes (see onRightOpenChanged).
+                property string ccPage: "main"
                 x: panelWin.width - panelWin.rw
                 y: root.stripH
                 width: panelWin.rw
@@ -1408,6 +1622,13 @@ ShellRoot {
                     anchors.fill: parent
                     anchors.margins: 20
                     spacing: 12
+                    opacity: control.ccPage === "main" ? 1 : 0
+                    visible: opacity > 0
+                    transform: Translate {
+                        x: control.ccPage === "main" ? 0 : -28
+                        Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 160 } }
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -1600,22 +1821,22 @@ ShellRoot {
                             TapHandler { onTapped: run() }
                         }
                         QuickAction {
-                            glyph: "󰤨"; label: "Wi-Fi"
-                            run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "wifi"])
+                            glyph: root.netIcon === "󰤨" ? "󰤨" : "󰤭"; label: "Wi-Fi"
+                            run: () => { control.ccPage = "wifi"; wifiScan.rescan(); }
                         }
                         QuickAction {
                             glyph: "󰂯"; label: "Bluetooth"
-                            run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "bt"])
+                            run: () => { control.ccPage = "bluetooth"; btScan.rescan(); }
                         }
                         QuickAction {
-                            glyph: "󰕾"; label: "Audio"
-                            run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"])
+                            glyph: root.muted ? "󰝟" : "󰕾"; label: "Audio"
+                            run: () => { control.ccPage = "audio"; audioScan.rescan(); }
                         }
                         QuickAction {
                             glyph: root.dnd ? "󰂛" : "󰂚"
-                            label: root.dnd ? "Silenced" : "DND"
+                            label: "Notifs"
                             active: root.dnd
-                            run: () => root.dnd = !root.dnd
+                            run: () => control.ccPage = "notifications"
                         }
                         QuickAction {
                             glyph: "󰹑"; label: "Shot"
@@ -1632,7 +1853,542 @@ ShellRoot {
                     }
 
                     Item { Layout.fillHeight: true }
+
+                    // battery — pinned at the very bottom
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.batVisible
+                        spacing: 10
+                        Glyph { text: "󰁹"; color: root.fg; font.pixelSize: 14 }
+                        Mono { text: "Battery"; color: root.fg }
+                        Item { Layout.fillWidth: true }
+                        Mono {
+                            visible: root.batChargeShow
+                            text: "Charging"
+                            color: root.dim; font.pixelSize: 11
+                        }
+                        BatteryIndicator {
+                            pct: root.batShow
+                            charging: root.batChargeShow
+                            h: 16
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                    }
                 }
+
+                // ── Wi-Fi sub-page ───────────────────────────────────────────
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 20
+                    spacing: 10
+                    opacity: control.ccPage === "wifi" ? 1 : 0
+                    visible: opacity > 0
+                    transform: Translate {
+                        x: control.ccPage === "wifi" ? 0 : 28
+                        Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 160 } }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Mono {
+                            text: "󰁍"; color: root.fg
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor; onClicked: control.ccPage = "main" }
+                        }
+                        Mono { text: "Wi-Fi"; font.bold: true; color: root.accent }
+                        Item { Layout.fillWidth: true }
+                        Mono {
+                            text: wifiScan.scanning ? "scanning…" : "rescan"
+                            color: root.dim; font.pixelSize: 11
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor; onClicked: wifiScan.rescan() }
+                        }
+                    }
+                    ListView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        spacing: 1
+                        model: wifiModel
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: ListView.view ? ListView.view.width : 0
+                            height: 34
+                            radius: 8
+                            color: wHov.hovered ? Qt.rgba(1,1,1,0.08) : "transparent"
+                            HoverHandler { id: wHov }
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8; anchors.rightMargin: 8
+                                spacing: 8
+                                Glyph {
+                                    text: modelData.signal >= 70 ? "󰤨" : modelData.signal >= 45 ? "󰤥"
+                                        : modelData.signal >= 20 ? "󰤢" : "󰤟"
+                                    color: modelData.active ? root.good : root.fg
+                                }
+                                Mono {
+                                    Layout.fillWidth: true
+                                    text: modelData.ssid
+                                    color: modelData.active ? root.good : root.fg
+                                    elide: Text.ElideRight
+                                }
+                                Glyph { visible: modelData.secure; text: "󰌾"; color: root.dim; font.pixelSize: 12 }
+                                Glyph { visible: modelData.active; text: "󰄬"; color: root.good }
+                            }
+                            TapHandler {
+                                onTapped: {
+                                    if (modelData.active) return;
+                                    if (modelData.secure) {
+                                        wifiPw.ssid = modelData.ssid; wifiPw.visible = true;
+                                        wifiPwField.text = ""; wifiPwField.forceActiveFocus();
+                                    } else wifiScan.connectTo(modelData.ssid, "");
+                                }
+                            }
+                        }
+                    }
+                    RowLayout {
+                        id: wifiPw
+                        property string ssid: ""
+                        Layout.fillWidth: true
+                        visible: false
+                        spacing: 8
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 30; radius: 8
+                            color: Qt.rgba(1,1,1,0.08)
+                            TextInput {
+                                id: wifiPwField
+                                anchors.fill: parent
+                                anchors.leftMargin: 10; anchors.rightMargin: 10
+                                verticalAlignment: TextInput.AlignVCenter
+                                color: root.fg
+                                font.family: root.mono; font.pixelSize: 12
+                                // mask dots cram together — space them out
+                                font.letterSpacing: text.length > 0 ? 2.5 : 0
+                                echoMode: TextInput.Password
+                                clip: true
+                                cursorVisible: true
+                                onAccepted: { wifiScan.connectTo(wifiPw.ssid, text); wifiPw.visible = false; }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: wifiPwField.text.length === 0
+                                    text: "password"
+                                    color: root.dim
+                                    font.family: root.mono; font.pixelSize: 12
+                                }
+                            }
+                        }
+                        Mono {
+                            text: "join"; color: root.accent
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: { wifiScan.connectTo(wifiPw.ssid, wifiPwField.text); wifiPw.visible = false; } }
+                        }
+                    }
+                }
+
+                // ── Bluetooth sub-page ───────────────────────────────────────
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 20
+                    spacing: 10
+                    opacity: control.ccPage === "bluetooth" ? 1 : 0
+                    visible: opacity > 0
+                    transform: Translate {
+                        x: control.ccPage === "bluetooth" ? 0 : 28
+                        Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 160 } }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Mono {
+                            text: "󰁍"; color: root.fg
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor; onClicked: control.ccPage = "main" }
+                        }
+                        Mono { text: "Bluetooth"; font.bold: true; color: root.accent }
+                        Item { Layout.fillWidth: true }
+                        Mono {
+                            text: btScan.scanning ? "scanning…" : "rescan"
+                            color: root.dim; font.pixelSize: 11
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor; onClicked: btScan.rescan() }
+                        }
+                    }
+                    ListView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        spacing: 1
+                        model: btModel
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: ListView.view ? ListView.view.width : 0
+                            height: 34
+                            radius: 8
+                            color: bHov.hovered ? Qt.rgba(1,1,1,0.08) : "transparent"
+                            HoverHandler { id: bHov }
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8; anchors.rightMargin: 8
+                                spacing: 8
+                                Glyph { text: "󰂯"; color: modelData.connected ? root.good : root.fg }
+                                Mono {
+                                    Layout.fillWidth: true
+                                    text: modelData.name
+                                    color: modelData.connected ? root.good : root.fg
+                                    elide: Text.ElideRight
+                                }
+                                Glyph { visible: modelData.connected; text: "󰄬"; color: root.good }
+                            }
+                            TapHandler { onTapped: btScan.toggle(modelData.mac, modelData.connected) }
+                        }
+                    }
+                }
+
+                // ── Notifications sub-page ───────────────────────────────────
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 20
+                    spacing: 10
+                    opacity: control.ccPage === "notifications" ? 1 : 0
+                    visible: opacity > 0
+                    transform: Translate {
+                        x: control.ccPage === "notifications" ? 0 : 28
+                        Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 160 } }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Mono {
+                            text: "󰁍"; color: root.fg
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor; onClicked: control.ccPage = "main" }
+                        }
+                        Mono { text: "Notifications"; font.bold: true; color: root.accent }
+                        Item { Layout.fillWidth: true }
+                        Mono {
+                            text: "clear"; color: root.dim; font.pixelSize: 11
+                            visible: root.notifHistory.length > 0
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor; onClicked: root.notifHistory = [] }
+                        }
+                    }
+                    // Do Not Disturb toggle
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 40; radius: 10
+                        color: root.dnd ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+                             : Qt.rgba(1,1,1,0.05)
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12; anchors.rightMargin: 12
+                            spacing: 8
+                            Glyph { text: root.dnd ? "󰂛" : "󰂚"; color: root.dnd ? root.accent : root.fg }
+                            Mono { text: "Do Not Disturb"; Layout.fillWidth: true; color: root.fg }
+                            Rectangle {   // pill switch
+                                width: 38; height: 20; radius: 10
+                                color: root.dnd ? root.accent : Qt.rgba(1,1,1,0.18)
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                                Rectangle {
+                                    width: 16; height: 16; radius: 8; color: "white"
+                                    y: 2; x: root.dnd ? 20 : 2
+                                    Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                                }
+                            }
+                        }
+                        TapHandler { onTapped: root.dnd = !root.dnd }
+                    }
+                    ListView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        spacing: 4
+                        model: root.notifHistory
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: ListView.view ? ListView.view.width : 0
+                            implicitHeight: nRow.implicitHeight + 14
+                            radius: 8
+                            color: Qt.rgba(1,1,1,0.04)
+                            ColumnLayout {
+                                id: nRow
+                                anchors.left: parent.left; anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 10; anchors.rightMargin: 10
+                                spacing: 1
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Mono { text: modelData.app; color: root.accent; font.pixelSize: 10; font.bold: true }
+                                    Item { Layout.fillWidth: true }
+                                    Mono { text: modelData.when; color: root.dim; font.pixelSize: 10 }
+                                }
+                                Mono {
+                                    Layout.fillWidth: true
+                                    text: modelData.summary
+                                    color: root.fg; font.pixelSize: 11
+                                    elide: Text.ElideRight
+                                }
+                            }
+                        }
+                    }
+                    Mono {
+                        visible: root.notifHistory.length === 0
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        text: "No notifications"
+                        color: root.dim
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
+
+                // ── Audio sub-page ───────────────────────────────────────────
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 20
+                    spacing: 10
+                    opacity: control.ccPage === "audio" ? 1 : 0
+                    visible: opacity > 0
+                    transform: Translate {
+                        x: control.ccPage === "audio" ? 0 : 28
+                        Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 160 } }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Mono {
+                            text: "󰁍"; color: root.fg
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor; onClicked: control.ccPage = "main" }
+                        }
+                        Mono { text: "Audio"; font.bold: true; color: root.accent }
+                        Item { Layout.fillWidth: true }
+                        Mono {
+                            text: "rescan"; color: root.dim; font.pixelSize: 11
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor; onClicked: audioScan.rescan() }
+                        }
+                    }
+
+                    // master volume of the default sink (live pipewire node)
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Glyph {
+                            text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
+                            color: root.muted ? root.dim : root.fg
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: { if (root.sinkAudio) root.sinkAudio.muted = !root.sinkAudio.muted; } }
+                        }
+                        Rectangle {
+                            id: aVolTrack
+                            Layout.fillWidth: true
+                            height: 8; radius: 4
+                            color: Qt.rgba(1, 1, 1, 0.10)
+                            Rectangle {
+                                width: Math.max(8, parent.width * Math.max(0, root.volume) / 100)
+                                height: parent.height; radius: 4
+                                color: root.muted ? root.dim : root.accent
+                                Behavior on width { NumberAnimation { duration: 80 } }
+                            }
+                            MouseArea {
+                                anchors.fill: parent; anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                function setVol(mx) { root.setVolume(Math.round(
+                                    Math.max(0, Math.min(1, mx / aVolTrack.width)) * 100)); }
+                                onPressed: m => setVol(m.x - 6)
+                                onPositionChanged: m => { if (pressed) setVol(m.x - 6) }
+                            }
+                        }
+                        Mono { text: (root.volume < 0 ? "—" : root.volume + "%"); Layout.preferredWidth: 38 }
+                    }
+
+                    Mono { text: "Output"; color: root.dim; font.pixelSize: 11 }
+                    ListView {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.min(contentHeight, 120)
+                        clip: true; spacing: 1
+                        model: sinkModel
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: ListView.view ? ListView.view.width : 0
+                            height: 34; radius: 8
+                            color: oHov.hovered ? Qt.rgba(1,1,1,0.08) : "transparent"
+                            HoverHandler { id: oHov }
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8; anchors.rightMargin: 8
+                                spacing: 8
+                                Glyph { text: "󰓃"; color: modelData.active ? root.good : root.fg }
+                                Mono {
+                                    Layout.fillWidth: true
+                                    text: modelData.desc; elide: Text.ElideRight
+                                    color: modelData.active ? root.good : root.fg
+                                }
+                                Glyph { visible: modelData.active; text: "󰄬"; color: root.good }
+                            }
+                            TapHandler { onTapped: if (!modelData.active) control.setSink(modelData.name) }
+                        }
+                    }
+
+                    Mono { text: "Input"; color: root.dim; font.pixelSize: 11 }
+                    ListView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true; spacing: 1
+                        model: sourceModel
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: ListView.view ? ListView.view.width : 0
+                            height: 34; radius: 8
+                            color: iHov.hovered ? Qt.rgba(1,1,1,0.08) : "transparent"
+                            HoverHandler { id: iHov }
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8; anchors.rightMargin: 8
+                                spacing: 8
+                                Glyph { text: "󰍬"; color: modelData.active ? root.good : root.fg }
+                                Mono {
+                                    Layout.fillWidth: true
+                                    text: modelData.desc; elide: Text.ElideRight
+                                    color: modelData.active ? root.good : root.fg
+                                }
+                                Glyph { visible: modelData.active; text: "󰄬"; color: root.good }
+                            }
+                            TapHandler { onTapped: if (!modelData.active) control.setSource(modelData.name) }
+                        }
+                    }
+                }
+
+                // ── backing scanners (nmcli / bluetoothctl) ──────────────────
+                ListModel { id: wifiModel }
+                Process {
+                    id: wifiScan
+                    property bool scanning: false
+                    property var seen: ({})
+                    function rescan() { scanning = true; running = true; }
+                    function connectTo(ssid, pw) {
+                        Quickshell.execDetached(pw.length > 0
+                            ? ["nmcli","dev","wifi","connect",ssid,"password",pw]
+                            : ["nmcli","dev","wifi","connect",ssid]);
+                        wifiRefresh.restart();
+                    }
+                    command: ["sh","-c","nmcli dev wifi rescan 2>/dev/null; nmcli -t -f IN-USE,SIGNAL,SECURITY,SSID dev wifi list 2>/dev/null"]
+                    onStarted: { wifiModel.clear(); seen = ({}); }
+                    onExited: scanning = false
+                    stdout: SplitParser {
+                        onRead: line => {
+                            if (!line) return;
+                            const p = line.split(":");
+                            if (p.length < 4) return;
+                            const ssid = p.slice(3).join(":").replace(/\\:/g, ":");
+                            if (!ssid || wifiScan.seen[ssid]) return;
+                            wifiScan.seen[ssid] = true;
+                            const sec = p[2];
+                            wifiModel.append({
+                                ssid: ssid,
+                                signal: parseInt(p[1]) || 0,
+                                secure: sec.length > 0 && sec !== "--",
+                                active: p[0] === "*",
+                            });
+                        }
+                    }
+                }
+                Timer { id: wifiRefresh; interval: 2500; onTriggered: wifiScan.rescan() }
+
+                ListModel { id: btModel }
+                // Shared: list known devices with a connected marker, no scan.
+                readonly property string btListCmd:
+                    "conn=$(bluetoothctl devices Connected 2>/dev/null | awk '{print $2}'); " +
+                    "bluetoothctl devices 2>/dev/null | while read -r _ mac name; do " +
+                    "m=' '; grep -qxF \"$mac\" <<<\"$conn\" && m='*'; " +
+                    "printf '%s\\t%s\\t%s\\n' \"$m\" \"$mac\" \"$name\"; done"
+                // Append a "<mark>\t<mac>\t<name>" line, skipping unnamed devices
+                // (bluetoothctl shows the MAC as the name for those — just noise).
+                function btAppend(line) {
+                    if (!line) return;
+                    const p = line.split("\t");
+                    if (p.length < 3) return;
+                    const name = p[2];
+                    if (/^[0-9A-Fa-f:\-]{11,}$/.test(name)) return; // bare MAC, no real name
+                    btModel.append({ connected: p[0] === "*", mac: p[1], name: name });
+                }
+                Process {
+                    id: btScan
+                    property bool scanning: false
+                    // Scan (slow) only on open / the rescan button.
+                    function rescan() { scanning = true; running = true; }
+                    function toggle(mac, connected) {
+                        Quickshell.execDetached(["bluetoothctl", connected ? "disconnect" : "connect", mac]);
+                        btRefresh.restart(); // light relist to update the marker — no rescan
+                    }
+                    command: ["sh","-c","bluetoothctl power on >/dev/null 2>&1; bluetoothctl --timeout 5 scan on >/dev/null 2>&1; " + control.btListCmd]
+                    onStarted: btModel.clear()
+                    onExited: scanning = false
+                    stdout: SplitParser { onRead: line => control.btAppend(line) }
+                }
+                // Lightweight relist (no scan) — used after connect/disconnect so
+                // the list doesn't churn or empty out while you're tapping.
+                Process {
+                    id: btRelist
+                    command: ["sh","-c", control.btListCmd]
+                    onStarted: btModel.clear()
+                    stdout: SplitParser { onRead: line => control.btAppend(line) }
+                }
+                Timer { id: btRefresh; interval: 1500; onTriggered: btRelist.running = true }
+
+                // ── audio devices (pactl) ────────────────────────────────────
+                ListModel { id: sinkModel }
+                ListModel { id: sourceModel }
+                // Parse "O|<mark>|<name>|<desc>" (output) / "I|…" (input) lines.
+                // Skip monitor sources (they're loopbacks, not real inputs).
+                function audioAppend(line) {
+                    if (!line) return;
+                    const p = line.split("|");
+                    if (p.length < 4) return;
+                    const name = p[2];
+                    const item = { active: p[1] === "*", name: name, desc: p[3] || name };
+                    if (p[0] === "O") sinkModel.append(item);
+                    else if (p[0] === "I" && !name.endsWith(".monitor")) sourceModel.append(item);
+                }
+                // Switch the default sink AND move already-playing streams to it,
+                // so changing output actually redirects current audio.
+                function setSink(name) {
+                    Quickshell.execDetached(["sh","-c",
+                        "pactl set-default-sink '" + name + "'; " +
+                        "pactl list short sink-inputs | while read i _; do " +
+                        "pactl move-sink-input \"$i\" '" + name + "' 2>/dev/null; done"]);
+                    audioRefresh.restart();
+                }
+                function setSource(name) {
+                    Quickshell.execDetached(["sh","-c",
+                        "pactl set-default-source '" + name + "'; " +
+                        "pactl list short source-outputs | while read i _; do " +
+                        "pactl move-source-output \"$i\" '" + name + "' 2>/dev/null; done"]);
+                    audioRefresh.restart();
+                }
+                Process {
+                    id: audioScan
+                    function rescan() { running = true; }
+                    command: ["sh","-c",
+                        "ds=$(pactl get-default-sink 2>/dev/null); " +
+                        "dr=$(pactl get-default-source 2>/dev/null); " +
+                        "pactl list sinks 2>/dev/null | awk -v d=\"$ds\" '/^Sink #/{if(n)print \"O|\"(n==d?\"*\":\"-\")\"|\"n\"|\"desc;n=\"\";desc=\"\"} /^[ \\t]*Name:/{n=$2} /^[ \\t]*Description:/{$1=\"\";sub(/^[ \\t]+/,\"\");desc=$0} END{if(n)print \"O|\"(n==d?\"*\":\"-\")\"|\"n\"|\"desc}'; " +
+                        "pactl list sources 2>/dev/null | awk -v d=\"$dr\" '/^Source #/{if(n)print \"I|\"(n==d?\"*\":\"-\")\"|\"n\"|\"desc;n=\"\";desc=\"\"} /^[ \\t]*Name:/{n=$2} /^[ \\t]*Description:/{$1=\"\";sub(/^[ \\t]+/,\"\");desc=$0} END{if(n)print \"I|\"(n==d?\"*\":\"-\")\"|\"n\"|\"desc}'"]
+                    onStarted: { sinkModel.clear(); sourceModel.clear(); }
+                    stdout: SplitParser { onRead: line => control.audioAppend(line) }
+                }
+                Timer { id: audioRefresh; interval: 400; onTriggered: audioScan.rescan() }
             }
             }
         }
@@ -1648,4 +2404,5 @@ ShellRoot {
             bar: root
         }
     }
+
 }

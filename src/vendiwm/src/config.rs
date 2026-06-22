@@ -22,9 +22,9 @@ use crate::layout::Direction;
 const DEFAULT_CONFIG: &str = r#"
 binds {
     // ── apps ───────────────────────────────────────────────────
-    // Alacritty is the preferred terminal; fall back to foot on systems that
-    // shipped before the alacritty package was added.
-    bind "super+return"        "spawn sh -c 'alacritty || foot'"
+    // kitty is the default terminal (GPU, inline images, animated cursor
+    // trail); fall back to alacritty then foot on systems that predate it.
+    bind "super+return"        "spawn sh -c 'kitty || alacritty || foot'"
     bind "super+b"             "spawn firefox"
     bind "super+e"             "spawn nautilus"
     // Launchers: the dispatcher picks the right one for the bar in use
@@ -32,9 +32,11 @@ binds {
     bind "super+d"             "spawn vendi-launcher dash"
     bind "super+space"         "spawn vendi-launcher"
     bind "super+alt+space"     "spawn vendi-launcher actions"
+    bind "super+a"             "spawn vendi-launcher ai"
 
     // ── window management ──────────────────────────────────────
     bind "super+q"             "close"
+    bind "super+shift+q"       "kill"
     bind "super+j"             "focus-next"
     bind "super+tab"           "focus-next"
     bind "super+shift+tab"     "focus-prev"
@@ -55,11 +57,19 @@ binds {
     bind "super+h"             "split-horizontal"
     bind "super+v"             "split-vertical"
     bind "super+f"             "fullscreen"
+    bind "super+t"             "cycle-layout"
     bind "super+o"             "overview"
     bind "super+shift+o"       "cycle-opacity"
     bind "super+shift+b"       "toggle-blur"
     bind "super+shift+space"   "toggle-floating"
+    bind "super+c"             "center-floating"
+    bind "super+shift+r"       "reload-config"
     bind "super+shift+escape"  "quit"
+
+    // workspace navigation
+    bind "super+period"        "workspace-next"
+    bind "super+comma"         "workspace-prev"
+    bind "super+grave"         "workspace-last"
 
     // ── workspaces (dynamic — created on demand) ───────────────
     bind "super+1"             "workspace 1"
@@ -82,8 +92,10 @@ binds {
     bind "super+shift+9"       "move-to-workspace 9"
 
     // ── screenshots ────────────────────────────────────────────
-    bind "print"               "spawn sh -c 'mkdir -p ~/Pictures && grim ~/Pictures/screenshot-$(date +%s).png'"
-    bind "super+shift+s"       "spawn sh -c 'grim -g \"$(slurp)\" - | wl-copy'"
+    // Print = full-screen shot to ~/Pictures, also copied to the clipboard, with
+    // a toast so you know it fired. Super+Shift+S = pick a region to the clipboard.
+    bind "print"               "spawn sh -c 'mkdir -p ~/Pictures; f=~/Pictures/screenshot-$(date +%Y%m%d-%H%M%S).png; grim $f && wl-copy < $f && notify-send -a Screenshot Screenshot \"Saved $f\"'"
+    bind "super+shift+s"       "spawn sh -c 'grim -g \"$(slurp)\" - | wl-copy && notify-send -a Screenshot Screenshot \"Region copied to clipboard\"'"
 
     // ── media keys ─────────────────────────────────────────────
     bind "XF86AudioRaiseVolume" "spawn wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"
@@ -112,7 +124,29 @@ input {
     keyboard-layout "us"
     repeat-delay 200
     repeat-rate 25
+    // Window-manager modifier. "super" (default), "alt", "ctrl", or "caps"
+    // (Caps Lock becomes an extra Super — handy on 60% boards where Fn+Super
+    // disables the real Super key).
+    // mod-key "super"
+
+    // Pointer / touchpad. Touchpads get tap-to-click + natural scroll by
+    // default; uncomment to change. accel-speed is -1.0 (slow) … 1.0 (fast).
+    // focus-follows-mouse moves keyboard focus to the window under the pointer.
+    // natural-scroll #true
+    // tap-to-click #true
+    // accel-speed 0.0
+    // disable-while-typing #true
+    // focus-follows-mouse #false
 }
+
+// Window rules — match by app-id (exact, case-insensitive) and/or title
+// (substring). Actions: workspace=N, float=#true/#false, opacity=0..1,
+// fullscreen=#true.
+// rules {
+//     rule app-id="firefox" workspace=2
+//     rule app-id="pavucontrol" float=#true
+//     rule title="Picture-in-Picture" float=#true opacity=0.95
+// }
 "#;
 
 // ── KDL schema ────────────────────────────────────────────────────────────────
@@ -131,6 +165,42 @@ pub struct Document {
     /// position / mode for the matching connector (e.g. "eDP-1", "DP-2").
     #[knus(children(name = "output"))]
     pub outputs: Vec<OutputEntry>,
+    /// Window rules: `rules { rule app-id="…" … }`.
+    #[knus(child)]
+    pub rules: Option<RulesBlock>,
+}
+
+#[derive(knus::Decode, Debug)]
+pub struct RulesBlock {
+    #[knus(children(name = "rule"))]
+    pub entries: Vec<RuleEntry>,
+}
+
+/// One window rule. Matchers (`app-id`, `title`) select windows; the remaining
+/// properties are what to do with a match. Example:
+///   rule app-id="firefox" workspace=2
+///   rule app-id="pavucontrol" float=#true
+///   rule title="Picture-in-Picture" float=#true opacity=0.95
+#[derive(knus::Decode, Debug)]
+pub struct RuleEntry {
+    /// Exact app_id / X11 class (case-insensitive).
+    #[knus(property(name = "app-id"))]
+    pub app_id: Option<String>,
+    /// Substring of the window title (case-insensitive).
+    #[knus(property)]
+    pub title: Option<String>,
+    /// Open the window on this workspace.
+    #[knus(property)]
+    pub workspace: Option<i64>,
+    /// Force floating (true) or tiled (false).
+    #[knus(property)]
+    pub float: Option<bool>,
+    /// Per-window opacity 0.0–1.0.
+    #[knus(property)]
+    pub opacity: Option<f64>,
+    /// Open fullscreen.
+    #[knus(property)]
+    pub fullscreen: Option<bool>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -178,12 +248,34 @@ pub struct InputBlock {
     /// xkb options, e.g. "ctrl:nocaps,grp:alt_shift_toggle".
     #[knus(child, unwrap(argument))]
     pub keyboard_options: Option<String>,
+    /// Which physical key acts as the window-manager modifier (the "super" in
+    /// every bind). "super" (default) uses the Super/Win key. "alt"/"ctrl"
+    /// remap every `super+…` bind onto that modifier instead. "caps" turns Caps
+    /// Lock into an additional Super and leaves the binds untouched — ideal for
+    /// 60% keyboards whose Fn layer can disable the real Super key.
+    #[knus(child, unwrap(argument))]
+    pub mod_key: Option<String>,
     /// Key repeat: ms before repeat starts.
     #[knus(child, unwrap(argument))]
     pub repeat_delay: Option<i64>,
     /// Key repeat: repeats per second.
     #[knus(child, unwrap(argument))]
     pub repeat_rate: Option<i64>,
+    /// Reverse ("natural") scrolling (default: on for touchpads, off for mice).
+    #[knus(child, unwrap(argument))]
+    pub natural_scroll: Option<bool>,
+    /// Touchpad tap-to-click (default on for touchpads).
+    #[knus(child, unwrap(argument))]
+    pub tap_to_click: Option<bool>,
+    /// Pointer acceleration, -1.0 (slow) … 1.0 (fast). Default 0.0.
+    #[knus(child, unwrap(argument))]
+    pub accel_speed: Option<f64>,
+    /// Touchpad: ignore taps/clicks while typing (default on).
+    #[knus(child, unwrap(argument))]
+    pub disable_while_typing: Option<bool>,
+    /// Move keyboard focus to whatever window the pointer is over.
+    #[knus(child, unwrap(argument))]
+    pub focus_follows_mouse: Option<bool>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -309,14 +401,72 @@ pub struct Config {
     pub kb_options: String,
     pub repeat_delay: i32,
     pub repeat_rate:  i32,
+    /// Pointer/touchpad. `None` = leave libinput's per-device default (so mice
+    /// keep traditional scroll, touchpads keep tap+natural unless overridden).
+    pub natural_scroll: Option<bool>,
+    pub tap_to_click: Option<bool>,
+    pub accel_speed: Option<f64>,
+    pub disable_while_typing: Option<bool>,
+    /// Sloppy focus: focus the window under the pointer on motion.
+    pub focus_follows_mouse: bool,
     /// Per-monitor arrangement, keyed by connector name.
     pub outputs: Vec<OutputCfg>,
+    /// User window rules, applied once when a window is first classified.
+    pub window_rules: Vec<WindowRule>,
+}
+
+/// A compiled window rule. Empty matchers never match.
+#[derive(Debug, Clone)]
+pub struct WindowRule {
+    pub app_id: Option<String>,   // exact, case-insensitive
+    pub title:  Option<String>,   // substring, case-insensitive
+    pub workspace:  Option<u32>,
+    pub float:      Option<bool>,
+    pub opacity:    Option<f32>,
+    pub fullscreen: Option<bool>,
+}
+
+/// The merged effect of every rule that matched a window.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RuleEffect {
+    pub workspace:  Option<u32>,
+    pub float:      Option<bool>,
+    pub opacity:    Option<f32>,
+    pub fullscreen: Option<bool>,
+}
+
+impl RuleEffect {
+    pub fn is_empty(&self) -> bool {
+        self.workspace.is_none() && self.float.is_none()
+            && self.opacity.is_none() && self.fullscreen.is_none()
+    }
 }
 
 impl Config {
     /// Look up the arrangement for a connector by name, if the user set one.
     pub fn output_cfg(&self, name: &str) -> Option<&OutputCfg> {
         self.outputs.iter().find(|o| o.name == name)
+    }
+
+    /// Merge every window rule matching `app_id` (exact, case-insensitive) and
+    /// `title` (substring, case-insensitive). Later rules win per-field.
+    pub fn match_window(&self, app_id: &str, title: &str) -> RuleEffect {
+        let mut eff = RuleEffect::default();
+        for r in &self.window_rules {
+            // A rule with no matcher matches nothing (avoids a global override).
+            if r.app_id.is_none() && r.title.is_none() { continue; }
+            let app_ok = r.app_id.as_deref()
+                .is_none_or(|p| p.eq_ignore_ascii_case(app_id));
+            let title_ok = r.title.as_deref()
+                .is_none_or(|p| title.to_lowercase().contains(&p.to_lowercase()));
+            if app_ok && title_ok {
+                if r.workspace.is_some()  { eff.workspace  = r.workspace; }
+                if r.float.is_some()      { eff.float      = r.float; }
+                if r.opacity.is_some()    { eff.opacity    = r.opacity; }
+                if r.fullscreen.is_some() { eff.fullscreen = r.fullscreen; }
+            }
+        }
+        eff
     }
 
     /// Defaults always load first; a user file overlays them. A config that
@@ -334,6 +484,24 @@ impl Config {
             None => None,
         };
 
+        // Window rules: built-in (none today) then user, in file order so user
+        // rules apply last. Extracted up front while both docs are intact.
+        let mut window_rules: Vec<WindowRule> = Vec::new();
+        for blk in [default_doc.rules, user_doc.as_mut().and_then(|d| d.rules.take())]
+            .into_iter().flatten()
+        {
+            for e in blk.entries {
+                window_rules.push(WindowRule {
+                    app_id: e.app_id,
+                    title:  e.title,
+                    workspace:  e.workspace.map(|w| w.max(1) as u32),
+                    float:      e.float,
+                    opacity:    e.opacity.map(|o| o.clamp(0.0, 1.0) as f32),
+                    fullscreen: e.fullscreen,
+                });
+            }
+        }
+
         // (chord, pretty chord, pretty action, action) in config order. A user
         // bind on an existing chord replaces that slot so the pretty list
         // shows the override, not both.
@@ -348,17 +516,31 @@ impl Config {
         let user_idle = user_doc.as_mut().and_then(|d| d.idle.take());
         let default_input = default_doc.input;
         let user_input = user_doc.as_mut().and_then(|d| d.input.take());
+        // Which physical key the binds treat as "super". Read it now (without
+        // consuming the input blocks) so it can rewrite the chords below.
+        let mod_key = user_input.as_ref().and_then(|i| i.mod_key.clone())
+            .or_else(|| default_input.as_ref().and_then(|i| i.mod_key.clone()))
+            .unwrap_or_else(|| "super".into())
+            .trim().to_ascii_lowercase();
+        if !matches!(mod_key.as_str(), "super" | "alt" | "ctrl" | "caps") {
+            tracing::warn!("unknown mod-key {mod_key:?}; using \"super\"");
+        }
         let user_outputs = user_doc.as_mut()
             .map(|d| std::mem::take(&mut d.outputs))
             .unwrap_or_default();
         for entry in default_binds.into_iter().chain(user_binds) {
-            let chord = parse_chord(&entry.chord)
-                .with_context(|| format!("parse chord {:?}", entry.chord))?;
+            let chord = remap_mod(
+                parse_chord(&entry.chord)
+                    .with_context(|| format!("parse chord {:?}", entry.chord))?,
+                &mod_key,
+            );
             let action = parse_action(&entry.action)
                 .with_context(|| format!("parse action {:?}", entry.action))?;
+            // Reflect the active mod in the human-readable chord (Super+K menu).
+            let pretty_chord = remap_pretty(&entry.chord, &mod_key);
             match entries.iter_mut().find(|(c, ..)| *c == chord) {
-                Some(slot) => *slot = (chord, entry.chord, entry.action, action),
-                None       => entries.push((chord, entry.chord, entry.action, action)),
+                Some(slot) => *slot = (chord, pretty_chord, entry.action, action),
+                None       => entries.push((chord, pretty_chord, entry.action, action)),
             }
         }
 
@@ -406,12 +588,28 @@ impl Config {
         let mut kb_options = String::new();
         let mut repeat_delay = 200_i32;
         let mut repeat_rate = 25_i32;
+        let mut natural_scroll: Option<bool> = None;
+        let mut tap_to_click: Option<bool> = None;
+        let mut accel_speed: Option<f64> = None;
+        let mut disable_while_typing: Option<bool> = None;
+        let mut focus_follows_mouse = false;
         for blk in [default_input, user_input].into_iter().flatten() {
             if let Some(v) = blk.keyboard_layout  { kb_layout = v; }
             if let Some(v) = blk.keyboard_variant { kb_variant = v; }
             if let Some(v) = blk.keyboard_options { kb_options = v; }
             if let Some(v) = blk.repeat_delay     { repeat_delay = v as i32; }
             if let Some(v) = blk.repeat_rate      { repeat_rate = v as i32; }
+            if let Some(v) = blk.natural_scroll       { natural_scroll = Some(v); }
+            if let Some(v) = blk.tap_to_click         { tap_to_click = Some(v); }
+            if let Some(v) = blk.accel_speed          { accel_speed = Some(v); }
+            if let Some(v) = blk.disable_while_typing { disable_while_typing = Some(v); }
+            if let Some(v) = blk.focus_follows_mouse  { focus_follows_mouse = v; }
+        }
+        // "caps" mode keeps the super binds intact and instead makes Caps Lock
+        // emit Super via xkb, so it works even when the real Super key is gone.
+        if mod_key == "caps" && !kb_options.split(',').any(|o| o.trim() == "caps:super") {
+            if kb_options.is_empty() { kb_options = "caps:super".into(); }
+            else { kb_options.push_str(",caps:super"); }
         }
 
         // Output arrangement: blocks in vendiwm.kdl, then the vendi-ctl-managed
@@ -439,7 +637,9 @@ impl Config {
         Ok(Self {
             keybinds, keybinds_pretty, theme, idle_lock_secs, idle_screen_off_secs,
             idle_screensaver_secs,
-            kb_layout, kb_variant, kb_options, repeat_delay, repeat_rate, outputs,
+            kb_layout, kb_variant, kb_options, repeat_delay, repeat_rate,
+            natural_scroll, tap_to_click, accel_speed, disable_while_typing,
+            focus_follows_mouse, outputs, window_rules,
         })
     }
 }
@@ -526,6 +726,29 @@ fn read_wallpaper_override() -> Option<String> {
 
 // ── chord parsing ─────────────────────────────────────────────────────────────
 
+/// Apply the configured `mod-key` to a parsed chord. "alt"/"ctrl" move the
+/// Super requirement onto that modifier; "super"/"caps" leave it on Logo
+/// ("caps" works by making Caps Lock emit Super via xkb instead).
+fn remap_mod(mut c: Chord, mod_key: &str) -> Chord {
+    if c.logo {
+        match mod_key {
+            "alt"  => { c.logo = false; c.alt  = true; }
+            "ctrl" => { c.logo = false; c.ctrl = true; }
+            _ => {}
+        }
+    }
+    c
+}
+
+/// Mirror `remap_mod` for the human-readable chord shown in the keybinds menu,
+/// e.g. "super+return" → "alt+return" when mod-key is "alt".
+fn remap_pretty(chord: &str, mod_key: &str) -> String {
+    match mod_key {
+        "alt" | "ctrl" => chord.replacen("super", mod_key, 1),
+        _ => chord.to_string(),
+    }
+}
+
 fn parse_chord(s: &str) -> Result<Chord> {
     let mut c = Chord { logo: false, ctrl: false, alt: false, shift: false, key: 0 };
     let mut parts: Vec<&str> = s.split('+').map(|p| p.trim()).collect();
@@ -558,6 +781,7 @@ fn parse_action(s: &str) -> Result<Action> {
     Ok(match verb {
         "spawn"             => Action::Spawn(rest.to_string()),
         "close"             => Action::Close,
+        "kill"              => Action::Kill,
         "focus-next"        => Action::FocusNext,
         "focus-prev"        => Action::FocusPrev,
         "focus-left"        => Action::FocusDir(Dir::Left),
@@ -576,6 +800,13 @@ fn parse_action(s: &str) -> Result<Action> {
         "split-vertical"    => Action::SetNextSplit(Direction::Vertical),
         "workspace"         => Action::Workspace(rest.parse().context("workspace number")?),
         "move-to-workspace" => Action::MoveToWorkspace(rest.parse().context("workspace number")?),
+        "move-to-workspace-follow" => Action::MoveToWorkspaceFollow(rest.parse().context("workspace number")?),
+        "workspace-next"    => Action::WorkspaceNext,
+        "workspace-prev"    => Action::WorkspacePrev,
+        "workspace-last"    => Action::WorkspaceLast,
+        "reload-config"     => Action::ReloadConfig,
+        "center-floating"   => Action::CenterFloating,
+        "cycle-layout"      => Action::CycleLayout,
         "toggle-floating"   => Action::ToggleFloating,
         "fullscreen"        => Action::ToggleFullscreen,
         "overview"          => Action::ToggleOverview,

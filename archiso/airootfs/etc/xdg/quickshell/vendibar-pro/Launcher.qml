@@ -62,7 +62,7 @@ Item {
     function sh(cmd) {
         return () => Quickshell.execDetached(["sh", "-c", cmd]);
     }
-    readonly property string floatTerm: "alacritty --class vendi-float -e "
+    readonly property string floatTerm: "kitty --class vendi-float -e "
 
     // Open windows, refreshed each time the launcher opens.
     property var openWindows: []
@@ -180,12 +180,12 @@ Item {
                 }))
             },
             { glyph: "\u{f0e09}", title: "Wallpaper", children: [
-                { glyph: "\u{f0598}", title: "Shuffle", act: sh("vendi-ctl wallpaper random") },
-                { glyph: "\u{f06e8}", title: "Default gradient", act: sh("vendi-ctl wallpaper default") },
+                { glyph: "\u{f0598}", title: "Shuffle", act: sh("vendi wallpaper random") },
+                { glyph: "\u{f06e8}", title: "Default gradient", act: sh("vendi wallpaper default") },
             ].concat(win.wallpaperFiles.map(p => ({
                 glyph: "\u{f0e09}",
                 title: p.split("/").pop().replace(/\.[^.]+$/, ""),
-                act: sh("vendi-ctl wallpaper '" + p + "'"),
+                act: sh("vendi wallpaper '" + p + "'"),
             })))},
             { glyph: "\u{f0493}", title: "Settings", children: [
                 { glyph: "\u{f035b}", title: "Bar: minimal", act: sh("vendi bar classic") },

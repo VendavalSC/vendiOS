@@ -384,7 +384,13 @@ fn palette_cmd(args: &[String]) -> Result<()> {
     let mut bins = vec![(0.0f32, 0.0f32, 0.0f32, 0.0f32); 24]; // weight, r, g, b
     let mut hue_x = 0.0f32; // average hue as a vector (circular mean)
     let mut hue_y = 0.0f32;
+    // Mean perceived luminance (Rec.601) over the whole image — drives the
+    // auto light/dark appearance switch (`vendi appearance auto`).
+    let mut lum_sum = 0.0f64;
+    let mut lum_n = 0u64;
     for p in img.pixels() {
+        lum_sum += 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
+        lum_n += 1;
         let (h, s, l) = rgb_to_hsl(p[0], p[1], p[2]);
         if s > 0.18 && (0.18..=0.85).contains(&l) {
             // Vibrancy: saturated and near mid lightness wins.
@@ -459,6 +465,14 @@ fn palette_cmd(args: &[String]) -> Result<()> {
     for (k, v) in out {
         println!("{k}={v}");
     }
+    // Whole-image luminance (0–255) and the derived light/dark mode. A bright
+    // wallpaper (beach, snow) reads "light"; a night scene reads "dark".
+    let luminance = (lum_sum / lum_n.max(1) as f64).round() as u32;
+    println!("luminance={luminance}");
+    // Threshold below the 128 midpoint: real "light" photos (bright sky/sand)
+    // average ~120–150 because of shadows, while dusk/night scenes sit well
+    // under 100, so 110 separates them cleanly.
+    println!("mode={}", if luminance >= 110 { "light" } else { "dark" });
     Ok(())
 }
 

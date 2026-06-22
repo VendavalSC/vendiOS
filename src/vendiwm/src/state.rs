@@ -17,7 +17,7 @@ use smithay::{
     backend::input::ButtonState,
     utils::{IsAlive, Logical, Point, Rectangle, SERIAL_COUNTER, Serial},
     reexports::wayland_server::{
-        Client,
+        Client, DisplayHandle, Resource,
         backend::{ClientData, ClientId, DisconnectReason},
         protocol::{wl_buffer, wl_output, wl_seat, wl_surface::WlSurface},
     },
@@ -84,6 +84,29 @@ pub struct State {
     pub viewporter_state:      ViewporterState,
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub seat:                  Seat<Self>,
+    /// Kept so actions can resolve a client's PID (force-kill) via
+    /// `Client::get_credentials`.
+    pub display_handle:        DisplayHandle,
+
+    // ── XWayland ────────────────────────────────────────────────────────────
+    // X11 apps (Discord/Electron — which choke on NVIDIA's native-Wayland gbm
+    // scanout path — plus any other X11-only client) run via the Xserver. The
+    // xwayland-shell global associates each X11 window with the wl_surface it
+    // renders to; `xwm` is the X11 window manager once XWayland is up; `xdisplay`
+    // is the `:N` exported as $DISPLAY for spawned clients. Everything dispatches
+    // on State (the calloop event loop runs on State so `X11Wm::start_wm` gets
+    // its required `LoopHandle<'static, State>`).
+    #[cfg(feature = "xwayland")]
+    pub xwayland_shell_state:  smithay::wayland::xwayland_shell::XWaylandShellState,
+    #[cfg(feature = "xwayland")]
+    pub xwm:                   Option<smithay::xwayland::X11Wm>,
+    #[cfg(feature = "xwayland")]
+    pub xdisplay:              Option<u32>,
+
+    // udev/DRM runtime (real session backend). Lives on State because the
+    // event loop dispatches on State; None under the nested winit dev backend.
+    #[cfg(feature = "udev")]
+    pub udev:                  Option<crate::backends::udev::UdevData>,
 
     // ext-session-lock: a client (swaylock) asked to lock. We confirm only
     // after the first locked frame has actually been queued — until then
@@ -213,6 +236,11 @@ pub struct State {
     // Current pointer position in compositor logical coordinates.
     pub pointer_location:      Point<f64, Logical>,
 
+    // What the pointer should look like, as last requested by the focused client
+    // (cursor-shape-v1 named shape, a client-drawn surface, or hidden). The
+    // backend renders accordingly; defaults to the themed arrow.
+    pub cursor_status:         CursorImageStatus,
+
     // Queued dmabuf imports — the backend drains and processes these each
     // frame, where it has &mut access to the renderer.
     pub pending_dmabuf_imports: Vec<(Dmabuf, ImportNotifier)>,
@@ -228,6 +256,12 @@ pub struct State {
     // VBlank-driven render loop stalls after the first empty frame because no
     // page-flip ever queues.
     pub pending_redraw:         bool,
+
+    // Set by ReloadConfig when a monitor's mode/refresh may have changed. The
+    // udev backend reads + clears it each tick and reprograms the affected DRM
+    // surface live (DrmCompositor::use_mode) — so Hz/resolution hot-reload with
+    // just a brief blackout instead of needing a session restart.
+    pub pending_output_modes:   bool,
 
     // Set by the Quit action; the backend's per-tick callback reads this and
     // breaks the calloop event loop.
@@ -326,6 +360,13 @@ impl CompositorHandler for State {
         &mut self.compositor_state
     }
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        // The XWayland connection is a wayland client too, but smithay attaches
+        // its own `XWaylandClientData` (not our `ClientState`). Without this
+        // branch, the first surface XWayland commits panics here on unwrap().
+        #[cfg(feature = "xwayland")]
+        if let Some(xdata) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &xdata.compositor_state;
+        }
         &client.get_data::<ClientState>().unwrap().compositor_state
     }
     fn commit(&mut self, surface: &WlSurface) {
@@ -399,15 +440,48 @@ impl CompositorHandler for State {
                 // carries an app_id. `vendi-float` (floating terminals from
                 // the menus: About, Install) opens floating, centered.
                 if !self.rule_checked.contains(&id) {
+                    use smithay::wayland::shell::xdg::SurfaceCachedState;
                     let app_id = with_states(toplevel.wl_surface(), |states| {
                         states.data_map.get::<XdgToplevelSurfaceData>()
                             .and_then(|d| d.lock().ok().and_then(|a| a.app_id.clone()))
                             .unwrap_or_default()
                     });
-                    if !app_id.is_empty() {
+                    let (min, max) = with_states(toplevel.wl_surface(), |states| {
+                        let mut cs = states.cached_state.get::<SurfaceCachedState>();
+                        let c = cs.current();
+                        (c.min_size, c.max_size)
+                    });
+                    // Fixed-size windows (splash screens, Discord's updater/loader)
+                    // and dialogs with a parent don't belong in the tiling grid:
+                    // stretching them to a tile leaves them blank/broken (Discord
+                    // never finishes loading). Float them at their intended size.
+                    let fixed_size = min.w > 0 && min.h > 0 && min == max;
+                    let has_parent = toplevel.parent().is_some();
+                    // User window rules (config `rules { rule … }`) — title is
+                    // already cached in window_titles by the block above.
+                    let rule_title = self.window_titles.get(&id).cloned().unwrap_or_default();
+                    let eff = self.config.match_window(&app_id, &rule_title);
+                    if !app_id.is_empty() || has_parent || fixed_size || !eff.is_empty() {
                         self.rule_checked.insert(id);
-                        if app_id == "vendi-float" {
-                            self.float_window(&window);
+                        // Float: an explicit rule wins; otherwise the built-in
+                        // dialog / fixed-size heuristic decides.
+                        let float = eff.float.unwrap_or(
+                            app_id == "vendi-float" || has_parent || fixed_size);
+                        if float { self.float_window(&window); }
+                        if let Some(op) = eff.opacity {
+                            crate::state::set_window_opacity(&window, op);
+                        }
+                        if eff.fullscreen == Some(true) {
+                            self.set_fullscreen(&window, true);
+                        }
+                        if let Some(ws) = eff.workspace {
+                            if ws != self.workspaces.active_id() {
+                                self.workspaces.move_window_to(&window, ws);
+                                self.space.unmap_elem(&window);
+                                self.relayout();
+                                self.update_keyboard_focus();
+                                self.emit_workspaces();
+                            }
                         }
                     }
                 }
@@ -466,7 +540,8 @@ impl CompositorHandler for State {
                         .and_then(|w| w.wl_surface().map(|s| s.into_owned()))
                 });
                 if let Some(kb) = self.seat.get_keyboard() {
-                    if kb.current_focus() != desired {
+                    // Compare by wl_surface (current_focus is now KbFocus).
+                    if kb.current_focus().and_then(|f| f.wl_surface()) != desired {
                         self.update_keyboard_focus();
                     }
                 }
@@ -622,11 +697,64 @@ impl XdgShellHandler for State {
         }
     }
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
-    fn reposition_request(&mut self, _surface: PopupSurface, _positioner: PositionerState, _token: u32) {}
+    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+        // GTK (nautilus, file dialogs, every menu/dropdown) uses reactive
+        // positioning and repositions its popup right after mapping. The
+        // protocol requires us to apply the new positioner, then reply with
+        // `repositioned` + a fresh configure. Ignoring it (the old no-op) left
+        // GTK waiting forever — the menu never showed and input stayed grabbed.
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        surface.send_repositioned(token);
+        if let Err(e) = surface.send_configure() {
+            tracing::warn!(?e, "popup reposition configure failed");
+        }
+    }
 }
 
 impl SelectionHandler for State {
     type SelectionUserData = ();
+
+    // A Wayland client took the selection — push the offered mime types into the
+    // X11Wm so X11 apps (Discord/Electron under XWayland) can paste from Wayland.
+    // Without this, copy-in-terminal → paste-in-X11 silently does nothing.
+    #[allow(unused_variables)]
+    fn new_selection(
+        &mut self,
+        ty: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        #[cfg(feature = "xwayland")]
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(err) = xwm.new_selection(ty, source.map(|s| s.mime_types())) {
+                tracing::warn!(?err, ?ty, "failed to push selection to Xwayland");
+            }
+        }
+    }
+
+    // A Wayland client wants to read a server-set selection. The only server-set
+    // selections we create are the X11-owned ones bridged in XwmHandler, so read
+    // them back out of the X server and write to the client's fd. Without this,
+    // copy-in-X11 → paste-in-Wayland (e.g. into the terminal) yields nothing.
+    #[allow(unused_variables)]
+    fn send_selection(
+        &mut self,
+        ty: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::unix::io::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        #[cfg(feature = "xwayland")]
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(err) = xwm.send_selection(ty, mime_type, fd) {
+                tracing::warn!(?err, "failed to send Xwayland selection to Wayland client");
+            }
+        }
+    }
 }
 
 impl DataDeviceHandler for State {
@@ -877,7 +1005,7 @@ impl State {
     pub fn update_keyboard_focus(&mut self) {
         // A lock surface owns the keyboard unconditionally while locked.
         if self.is_locked() {
-            let surf = self.lock_surface.as_ref().map(|l| l.wl_surface().clone());
+            let surf = self.lock_surface.as_ref().map(|l| KbFocus::Wl(l.wl_surface().clone()));
             if let Some(kb) = self.seat.get_keyboard() {
                 kb.set_focus(self, surf, SERIAL_COUNTER.next_serial());
             }
@@ -886,20 +1014,35 @@ impl State {
         }
         if let Some(surf) = self.exclusive_layer_surface() {
             if let Some(kb) = self.seat.get_keyboard() {
-                kb.set_focus(self, Some(surf), SERIAL_COUNTER.next_serial());
+                kb.set_focus(self, Some(KbFocus::Wl(surf)), SERIAL_COUNTER.next_serial());
             }
             self.pending_redraw = true;
             return;
         }
         let focused = self.focused_window().filter(|w| w.alive());
-        let surf = focused.as_ref().and_then(|w| w.wl_surface().map(|s| s.into_owned()));
+        // Build the right focus target: X11 windows MUST go through KbFocus::X11
+        // so smithay sends WM_TAKE_FOCUS / sets X input focus per their input
+        // model (else games never get the keyboard). Wayland windows use ::Wl.
+        let kfocus: Option<KbFocus> = focused.as_ref().and_then(|w| {
+            #[cfg(feature = "xwayland")]
+            if let Some(x) = w.x11_surface() { return Some(KbFocus::X11(x.clone())); }
+            w.wl_surface().map(|s| KbFocus::Wl(s.into_owned()))
+        });
         if let Some(kb) = self.seat.get_keyboard() {
-            kb.set_focus(self, surf.clone(), SERIAL_COUNTER.next_serial());
+            kb.set_focus(self, kfocus, SERIAL_COUNTER.next_serial());
         }
-        // Activated ring: set on the focused toplevel, clear everywhere else.
+        // Activated ring: set on the focused window, clear everywhere else.
         for window in self.workspaces.all_windows() {
-            let Some(toplevel) = window.toplevel() else { continue };
             let active = Some(&window) == focused.as_ref();
+            // X11 windows have no xdg toplevel — `set_activated` is what makes
+            // smithay set the X input focus / send WM_TAKE_FOCUS. Without it,
+            // "Globally Active" X11 apps (most games, e.g. Geometry Dash under
+            // Proton) never grab the keyboard even when wl-focused.
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = window.x11_surface() {
+                let _ = x11.set_activated(active);
+            }
+            let Some(toplevel) = window.toplevel() else { continue };
             toplevel.with_pending_state(|s| {
                 if active { s.states.set(xdg_toplevel::State::Activated); }
                 else      { s.states.unset(xdg_toplevel::State::Activated); }
@@ -908,6 +1051,11 @@ impl State {
         }
         if let Some(window) = &focused {
             self.space.raise_element(window, true);
+            // Also raise it in the X11 stack so the focused game/app is on top.
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = window.x11_surface() {
+                if let Some(xwm) = self.xwm.as_mut() { let _ = xwm.raise_window(x11); }
+            }
             let id = window_id(window);
             let title = self.window_titles.get(&id).cloned().unwrap_or_default();
             self.pending_ipc_events.push(crate::ipc::Event::WindowFocused { id, title });
@@ -998,6 +1146,21 @@ impl State {
         ws.focus_floating = Some(window.clone());
         self.relayout();
         self.update_keyboard_focus();
+    }
+
+    /// Re-center the focused floating window on its output, keeping its size.
+    /// No-op for tiled windows.
+    pub fn center_floating(&mut self) {
+        let Some(window) = self.focused_window() else { return };
+        let Some(vp) = self.tiling_viewport() else { return };
+        let ws = self.workspaces.active();
+        if let Some((_, rect)) = ws.floating.iter_mut().find(|(w, _)| w == &window) {
+            rect.loc = (
+                vp.loc.x + (vp.size.w - rect.size.w) / 2,
+                vp.loc.y + (vp.size.h - rect.size.h) / 2,
+            ).into();
+            self.relayout();
+        }
     }
 
     /// Fullscreen on/off for a specific window.
@@ -1472,6 +1635,58 @@ impl State {
 
     /// Execute a keybind action. Returns true if the caller should exit the
     /// main loop (Action::Quit).
+    /// Re-read the config file and apply it live (keyboard, outputs, theme,
+    /// binds). Shared by the `reload-config` keybind and the `vendi-ctl reload`
+    /// IPC. Mode/refresh changes are flagged for the udev backend next tick.
+    pub fn reload_config(&mut self) -> anyhow::Result<()> {
+        let cfg = crate::config::Config::load()?;
+        self.config = cfg;
+        self.wallpaper_gen += 1;
+        self.pending_redraw = true;
+        if let Some(kb) = self.seat.get_keyboard() {
+            let (layout, variant, options, delay, rate) = (
+                self.config.kb_layout.clone(),
+                self.config.kb_variant.clone(),
+                self.config.kb_options.clone(),
+                self.config.repeat_delay, self.config.repeat_rate,
+            );
+            if let Err(e) = kb.set_xkb_config(self, smithay::input::keyboard::XkbConfig {
+                layout: &layout, variant: &variant,
+                options: if options.is_empty() { None } else { Some(options) },
+                ..Default::default()
+            }) {
+                tracing::warn!(?e, "set xkb config on reload");
+            }
+            kb.change_repeat_info(rate, delay);
+        }
+        let cfgs = self.config.outputs.clone();
+        let outs: Vec<_> = self.space.outputs().cloned().collect();
+        for o in outs {
+            match cfgs.iter().find(|c| c.name == o.name()) {
+                Some(c) => {
+                    let scale = c.scale.map(|s| if s.fract().abs() < 1e-6 {
+                        smithay::output::Scale::Integer(s.max(1.0) as i32)
+                    } else {
+                        smithay::output::Scale::Fractional(s)
+                    });
+                    o.change_current_state(None, None, scale, c.position.map(|p| p.into()));
+                    if let Some(p) = c.position { self.space.map_output(&o, p); }
+                }
+                None => o.change_current_state(
+                    None, None, Some(smithay::output::Scale::Integer(1)), None),
+            }
+            smithay::desktop::layer_map_for_output(&o).arrange();
+        }
+        self.pending_output_modes = true;
+        self.relayout();
+        // NOTE: pointer/touchpad device config (natural scroll, accel…) is
+        // applied at device-add time; a live reload won't re-apply it to
+        // already-connected devices (takes effect next session). Binds, theme,
+        // keyboard, and outputs all apply immediately.
+        tracing::info!("config reloaded");
+        Ok(())
+    }
+
     pub fn run_action(&mut self, action: crate::input::Action) -> bool {
         use crate::input::Action::*;
         match action {
@@ -1487,6 +1702,50 @@ impl State {
                     if let Some(t) = w.toplevel() {
                         t.send_close();
                     }
+                    // X11 windows have no xdg toplevel — send WM_DELETE_WINDOW.
+                    #[cfg(feature = "xwayland")]
+                    if let Some(x) = w.x11_surface() {
+                        let _ = x.close();
+                    }
+                }
+            }
+            Kill => {
+                if let Some(w) = self.focused_window() {
+                    // Resolve the owning process and SIGKILL it so a frozen/hung
+                    // window dies even though it ignores the polite Close above.
+                    // CRITICAL: for X11 windows the wl_surface's client is
+                    // XWayland itself (shared by every X app) — killing that PID
+                    // takes down the whole Xserver and panics the wm. So use the
+                    // X11 window's own _NET_WM_PID instead; fall back to a polite
+                    // X11 close if it isn't advertised.
+                    #[cfg(feature = "xwayland")]
+                    let x11 = w.x11_surface().cloned();
+                    #[cfg(not(feature = "xwayland"))]
+                    let x11: Option<()> = None;
+                    let pid = match &x11 {
+                        #[cfg(feature = "xwayland")]
+                        Some(x) => { let _ = x.close(); x.pid() }
+                        _ => w.wl_surface()
+                            .and_then(|s| s.client())
+                            .and_then(|c| c.get_credentials(&self.display_handle).ok())
+                            .map(|creds| creds.pid as u32),
+                    };
+                    if let Some(pid) = pid {
+                        let _ = std::process::Command::new("kill")
+                            .arg("-9").arg(pid.to_string()).spawn();
+                    }
+                    // Drop the tile immediately so the desktop unwedges even if
+                    // the client's destroy callback is slow or never arrives.
+                    self.workspaces.remove_window(&w);
+                    self.space.unmap_elem(&w);
+                    let id = window_id(&w);
+                    self.window_titles.remove(&id);
+                    self.last_geos.remove(&id);
+                    self.rule_checked.remove(&id);
+                    self.pending_ipc_events.push(crate::ipc::Event::WindowClosed { id });
+                    self.relayout();
+                    self.update_keyboard_focus();
+                    self.emit_workspaces();
                 }
             }
             FocusNext => {
@@ -1505,6 +1764,33 @@ impl State {
             SetNextSplit(dir)   => { self.workspaces.active().tree.next_split_override = Some(dir); }
             Workspace(n)        => self.switch_workspace(n),
             MoveToWorkspace(n)  => self.move_focused_to_workspace(n),
+            MoveToWorkspaceFollow(n) => {
+                self.move_focused_to_workspace(n);
+                self.switch_workspace(n);
+            }
+            WorkspaceNext       => {
+                if let Some(id) = self.workspaces.adjacent_id(true) { self.switch_workspace(id); }
+            }
+            WorkspacePrev       => {
+                if let Some(id) = self.workspaces.adjacent_id(false) { self.switch_workspace(id); }
+            }
+            WorkspaceLast       => {
+                let prev = self.workspaces.previous_id();
+                self.switch_workspace(prev);
+            }
+            ReloadConfig        => {
+                if let Err(e) = self.reload_config() { tracing::warn!(?e, "reload-config failed"); }
+            }
+            CenterFloating      => self.center_floating(),
+            CycleLayout         => {
+                let m = self.workspaces.active().mode.next();
+                self.workspaces.active().mode = m;
+                self.relayout();
+                self.update_keyboard_focus();
+                // brief toast so you know which layout you're in
+                let _ = std::process::Command::new("notify-send")
+                    .args(["-a", "Layout", "-t", "1200", "Layout", m.label()]).spawn();
+            }
             ToggleFloating      => self.toggle_floating(),
             ToggleFullscreen    => self.toggle_fullscreen(),
             ToggleOverview      => self.toggle_overview(),
@@ -1567,7 +1853,8 @@ impl State {
         for w in stray { self.space.unmap_elem(&w); }
 
         let gap = self.config.theme.gap;
-        let layouts = self.workspaces.active_ref().tree.layout(viewport);
+        let mode = self.workspaces.active_ref().mode;
+        let layouts = self.workspaces.active_ref().tree.placements(viewport, mode);
         for (window, mut rect) in layouts {
             // Inner gap: half per side so neighbors end up `gap` apart.
             rect.loc.x  += gap / 2;
@@ -1578,9 +1865,23 @@ impl State {
                 toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
                 toplevel.send_configure();
             }
+            // X11 windows are rootful: hand them the full rect (loc + size) so
+            // the Xserver places and sizes them where the tile sits.
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = window.x11_surface() {
+                let _ = x11.configure(Some(rect));
+            }
             // Tile moved or resized → morph it over (only when already mapped).
             self.push_geo_anim(&window, rect);
             self.space.map_element(window, rect.loc, false);
+        }
+
+        // Monocle stacks every window at full size — raise the focused one so
+        // it's the one you actually see (and keep it above its peers).
+        if mode == crate::layout::LayoutMode::Monocle {
+            if let Some(w) = self.workspaces.active_ref().tree.focused().cloned() {
+                self.space.raise_element(&w, true);
+            }
         }
 
         // Floating layer sits above tiled windows.
@@ -1589,6 +1890,10 @@ impl State {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
                 toplevel.send_pending_configure();
+            }
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = window.x11_surface() {
+                let _ = x11.configure(Some(rect));
             }
             self.push_geo_anim(&window, rect);
             self.space.map_element(window.clone(), rect.loc, false);
@@ -1601,6 +1906,10 @@ impl State {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|s| { s.size = Some(geometry.size); });
                 toplevel.send_configure();
+            }
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = window.x11_surface() {
+                let _ = x11.configure(Some(geometry));
             }
             self.push_geo_anim(&window, geometry);
             self.space.map_element(window.clone(), geometry.loc, false);
@@ -1811,15 +2120,122 @@ impl State {
     }
 }
 
+/// Keyboard focus target. Must distinguish a Wayland surface from an X11 one:
+/// smithay only sends WM_TAKE_FOCUS / sets X input focus from `X11Surface`'s
+/// KeyboardTarget::enter, per the window's ICCCM input model. Focusing the bare
+/// WlSurface (as we used to) skips that, so "Globally Active" X11 apps — most
+/// games, e.g. Geometry Dash under Proton (input=False + WM_TAKE_FOCUS) — never
+/// actually grab the keyboard. (Passive apps like Discord worked because
+/// XWayland sets their X focus itself.)
+#[derive(Debug, Clone, PartialEq)]
+pub enum KbFocus {
+    Wl(WlSurface),
+    #[cfg(feature = "xwayland")]
+    X11(smithay::xwayland::X11Surface),
+}
+
+impl KbFocus {
+    pub fn wl_surface(&self) -> Option<WlSurface> {
+        match self {
+            KbFocus::Wl(s) => Some(s.clone()),
+            #[cfg(feature = "xwayland")]
+            KbFocus::X11(x) => x.wl_surface(),
+        }
+    }
+}
+
+impl smithay::utils::IsAlive for KbFocus {
+    fn alive(&self) -> bool {
+        match self {
+            KbFocus::Wl(s) => s.alive(),
+            #[cfg(feature = "xwayland")]
+            KbFocus::X11(x) => x.alive(),
+        }
+    }
+}
+
+// Required by smithay's data-device / primary-selection / seat (they key the
+// selection off the focused client's wl_surface).
+impl smithay::wayland::seat::WaylandFocus for KbFocus {
+    fn wl_surface(&self) -> Option<std::borrow::Cow<'_, WlSurface>> {
+        match self {
+            KbFocus::Wl(s) => Some(std::borrow::Cow::Owned(s.clone())),
+            #[cfg(feature = "xwayland")]
+            KbFocus::X11(x) => smithay::wayland::seat::WaylandFocus::wl_surface(x),
+        }
+    }
+}
+
+impl smithay::input::keyboard::KeyboardTarget<State> for KbFocus {
+    fn enter(&self, seat: &Seat<State>, data: &mut State,
+        keys: Vec<smithay::input::keyboard::KeysymHandle<'_>>, serial: smithay::utils::Serial) {
+        match self {
+            KbFocus::Wl(s)  => smithay::input::keyboard::KeyboardTarget::enter(s, seat, data, keys, serial),
+            #[cfg(feature = "xwayland")]
+            KbFocus::X11(x) => smithay::input::keyboard::KeyboardTarget::enter(x, seat, data, keys, serial),
+        }
+    }
+    fn leave(&self, seat: &Seat<State>, data: &mut State, serial: smithay::utils::Serial) {
+        match self {
+            KbFocus::Wl(s)  => smithay::input::keyboard::KeyboardTarget::leave(s, seat, data, serial),
+            #[cfg(feature = "xwayland")]
+            KbFocus::X11(x) => smithay::input::keyboard::KeyboardTarget::leave(x, seat, data, serial),
+        }
+    }
+    fn key(&self, seat: &Seat<State>, data: &mut State,
+        key: smithay::input::keyboard::KeysymHandle<'_>, state: smithay::backend::input::KeyState,
+        serial: smithay::utils::Serial, time: u32) {
+        match self {
+            KbFocus::Wl(s)  => smithay::input::keyboard::KeyboardTarget::key(s, seat, data, key, state, serial, time),
+            #[cfg(feature = "xwayland")]
+            KbFocus::X11(x) => smithay::input::keyboard::KeyboardTarget::key(x, seat, data, key, state, serial, time),
+        }
+    }
+    fn modifiers(&self, seat: &Seat<State>, data: &mut State,
+        modifiers: smithay::input::keyboard::ModifiersState, serial: smithay::utils::Serial) {
+        match self {
+            KbFocus::Wl(s)  => smithay::input::keyboard::KeyboardTarget::modifiers(s, seat, data, modifiers, serial),
+            #[cfg(feature = "xwayland")]
+            KbFocus::X11(x) => smithay::input::keyboard::KeyboardTarget::modifiers(x, seat, data, modifiers, serial),
+        }
+    }
+}
+
 impl SeatHandler for State {
-    type KeyboardFocus = WlSurface;
+    type KeyboardFocus = KbFocus;
     type PointerFocus  = WlSurface;
     type TouchFocus    = WlSurface;
 
     fn seat_state(&mut self) -> &mut SeatState<Self> { &mut self.seat_state }
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    // Point the clipboard / primary selection at the newly-focused client. The
+    // wl_data_device selection is only offered to the focused client, so without
+    // this NO app can read or set the clipboard via wl_data_device (alacritty,
+    // GTK, Qt…). It went unnoticed because wl-copy/wl-paste use the separate
+    // wlr-data-control protocol, which doesn't need focus. The X11 bridge in
+    // src/xwayland.rs depends on this too.
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KbFocus>) {
+        use smithay::reexports::wayland_server::Resource as _;
+        let client = focused.and_then(|f| f.wl_surface()).and_then(|s| s.client());
+        smithay::wayland::selection::data_device::set_data_device_focus(
+            &self.display_handle, seat, client.clone(),
+        );
+        smithay::wayland::selection::primary_selection::set_primary_focus(
+            &self.display_handle, seat, client,
+        );
+    }
+    // (tablet tool cursor images go through TabletSeatHandler, impl'd below —
+    // required by cursor-shape-v1's device dispatch.)
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        // The focused client asked for a cursor shape/surface; the backend reads
+        // this each frame. A new shape changes the rendered pixels, so redraw.
+        self.cursor_status = image;
+        self.pending_redraw = true;
+    }
 }
+
+// Tablets aren't specially supported; the default no-op tool-image handler is
+// enough. Required because cursor-shape-v1 also sets tablet tool cursors.
+impl smithay::wayland::tablet_manager::TabletSeatHandler for State {}
 
 impl DmabufHandler for State {
     fn dmabuf_state(&mut self) -> &mut DmabufState {

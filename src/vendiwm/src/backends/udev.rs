@@ -97,6 +97,8 @@ smithay::backend::renderer::element::render_elements! {
     Blur=crate::render::BlurElement,
     // Incoming wallpaper drawn through a growing circular mask (swap reveal).
     Reveal=crate::render::RevealElement,
+    // Flat fill (session-start fade-in: black over everything, alpha → 0).
+    Solid=smithay::backend::renderer::element::solid::SolidColorRenderElement,
 }
 
 type FrameElement = OutputRenderElements;
@@ -186,6 +188,75 @@ fn capture_lock_backdrop(
     }
     // Six passes end with the final write back in texa.
     Ok((sharp, texa))
+}
+
+/// Composite one frame of the wallpaper bloom into a FRESH offscreen texture:
+/// the outgoing wallpaper fills the buffer, the incoming wallpaper is drawn on
+/// top through the circular-reveal shader (a feathered disc of radius
+/// `reveal_phys` centred at `center_phys`, both in physical px). The returned
+/// texture is then pushed as an ordinary fullscreen TextureRenderElement.
+///
+/// Why offscreen: on the NVIDIA proprietary driver the DrmCompositor only
+/// PRESENTS a frame when an element's geometry changes OR a genuinely new buffer
+/// is submitted. The old in-place disc (same wallpaper buffer + a growing shader
+/// uniform) rendered fine but never reached the screen — it froze then popped.
+/// Allocating a brand-new texture every frame (like swww's fresh wl_buffer per
+/// frame) gives the compositor a new buffer to flip, so the bloom presents on
+/// every GPU. The buffer is full mode-size and short-lived (~42 frames / 700ms).
+//
+// NOTE: superseded by the cross-fade transition (the offscreen bloom did NOT
+// present on NVIDIA after all). Kept for the disc shader / possible reuse.
+#[allow(dead_code)]
+fn render_bloom(
+    renderer: &mut GlesRenderer,
+    old: &MemoryRenderBuffer,
+    new: &MemoryRenderBuffer,
+    reveal_prog: &GlesTexProgram,
+    center_phys: (f32, f32),
+    reveal_phys: f32,
+    alpha: f32,
+    wp_src: Option<smithay::utils::Rectangle<f64, smithay::utils::Logical>>,
+    mode_size: smithay::utils::Size<i32, smithay::utils::Physical>,
+) -> anyhow::Result<GlesTexture> {
+    use smithay::backend::renderer::{Bind, Frame, Offscreen, Renderer as _};
+    use smithay::backend::renderer::element::Element as _;
+    // Offscreen pass works in physical px at scale 1 (the buffer is the native
+    // mode size); the result is later drawn to the real output at its own scale.
+    let scale1 = smithay::utils::Scale::from(1.0);
+    let full = smithay::utils::Rectangle::from_size(mode_size);
+    let dest = smithay::utils::Size::<i32, smithay::utils::Logical>::from((mode_size.w, mode_size.h));
+    // Build the two source elements first — from_buffer needs &mut renderer,
+    // which the bound frame below would otherwise hold exclusively.
+    let old_elem = MemoryRenderBufferRenderElement::from_buffer(
+        renderer, (0.0, 0.0), old, Some(alpha), wp_src, Some(dest), Kind::Unspecified,
+    ).map_err(|e| anyhow::anyhow!("old elem: {e:?}"))?;
+    let new_inner = MemoryRenderBufferRenderElement::from_buffer(
+        renderer, (0.0, 0.0), new, Some(alpha), wp_src, Some(dest), Kind::Unspecified,
+    ).map_err(|e| anyhow::anyhow!("new elem: {e:?}"))?;
+    let reveal_elem = crate::render::RevealElement::new(
+        new_inner, reveal_prog.clone(), center_phys, reveal_phys,
+    );
+    let old_src = old_elem.src();
+    let old_dst = old_elem.geometry(scale1);
+    let new_src = reveal_elem.src();
+    let new_dst = reveal_elem.geometry(scale1);
+    let mut tex: GlesTexture = renderer
+        .create_buffer(smithay::backend::allocator::Fourcc::Abgr8888, (mode_size.w, mode_size.h).into())
+        .map_err(|e| anyhow::anyhow!("create bloom: {e:?}"))?;
+    {
+        let mut fb = renderer.bind(&mut tex).map_err(|e| anyhow::anyhow!("bind: {e:?}"))?;
+        let mut frame = renderer.render(&mut fb, mode_size, Transform::Normal)
+            .map_err(|e| anyhow::anyhow!("render: {e:?}"))?;
+        frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[full]).map_err(|e| anyhow::anyhow!("clear: {e:?}"))?;
+        // Outgoing wallpaper, full and opaque underneath.
+        RenderElement::<GlesRenderer>::draw(&old_elem, &mut frame, old_src, old_dst, &[full], &[], None)
+            .map_err(|e| anyhow::anyhow!("old draw: {e:?}"))?;
+        // Incoming wallpaper through the growing disc.
+        RenderElement::<GlesRenderer>::draw(&reveal_elem, &mut frame, new_src, new_dst, &[full], &[], None)
+            .map_err(|e| anyhow::anyhow!("reveal draw: {e:?}"))?;
+        let _ = frame.finish().map_err(|e| anyhow::anyhow!("finish: {e:?}"))?;
+    }
+    Ok(tex)
 }
 
 /// Render `elements[skip..]` (bottom-up) into an offscreen texture, read it
@@ -362,17 +433,13 @@ type GbmDrmCompositor = DrmCompositor<
     DrmDeviceFd,
 >;
 
-/// Top-level event-loop data — gives every calloop callback &mut access to
-/// the wayland state, the udev/DRM bits, and the display handle for socket
-/// hand-off.
-pub struct UdevApp {
-    pub state:          State,
-    pub udev:           UdevData,
-    pub display_handle: DisplayHandle,
-}
+// The calloop event loop dispatches directly on `State`: the udev/DRM runtime
+// is `state.udev` and the display handle is `state.display_handle`, so every
+// callback reaches it all through the one `&mut State`. (XWayland forces this —
+// `X11Wm::start_wm` needs a `LoopHandle<'static, State>`.)
 
 pub fn run() -> Result<()> {
-    let mut event_loop: EventLoop<UdevApp> = EventLoop::try_new().context("calloop event loop")?;
+    let mut event_loop: EventLoop<State> = EventLoop::try_new().context("calloop event loop")?;
     let loop_handle = event_loop.handle();
 
     let display: Display<State> = Display::new().context("create wayland Display")?;
@@ -426,10 +493,10 @@ pub fn run() -> Result<()> {
 
     // 6. Build the wayland State with the renderer's SHM formats. wl_drm
     //    binding for Mesa EGL clients happens next.
-    let state = build_state(&display_handle, shm_formats)?;
+    let mut app = build_state(&display_handle, shm_formats)?;
+    app.udev = Some(udev);
     // wlr-screencopy — lets wf-recorder/grim/OBS/portals capture the screen.
     crate::screencopy::init(&display_handle);
-    let mut app = UdevApp { state, udev, display_handle: display_handle.clone() };
 
     // 7. Try to bring up the first connected connector. If this fails we
     //    keep going (still useful for VT switch / inputs / log), but you
@@ -445,7 +512,7 @@ pub fn run() -> Result<()> {
     // 8. Bind wl_display to EGL so Mesa clients (alacritty, firefox) get
     //    wl_drm and can hand us GPU-side buffers without falling back to
     //    SHM. Must happen after the renderer is created.
-    if let Some(dev) = app.udev.drm_devices.get_mut(&primary_gpu_node) {
+    if let Some(dev) = app.udev.as_mut().unwrap().drm_devices.get_mut(&primary_gpu_node) {
         match dev.renderer.egl_context().display().bind_wl_display(&display_handle) {
             Ok(_)  => tracing::info!("EGL hardware-acceleration enabled (wl_drm bound)"),
             Err(e) => tracing::warn!(?e, "failed to bind wl_display — EGL clients may not work"),
@@ -460,14 +527,14 @@ pub fn run() -> Result<()> {
     // is what actually gives clients hardware acceleration.
     {
         use smithay::wayland::dmabuf::DmabufFeedbackBuilder;
-        let formats: Option<Vec<_>> = app.udev.drm_devices.get(&primary_gpu_node)
+        let formats: Option<Vec<_>> = app.udev.as_mut().unwrap().drm_devices.get(&primary_gpu_node)
             .map(|dev| dev.renderer.egl_context().dmabuf_render_formats().iter().copied().collect());
         if let Some(formats) = formats {
             match DmabufFeedbackBuilder::new(primary_gpu_node.dev_id(), formats).build() {
                 Ok(feedback) => {
-                    let global = app.state.dmabuf_state
+                    let global = app.dmabuf_state
                         .create_global_with_default_feedback::<State>(&display_handle, &feedback);
-                    app.udev.dmabuf_global = Some(global);
+                    app.udev.as_mut().unwrap().dmabuf_global = Some(global);
                     tracing::info!("linux-dmabuf v4 global up — clients can use the GPU");
                 }
                 Err(e) => tracing::warn!(?e, "dmabuf feedback build failed; clients stay software-only"),
@@ -476,7 +543,7 @@ pub fn run() -> Result<()> {
     }
 
     // 9. Calloop sources.
-    loop_handle.insert_source(libinput_backend, move |event, _, app: &mut UdevApp| {
+    loop_handle.insert_source(libinput_backend, move |event, _, app: &mut State| {
         on_libinput_event(event, app);
     }).map_err(|e| anyhow::anyhow!("insert libinput source: {e:?}"))?;
 
@@ -485,12 +552,12 @@ pub fn run() -> Result<()> {
     // otherwise the kernel can't switch VTs (we hold master) and on resume the
     // input devices stay dead.
     let mut session_libinput = libinput_context.clone();
-    loop_handle.insert_source(session_notifier, move |event, _, app: &mut UdevApp| {
+    loop_handle.insert_source(session_notifier, move |event, _, app: &mut State| {
         match event {
             SessionEvent::PauseSession => {
                 tracing::info!("session paused (VT switched away)");
                 session_libinput.suspend();
-                for dev in app.udev.drm_devices.values_mut() {
+                for dev in app.udev.as_mut().unwrap().drm_devices.values_mut() {
                     dev.drm.pause();
                 }
             }
@@ -499,26 +566,26 @@ pub fn run() -> Result<()> {
                 if let Err(e) = session_libinput.resume() {
                     tracing::warn!(?e, "libinput resume failed");
                 }
-                for dev in app.udev.drm_devices.values_mut() {
+                for dev in app.udev.as_mut().unwrap().drm_devices.values_mut() {
                     if let Err(e) = dev.drm.activate(false) {
                         tracing::warn!(?e, "drm activate failed");
                     }
                 }
-                app.state.pending_redraw = true;
+                app.pending_redraw = true;
             }
         }
     }).map_err(|e| anyhow::anyhow!("insert session source: {e:?}"))?;
 
-    loop_handle.insert_source(udev_backend, move |event, _, app: &mut UdevApp| {
+    loop_handle.insert_source(udev_backend, move |event, _, app: &mut State| {
         on_udev_event(event, app);
     }).map_err(|e| anyhow::anyhow!("insert udev source: {e:?}"))?;
 
     // DRM page-flip / VBlank events drive rendering — one frame on each tick.
-    loop_handle.insert_source(drm_notifier, move |event, _, app: &mut UdevApp| {
+    loop_handle.insert_source(drm_notifier, move |event, _, app: &mut State| {
         match event {
             DrmEvent::VBlank(crtc) => {
                 // Acknowledge the just-finished frame, then queue the next.
-                if let Some(dev) = app.udev.drm_devices.get_mut(&primary_gpu_node) {
+                if let Some(dev) = app.udev.as_mut().unwrap().drm_devices.get_mut(&primary_gpu_node) {
                     if let Some(surf) = dev.surfaces.get_mut(&crtc) {
                         if let Err(e) = surf.compositor.frame_submitted() {
                             tracing::warn!(?e, "frame_submitted");
@@ -546,7 +613,7 @@ pub fn run() -> Result<()> {
     let mut ipc = crate::ipc::Server::bind(&socket_name)
         .context("start IPC server")?;
     let mut dh_for_socket = display_handle.clone();
-    loop_handle.insert_source(listening, move |stream, _, _app: &mut UdevApp| {
+    loop_handle.insert_source(listening, move |stream, _, _app: &mut State| {
         if let Err(e) = dh_for_socket.insert_client(stream, Arc::new(ClientState::default())) {
             tracing::warn!(?e, "insert client failed");
         }
@@ -555,15 +622,72 @@ pub fn run() -> Result<()> {
     // Wayland client dispatch — wake on the Display fd, run handlers.
     loop_handle.insert_source(
         Generic::new(display, Interest::READ, CalloopMode::Level),
-        |_, display, app: &mut UdevApp| {
+        |_, display, app: &mut State| {
             // SAFETY: the Generic source owns the Display for its lifetime
             // and we never drop or move it from inside the callback.
             unsafe {
-                let _ = display.get_mut().dispatch_clients(&mut app.state);
+                let _ = display.get_mut().dispatch_clients(&mut *app);
             }
             Ok(PostAction::Continue)
         },
     ).map_err(|e| anyhow::anyhow!("insert display source: {e:?}"))?;
+
+    // XWayland: bring up the Xserver so X11-only apps (Discord/Electron, which
+    // can't use vendiwm's native-Wayland path on NVIDIA) run. The server is a
+    // wayland client of the socket above; once it's Ready we attach the X11
+    // window manager (state.xwm) and export $DISPLAY so launchers reach it.
+    #[cfg(feature = "xwayland")]
+    {
+        use smithay::xwayland::{XWayland, XWaylandEvent, X11Wm};
+        use std::process::Stdio;
+        match XWayland::spawn(
+            &display_handle,
+            None,
+            std::iter::empty::<(String, String)>(),
+            true,
+            Stdio::null(),
+            Stdio::null(),
+            |_| (),
+        ) {
+            Ok((xwayland, xclient)) => {
+                let xwm_loop = loop_handle.clone();
+                let xwm_dh = display_handle.clone();
+                let res = loop_handle.insert_source(xwayland, move |event, _, state: &mut State| {
+                    match event {
+                        XWaylandEvent::Ready { x11_socket, display_number } => {
+                            match X11Wm::start_wm(
+                                xwm_loop.clone(),
+                                &xwm_dh,
+                                x11_socket,
+                                xclient.clone(),
+                            ) {
+                                Ok(wm) => {
+                                    state.xwm = Some(wm);
+                                    state.xdisplay = Some(display_number);
+                                    let disp = format!(":{display_number}");
+                                    // Children we spawn inherit our env; also push
+                                    // DISPLAY into the dbus/systemd activation env so
+                                    // bar- and dbus-launched apps pick it up too.
+                                    unsafe { std::env::set_var("DISPLAY", &disp); }
+                                    let _ = std::process::Command::new("dbus-update-activation-environment")
+                                        .args(["--systemd", &format!("DISPLAY={disp}")]).spawn();
+                                    let _ = std::process::Command::new("systemctl")
+                                        .args(["--user", "import-environment", "DISPLAY"]).spawn();
+                                    tracing::info!(display = %disp, "XWayland ready");
+                                }
+                                Err(e) => tracing::error!(?e, "X11Wm::start_wm failed"),
+                            }
+                        }
+                        XWaylandEvent::Error => tracing::warn!("XWayland crashed on startup"),
+                    }
+                });
+                if let Err(e) = res {
+                    tracing::error!(?e, "insert XWayland source failed");
+                }
+            }
+            Err(e) => tracing::error!(?e, "XWayland::spawn failed"),
+        }
+    }
 
     // Idle auto-lock: poll every few seconds; once input has been quiet for
     // longer than config.idle_lock_secs, fire `vendi-ctl lock` exactly once
@@ -571,33 +695,33 @@ pub fn run() -> Result<()> {
     {
         use smithay::reexports::calloop::timer::{Timer, TimeoutAction};
         const TICK: Duration = Duration::from_secs(5);
-        loop_handle.insert_source(Timer::from_duration(TICK), |_, _, app: &mut UdevApp| {
+        loop_handle.insert_source(Timer::from_duration(TICK), |_, _, app: &mut State| {
             // A playing video / presentation holding an idle inhibitor keeps
             // the session awake — bump the clock so the countdown restarts
             // fresh once the inhibitor goes away.
-            if app.state.idle_inhibited() {
-                app.state.last_activity = std::time::Instant::now();
+            if app.idle_inhibited() {
+                app.last_activity = std::time::Instant::now();
                 return TimeoutAction::ToDuration(TICK);
             }
             // Reap a screensaver launcher that exited without mapping a window
             // (self-skipped on battery / no video, or mpv failed) so a later
             // unrelated window isn't mistaken for the screensaver.
-            if app.state.screensaver.is_none() {
-                if let Some(child) = app.state.screensaver_child.as_mut() {
+            if app.screensaver.is_none() {
+                if let Some(child) = app.screensaver_child.as_mut() {
                     if matches!(child.try_wait(), Ok(Some(_))) {
-                        app.state.screensaver_child = None;
+                        app.screensaver_child = None;
                     }
                 }
             }
-            let idle = app.state.last_activity.elapsed().as_secs();
-            let lock_secs = app.state.config.idle_lock_secs;
+            let idle = app.last_activity.elapsed().as_secs();
+            let lock_secs = app.config.idle_lock_secs;
             if lock_secs > 0
-                && !app.state.auto_lock_fired
-                && !app.state.is_locked()
-                && !app.state.vlock
+                && !app.auto_lock_fired
+                && !app.is_locked()
+                && !app.vlock
                 && idle >= lock_secs
             {
-                app.state.auto_lock_fired = true;
+                app.auto_lock_fired = true;
                 tracing::info!(idle_secs = lock_secs, "idle auto-lock");
                 if let Err(e) = std::process::Command::new("sh")
                     .arg("-c").arg("vendi-ctl lock").spawn()
@@ -608,29 +732,29 @@ pub fn run() -> Result<()> {
             // Video screensaver: fires before screen-off. The launcher itself
             // skips on battery / when no video is set, so the compositor can
             // arm it unconditionally. One spawn per idle stretch (input resets).
-            let saver_secs = app.state.config.idle_screensaver_secs;
+            let saver_secs = app.config.idle_screensaver_secs;
             if saver_secs > 0
-                && !app.state.screensaver_fired
-                && app.state.screensaver_child.is_none()
-                && !app.state.is_locked()
-                && !app.state.vlock
-                && !app.state.screen_off
+                && !app.screensaver_fired
+                && app.screensaver_child.is_none()
+                && !app.is_locked()
+                && !app.vlock
+                && !app.screen_off
                 && idle >= saver_secs
             {
-                app.state.screensaver_fired = true;
+                app.screensaver_fired = true;
                 match std::process::Command::new("vendi-screensaver").arg("start").spawn() {
                     Ok(child) => {
-                        app.state.screensaver_child = Some(child);
+                        app.screensaver_child = Some(child);
                         tracing::info!(idle_secs = saver_secs, "screensaver started");
                     }
                     Err(e) => tracing::warn!(?e, "screensaver spawn failed"),
                 }
             }
-            let off_secs = app.state.config.idle_screen_off_secs;
-            if off_secs > 0 && !app.state.screen_off && idle >= off_secs {
+            let off_secs = app.config.idle_screen_off_secs;
+            if off_secs > 0 && !app.screen_off && idle >= off_secs {
                 // No point playing video to a screen that's about to go dark.
-                app.state.dismiss_screensaver();
-                app.state.screen_off = true;
+                app.dismiss_screensaver();
+                app.screen_off = true;
                 sleep_outputs(app);
             }
             TimeoutAction::ToDuration(TICK)
@@ -652,19 +776,29 @@ pub fn run() -> Result<()> {
     event_loop.run(Duration::from_millis(16), &mut app, move |app| {
         // Per-tick housekeeping: drain dmabuf imports, refresh space damage
         // bookkeeping, flush queued events out to clients.
-        app.state.space.refresh();
-        app.state.popups.cleanup();
+        app.space.refresh();
+        app.popups.cleanup();
 
         // Pump the IPC server: deliver queued events, answer requests.
-        for ev in app.state.pending_ipc_events.drain(..).collect::<Vec<_>>() {
+        for ev in app.pending_ipc_events.drain(..).collect::<Vec<_>>() {
             ipc.emit(ev);
         }
-        ipc.poll(&mut app.state);
+        ipc.poll(&mut *app);
+
+        // A live reload may have changed a monitor's mode/refresh — reprogram
+        // the DRM surface in place so Hz/resolution take effect without a
+        // session restart (brief blackout during the modeset is expected).
+        if app.pending_output_modes {
+            app.pending_output_modes = false;
+            apply_output_modes(app);
+        }
 
 
-        let pending: Vec<_> = app.state.pending_dmabuf_imports.drain(..).collect();
+        let pending: Vec<_> = app.pending_dmabuf_imports.drain(..).collect();
         if !pending.is_empty() {
-            if let Some(dev) = app.udev.drm_devices.get_mut(&app.udev.primary_gpu) {
+            let udev = app.udev.as_mut().unwrap();
+            let primary_gpu = udev.primary_gpu;
+            if let Some(dev) = udev.drm_devices.get_mut(&primary_gpu) {
                 for (dmabuf, notifier) in pending {
                     if dev.renderer.import_dmabuf(&dmabuf, None).is_ok() {
                         let _ = notifier.successful::<State>();
@@ -678,13 +812,14 @@ pub fn run() -> Result<()> {
         // Damage-driven render. VBlank already re-renders on its own, but the
         // first frame is empty (no clients yet) so no page-flip → no VBlank →
         // render loop stalls. This restarts it whenever a client commits.
-        if app.state.pending_redraw {
-            app.state.pending_redraw = false;
-            let crtcs: Vec<_> = app.udev.drm_devices.get(&app.udev.primary_gpu)
+        if app.pending_redraw {
+            app.pending_redraw = false;
+            let primary_gpu = app.udev.as_ref().unwrap().primary_gpu;
+            let crtcs: Vec<_> = app.udev.as_ref().unwrap().drm_devices.get(&primary_gpu)
                 .map(|d| d.surfaces.keys().copied().collect())
                 .unwrap_or_default();
             for crtc in crtcs {
-                if let Err(e) = render_surface(app, app.udev.primary_gpu, crtc) {
+                if let Err(e) = render_surface(app, primary_gpu, crtc) {
                     tracing::trace!(?e, "tick render_surface");
                 }
             }
@@ -692,7 +827,7 @@ pub fn run() -> Result<()> {
 
         let _ = display_handle_tick.flush_clients();
 
-        if app.state.quit_requested {
+        if app.quit_requested {
             tracing::info!("quit requested, stopping event loop");
             loop_signal.stop();
         }
@@ -720,6 +855,10 @@ fn build_state(
     let xdg_shell_state      = XdgShellState::new::<State>(dh);
     let shm_state            = ShmState::new::<State>(dh, shm_formats);
     let data_device_state    = DataDeviceState::new::<State>(dh);
+    // cursor-shape-v1: lets clients request named cursor shapes (hand, text,
+    // wait…) which arrive via SeatHandler::cursor_image. Delegated by the
+    // blanket delegate_dispatch2!(State); the GlobalId need not be retained.
+    let _ = smithay::wayland::cursor_shape::CursorShapeManagerState::new::<State>(dh);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(dh);
     let layer_shell_state    = WlrLayerShellState::new::<State>(dh);
     let session_lock_state   = smithay::wayland::session_lock::SessionLockManagerState::new::<State, _>(dh, |_| true);
@@ -735,7 +874,7 @@ fn build_state(
 
     let config = crate::config::Config::load().unwrap_or_else(|e| {
         tracing::warn!(?e, "config load failed; using empty keybinds");
-        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, idle_screensaver_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, outputs: Vec::new() }
+        crate::config::Config { keybinds: Default::default(), keybinds_pretty: Default::default(), theme: Default::default(), idle_lock_secs: 0, idle_screen_off_secs: 0, idle_screensaver_secs: 0, kb_layout: "us".into(), kb_variant: String::new(), kb_options: String::new(), repeat_delay: 200, repeat_rate: 25, natural_scroll: None, tap_to_click: None, accel_speed: None, disable_while_typing: None, focus_follows_mouse: false, outputs: Vec::new(), window_rules: Vec::new() }
     });
 
     let mut seat_state = SeatState::new();
@@ -753,7 +892,20 @@ fn build_state(
     // State::touch_down) so every desktop app — not just touch-aware ones —
     // gets tap=click, drag, long-press=right-click, and Super+drag to move.
 
+    #[cfg(feature = "xwayland")]
+    let xwayland_shell_state =
+        smithay::wayland::xwayland_shell::XWaylandShellState::new::<State>(dh);
+
     Ok(State {
+        display_handle: dh.clone(),
+        pending_output_modes: false,
+        #[cfg(feature = "xwayland")]
+        xwayland_shell_state,
+        #[cfg(feature = "xwayland")]
+        xwm: None,
+        #[cfg(feature = "xwayland")]
+        xdisplay: None,
+        udev: None,
         compositor_state,
         xdg_shell_state,
         shm_state,
@@ -809,6 +961,7 @@ fn build_state(
         last_geos: HashMap::new(),
         config,
         pointer_location:       (0.0, 0.0).into(),
+        cursor_status:          smithay::input::pointer::CursorImageStatus::default_named(),
         pending_dmabuf_imports: Vec::new(),
         pending_ipc_events:     Vec::new(),
         pending_redraw:         true,
@@ -833,10 +986,19 @@ pub struct DeviceState {
     pub gbm:        GbmDevice<DrmDeviceFd>,
     pub renderer:   GlesRenderer,
     pub gpu_path:   PathBuf,
+    /// NVIDIA proprietary driver: its DrmCompositor won't PRESENT a wallpaper
+    /// bloom (an in-place disc OR a fresh-buffer-per-frame offscreen composite)
+    /// — both render but never reach the screen. So NVIDIA gets the geometry
+    /// slide instead; Mesa (AMD/Intel) gets the circular bloom.
+    pub is_nvidia:  bool,
     pub connectors: Vec<connector::Info>,
     pub surfaces:   HashMap<crtc::Handle, SurfaceState>,
-    /// XCursor-backed pointer image. Cloned each frame into the render list.
+    /// XCursor-backed default pointer (plain arrow). Used while locked and as
+    /// the fallback shape.
     pub cursor:     Cursor,
+    /// Lazily-loaded themed cursors per requested shape (hand, I-beam, wait,
+    /// resize…), so we don't re-parse the xcursor file every frame.
+    pub named_cursors: HashMap<smithay::input::pointer::CursorIcon, Cursor>,
     /// Rounded-corner texture shader (applied per window element).
     pub rounded_prog: GlesTexProgram,
     /// Rounded border-ring pixel shader.
@@ -900,6 +1062,9 @@ pub struct SurfaceState {
     pub lock_backdrop: Option<(GlesTexture, GlesTexture, Option<std::time::Instant>)>,
     /// After unlock: the blurred backdrop melting away over the live desktop.
     pub lock_fade: Option<(GlesTexture, std::time::Instant)>,
+    /// Session-start fade-in clock: set on this output's first rendered frame,
+    /// then the desktop eases up from black over ~500ms so it doesn't snap in.
+    pub start_fade: Option<std::time::Instant>,
     /// Which connector drives this surface (hotplug bookkeeping).
     pub connector:  connector::Handle,
     /// The mode we set — a different preferred mode on rescan means the
@@ -920,6 +1085,15 @@ impl UdevData {
         // 2. DrmDevice — atomic KMS in modern mode.
         let (drm, notifier) = DrmDevice::new(device_fd.clone(), true)
             .map_err(|e| anyhow::anyhow!("DrmDevice::new: {e:?}"))?;
+
+        // Driver name decides the wallpaper transition (see is_nvidia doc).
+        let is_nvidia = {
+            use smithay::reexports::drm::Device as _;
+            device_fd.get_driver().ok()
+                .map(|d| d.name().to_string_lossy().to_lowercase().contains("nvidia"))
+                .unwrap_or(false)
+        };
+        tracing::info!(?path, is_nvidia, "DRM driver probed");
 
         // 3. GbmDevice on the same fd — used for buffer allocation that
         //    DRM scanout + EGL can consume.
@@ -995,9 +1169,11 @@ impl UdevData {
             gbm,
             renderer,
             gpu_path: path.clone(),
+            is_nvidia,
             connectors,
             surfaces: HashMap::new(),
             cursor:   Cursor::load(),
+            named_cursors: HashMap::new(),
             rounded_prog,
             border_prog,
             blur_prog,
@@ -1048,10 +1224,69 @@ fn pick_mode(
     connector.modes().get(idx).copied()
 }
 
+/// Reprogram any output whose configured mode/refresh differs from what its DRM
+/// surface is currently running. Driven by `vendi-ctl output mode` → reload →
+/// the `pending_output_modes` flag, so Hz/resolution changes hot-reload with
+/// just a brief blackout (the modeset) instead of a session restart.
+fn apply_output_modes(app: &mut State) {
+    // Disjoint field borrows: the DRM devices and the output config are read
+    // together inside the loop.
+    let State { udev, config, .. } = &mut *app;
+    let udev = udev.as_mut().unwrap();
+    let mut changed = false;
+    for device in udev.drm_devices.values_mut() {
+        let crtcs: Vec<crtc::Handle> = device.surfaces.keys().copied().collect();
+        for crtc in crtcs {
+            let (conn_handle, cur_mode) = {
+                let s = &device.surfaces[&crtc];
+                (s.connector, s.mode)
+            };
+            let Ok(conn) = device.drm.get_connector(conn_handle, false) else { continue };
+            let name = format!("{:?}-{}", conn.interface(), conn.interface_id());
+            let want = config.output_cfg(&name).and_then(|c| c.mode);
+            let Some(new_mode) = pick_mode(&conn, want) else { continue };
+            // Compare size + refresh; nothing to do if already running it.
+            if new_mode.size() == cur_mode.size()
+                && new_mode.vrefresh() == cur_mode.vrefresh() {
+                continue;
+            }
+            let surface = device.surfaces.get_mut(&crtc).unwrap();
+            match surface.compositor.use_mode(new_mode) {
+                Ok(()) => {
+                    surface.mode = new_mode;
+                    let wl_mode = WlMode::from(new_mode);
+                    surface.output.change_current_state(Some(wl_mode), None, None, None);
+                    surface.output.set_preferred(wl_mode);
+                    // Re-render the wallpaper at the (possibly) new size.
+                    let (mw, mh) = new_mode.size();
+                    surface.wallpaper = crate::render::wallpaper_buffer(
+                        mw as i32, mh as i32,
+                        config.theme.wallpaper.as_deref(),
+                        config.theme.background,
+                        config.theme.accent,
+                    );
+                    smithay::desktop::layer_map_for_output(&surface.output).arrange();
+                    tracing::info!(
+                        connector = %name,
+                        mode = ?(new_mode.size(), new_mode.vrefresh()),
+                        "live mode change",
+                    );
+                    changed = true;
+                }
+                Err(e) => tracing::warn!(?e, connector = %name, "use_mode failed"),
+            }
+        }
+    }
+    if changed {
+        app.relayout();
+        app.pending_redraw = true;
+    }
+}
+
 /// Bring up every connected connector at startup. Returns the CRTCs so the
 /// caller can kick their first frames.
-fn initial_surface_setup(app: &mut UdevApp, node: DrmNode) -> Result<Vec<crtc::Handle>> {
-    let connected: Vec<connector::Info> = app.udev.drm_devices.get(&node)
+fn initial_surface_setup(app: &mut State, node: DrmNode) -> Result<Vec<crtc::Handle>> {
+    let connected: Vec<connector::Info> = app.udev.as_mut().unwrap().drm_devices.get(&node)
         .ok_or_else(|| anyhow::anyhow!("device not found: {node:?}"))?
         .connectors.iter()
         .filter(|c| c.state() == connector::State::Connected)
@@ -1070,14 +1305,14 @@ fn initial_surface_setup(app: &mut UdevApp, node: DrmNode) -> Result<Vec<crtc::H
     }
     // Start the pointer at the centre of the first screen so the cursor is
     // visible before the user has nudged the mouse.
-    if let Some(geo) = app.state.space.outputs().next()
-        .and_then(|o| app.state.space.output_geometry(o))
+    if let Some(geo) = app.space.outputs().next()
+        .and_then(|o| app.space.output_geometry(o))
     {
-        app.state.pointer_location =
+        app.pointer_location =
             (geo.loc.x as f64 + geo.size.w as f64 / 2.0,
              geo.loc.y as f64 + geo.size.h as f64 / 2.0).into();
     }
-    app.state.relayout();
+    app.relayout();
     Ok(crtcs)
 }
 
@@ -1085,17 +1320,22 @@ fn initial_surface_setup(app: &mut UdevApp, node: DrmNode) -> Result<Vec<crtc::H
 /// DrmSurface + DrmCompositor + a smithay Output, and map the Output into
 /// the Space to the right of everything already there.
 fn connect_connector(
-    app: &mut UdevApp,
+    app: &mut State,
     node: DrmNode,
     connector: &connector::Info,
 ) -> Result<crtc::Handle> {
-    let UdevApp { state, udev, display_handle } = app;
+    // Capture the Copy scalar up front, then split State into disjoint field
+    // borrows so `device` (a deep borrow of state.udev) can coexist with the
+    // space / config / display_handle the rest of the function touches.
+    let wallpaper_gen = app.wallpaper_gen;
+    let State { udev, config, space, display_handle, .. } = &mut *app;
+    let udev = udev.as_mut().unwrap();
     let device = udev.drm_devices.get_mut(&node)
         .ok_or_else(|| anyhow::anyhow!("device not found: {node:?}"))?;
 
     // User arrangement for this connector (scale / position / mode), if any.
     let output_name = format!("{:?}-{}", connector.interface(), connector.interface_id());
-    let ocfg = state.config.output_cfg(&output_name).cloned();
+    let ocfg = config.output_cfg(&output_name).cloned();
 
     let drm_mode = pick_mode(connector, ocfg.as_ref().and_then(|c| c.mode))
         .ok_or_else(|| anyhow::anyhow!("connector has no modes"))?;
@@ -1136,8 +1376,8 @@ fn connect_connector(
         },
     );
     // Position: configured, else to the right of everything already mapped.
-    let next_x = state.space.outputs()
-        .filter_map(|o| state.space.output_geometry(o))
+    let next_x = space.outputs()
+        .filter_map(|o| space.output_geometry(o))
         .map(|g| g.loc.x + g.size.w)
         .max()
         .unwrap_or(0);
@@ -1158,7 +1398,7 @@ fn connect_connector(
     );
     output.set_preferred(wl_mode);
     let global = output.create_global::<State>(display_handle);
-    state.space.map_output(&output, pos);
+    space.map_output(&output, pos);
 
     // DrmCompositor wires the renderer to scanout. Cursor size 64×64 is the
     // standard everyone supports.
@@ -1194,20 +1434,21 @@ fn connect_connector(
     let wallpaper = crate::render::wallpaper_buffer(
         mode_size.0 as i32,
         mode_size.1 as i32,
-        state.config.theme.wallpaper.as_deref(),
-        state.config.theme.background,
-        state.config.theme.accent,
+        config.theme.wallpaper.as_deref(),
+        config.theme.background,
+        config.theme.accent,
     );
 
     device.surfaces.insert(crtc, SurfaceState {
         output,
         compositor,
         wallpaper,
-        wallpaper_gen: state.wallpaper_gen,
+        wallpaper_gen,
         old_wallpaper: None,
-        wallpaper_src: state.config.theme.wallpaper.clone(),
+        wallpaper_src: config.theme.wallpaper.clone(),
         lock_backdrop: None,
         lock_fade: None,
+        start_fade: None,
         connector: connector.handle(),
         mode: drm_mode,
         global,
@@ -1218,17 +1459,17 @@ fn connect_connector(
 /// React to a udev "changed" event: re-probe connectors, tear down surfaces
 /// whose monitor vanished or switched resolution, bring up new ones, then
 /// re-pack the remaining outputs left-to-right and keep the pointer inside.
-fn rescan_connectors(app: &mut UdevApp, node: DrmNode) {
+fn rescan_connectors(app: &mut State, node: DrmNode) {
     // Snapshot the configured arrangement up front so the mode-stale check
     // below can match against the same mode connect_connector would pick
     // (otherwise a configured non-preferred mode looks "changed" every event
     // and thrashes the surface). Owned, so no borrow tangle with `device`.
-    let cfg_outputs = app.state.config.outputs.clone();
+    let cfg_outputs = app.config.outputs.clone();
     let cfg_mode = |name: &str| cfg_outputs.iter().find(|o| o.name == name).and_then(|o| o.mode);
 
     // 1. Re-probe.
     let (stale, fresh): (Vec<crtc::Handle>, Vec<connector::Info>) = {
-        let Some(device) = app.udev.drm_devices.get_mut(&node) else { return };
+        let Some(device) = app.udev.as_mut().unwrap().drm_devices.get_mut(&node) else { return };
         let Ok(resources) = device.drm.resource_handles() else { return };
         let mut connectors = Vec::new();
         for c in resources.connectors() {
@@ -1261,10 +1502,10 @@ fn rescan_connectors(app: &mut UdevApp, node: DrmNode) {
     };
 
     for crtc in stale {
-        let Some(device) = app.udev.drm_devices.get_mut(&node) else { return };
+        let Some(device) = app.udev.as_mut().unwrap().drm_devices.get_mut(&node) else { return };
         if let Some(s) = device.surfaces.remove(&crtc) {
             tracing::info!(output = %s.output.name(), "DRM output down");
-            app.state.space.unmap_output(&s.output);
+            app.space.unmap_output(&s.output);
             app.display_handle.remove_global::<State>(s.global);
         }
     }
@@ -1282,9 +1523,9 @@ fn rescan_connectors(app: &mut UdevApp, node: DrmNode) {
     //    don't leave gaps the pointer could fall into.
     {
         // Snapshot (crtc, name, width) so we can consult the config (on
-        // app.state) without holding the device borrow across the loop.
+        // app) without holding the device borrow across the loop.
         let order: Vec<(crtc::Handle, String, i32)> = {
-            let Some(device) = app.udev.drm_devices.get(&node) else { return };
+            let Some(device) = app.udev.as_mut().unwrap().drm_devices.get(&node) else { return };
             let mut v: Vec<_> = device.surfaces.iter()
                 .map(|(c, s)| (*c, s.output.name(),
                     s.output.current_mode().map(|m| m.size.w).unwrap_or(0)))
@@ -1294,21 +1535,21 @@ fn rescan_connectors(app: &mut UdevApp, node: DrmNode) {
         };
         let mut x = 0;
         for (crtc, name, w) in order {
-            let cfg_pos = app.state.config.output_cfg(&name).and_then(|c| c.position);
+            let cfg_pos = app.config.output_cfg(&name).and_then(|c| c.position);
             let pos = cfg_pos.unwrap_or((x, 0));
             if cfg_pos.is_none() { x += w; }
-            if let Some(device) = app.udev.drm_devices.get(&node) {
+            if let Some(device) = app.udev.as_mut().unwrap().drm_devices.get(&node) {
                 if let Some(s) = device.surfaces.get(&crtc) {
                     s.output.change_current_state(None, None, None, Some(pos.into()));
-                    app.state.space.map_output(&s.output, pos);
+                    app.space.map_output(&s.output, pos);
                 }
             }
         }
     }
 
-    clamp_pointer(&mut app.state);
-    app.state.relayout();
-    app.state.pending_redraw = true;
+    clamp_pointer(&mut *app);
+    app.relayout();
+    app.pending_redraw = true;
 
     // Kick the first frame of any new surface so its VBlank loop starts.
     for crtc in new_crtcs {
@@ -1380,8 +1621,8 @@ fn copy_texture(
 
 /// Idle screen-off: power every output down via DPMS (DrmCompositor::clear
 /// disables the planes and sets DPMS off). Re-enabled by wake_outputs.
-fn sleep_outputs(app: &mut UdevApp) {
-    for device in app.udev.drm_devices.values_mut() {
+fn sleep_outputs(app: &mut State) {
+    for device in app.udev.as_mut().unwrap().drm_devices.values_mut() {
         for surface in device.surfaces.values_mut() {
             if let Err(e) = surface.compositor.clear() {
                 tracing::warn!(?e, "screen-off (clear) failed");
@@ -1393,8 +1634,8 @@ fn sleep_outputs(app: &mut UdevApp) {
 
 /// Wake every output back up: a fresh render + queue_frame re-enables DPMS
 /// and restarts the VBlank cycle.
-fn wake_outputs(app: &mut UdevApp) {
-    let targets: Vec<(DrmNode, crtc::Handle)> = app.udev.drm_devices.iter()
+fn wake_outputs(app: &mut State) {
+    let targets: Vec<(DrmNode, crtc::Handle)> = app.udev.as_mut().unwrap().drm_devices.iter()
         .flat_map(|(node, dev)| dev.surfaces.keys().map(move |c| (*node, *c)))
         .collect();
     for (node, crtc) in targets {
@@ -1405,25 +1646,88 @@ fn wake_outputs(app: &mut UdevApp) {
     tracing::info!("displays on (input woke them)");
 }
 
-fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Result<()> {
+/// Sloppy focus: if `focus-follows-mouse` is on, focus whatever window the
+/// pointer is now over. Guarded so it only re-focuses on an actual change (not
+/// every motion event) and never steals focus mid-drag, while locked, or over
+/// empty space / the bar (focus_window_at_cursor no-ops when there's no window).
+fn maybe_focus_follows_mouse(state: &mut State) {
+    if !state.config.focus_follows_mouse || state.drag.is_some() || state.vlock {
+        return;
+    }
+    let under = state.space.element_under(state.pointer_location).map(|(w, _)| w.clone());
+    if under.is_some() && under != state.focused_window() {
+        state.focus_window_at_cursor();
+    }
+}
+
+fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<()> {
     // Displays are powered off (idle DPMS). Don't render or queue frames —
     // that would re-enable the output. Waking happens on input.
-    if app.state.screen_off {
+    if app.screen_off {
         return Ok(());
     }
-    let UdevApp { state, udev, .. } = app;
-    let device = udev.drm_devices.get_mut(&node)
+    // ── whole-State work first ──────────────────────────────────────────────
+    // These borrow all of State (&mut self method calls); do them BEFORE we
+    // borrow the GPU device out of state.udev. After that point the body only
+    // touches state via disjoint *field* accesses (state.config, state.space,
+    // …), which coexist fine with the state.udev borrow `device` holds.
+
+    // Screensaver: once the dismiss fade-out finishes, kill mpv for real.
+    // While one is on screen, keep requesting redraws so the fade animates
+    // smoothly even when mpv's (software) frames trickle in slowly.
+    const SCREENSAVER_FADE_MS: f32 = 550.0;
+    if app.screensaver_closing
+        .map(|c| c.elapsed().as_secs_f32() * 1000.0 >= SCREENSAVER_FADE_MS)
+        .unwrap_or(false)
+    {
+        app.dismiss_screensaver();
+    }
+    // Only pump extra redraws while a fade is actually animating. Doing it for
+    // the whole screensaver lifetime busy-loops the compositor and starves
+    // mpv's (software) decode — that's what made fullscreen playback choppy.
+    // Steady-state playback rides mpv's own frame callbacks.
+    let fade_active = app.screensaver_closing.is_some()
+        || app.screensaver_t
+            .map(|t| t.elapsed().as_secs_f32() * 1000.0 < SCREENSAVER_FADE_MS)
+            .unwrap_or(false);
+    if fade_active {
+        app.pending_redraw = true;
+    }
+    // Touch long-press → right click. The 5s TICK timer is far too coarse, so
+    // poll per-frame: while a finger is held (pending), keep redrawing so we
+    // reach the ~450ms threshold, then touch_tick fires the synthetic click.
+    app.touch_tick();
+    if matches!(app.touch.as_ref().map(|t| t.phase), Some(crate::state::TouchPhase::Pending)) {
+        app.pending_redraw = true;
+    }
+    // Pre-compute the two read-only whole-State queries the render body needs;
+    // they can't run once `device` is borrowed from state.udev below. The
+    // overview layout is gated by the same "in overview, or still within the
+    // exit animation" window the body uses (see ov_layout / ov_exit).
+    let overview_layout_pre = {
+        const OVERVIEW_MS: f32 = 220.0;
+        let now = std::time::Instant::now();
+        let want = app.overview
+            || (now.duration_since(app.overview_t).as_secs_f32() * 1000.0) < OVERVIEW_MS;
+        if want { Some(app.overview_layout()) } else { None }
+    };
+    let is_locked_pre = app.is_locked();
+
+    let state = &mut *app;
+    let device = state.udev.as_mut().unwrap().drm_devices.get_mut(&node)
         .ok_or_else(|| anyhow::anyhow!("device not found"))?;
 
     // Split-borrow: hold renderer, surface, and cursor mutably at the same
     // time. They're distinct fields of DeviceState, so this is safe.
     let renderer = &mut device.renderer;
     let cursor   = &device.cursor;
+    let named_cursors = &mut device.named_cursors;
     let rounded_prog = device.rounded_prog.clone();
     let border_prog  = device.border_prog.clone();
     let blur_prog    = device.blur_prog.clone();
     let frost_prog   = device.frost_prog.clone();
-    let reveal_prog  = device.reveal_prog.clone();
+    let _reveal_prog  = device.reveal_prog.clone(); // (disc shader — kept for render_bloom)
+    let _is_nvidia    = device.is_nvidia;           // (wallpaper transition is now a unified fade)
     let blur_texs     = &mut device.blur_texs;
     let tex_stash     = &mut device.tex_stash;
     let focus_anim    = &mut device.focus_anim;
@@ -1432,64 +1736,40 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     let surface  = device.surfaces.get_mut(&crtc)
         .ok_or_else(|| anyhow::anyhow!("surface not found"))?;
 
-    // Screensaver: once the dismiss fade-out finishes, kill mpv for real.
-    // While one is on screen, keep requesting redraws so the fade animates
-    // smoothly even when mpv's (software) frames trickle in slowly.
-    const SCREENSAVER_FADE_MS: f32 = 550.0;
-    if state.screensaver_closing
-        .map(|c| c.elapsed().as_secs_f32() * 1000.0 >= SCREENSAVER_FADE_MS)
-        .unwrap_or(false)
-    {
-        state.dismiss_screensaver();
-    }
-    // Only pump extra redraws while a fade is actually animating. Doing it for
-    // the whole screensaver lifetime busy-loops the compositor and starves
-    // mpv's (software) decode — that's what made fullscreen playback choppy.
-    // Steady-state playback rides mpv's own frame callbacks.
-    let fade_active = state.screensaver_closing.is_some()
-        || state.screensaver_t
-            .map(|t| t.elapsed().as_secs_f32() * 1000.0 < SCREENSAVER_FADE_MS)
-            .unwrap_or(false);
-    if fade_active {
-        state.pending_redraw = true;
-    }
-
-    // Touch long-press → right click. The 5s TICK timer is far too coarse, so
-    // poll per-frame: while a finger is held (pending), keep redrawing so we
-    // reach the ~450ms threshold, then touch_tick fires the synthetic click.
-    state.touch_tick();
-    if matches!(state.touch.as_ref().map(|t| t.phase), Some(crate::state::TouchPhase::Pending)) {
-        state.pending_redraw = true;
-    }
-
     // Wallpaper changed over IPC: rebuild this output's buffer once, keep
     // the old one around for the bloom transition (reveal grows out of the
     // pointer — that's where the user clicked the thumbnail).
     if surface.wallpaper_gen != state.wallpaper_gen {
         let mode_size = surface.mode.size();
-        let fresh = crate::render::wallpaper_buffer(
-            mode_size.0 as i32,
-            mode_size.1 as i32,
-            state.config.theme.wallpaper.as_deref(),
-            state.config.theme.background,
-            state.config.theme.accent,
-        );
+        // Owned copies so the buffer build doesn't borrow `state` while `surface`
+        // (a borrow of state.udev) is held.
         let new_src = state.config.theme.wallpaper.clone();
-        if new_src == surface.wallpaper_src {
-            // Same image — a theme reload (e.g. the Dynamic theme regenerating
-            // right after a wallpaper switch) rebuilt the buffer. Swap it in
-            // silently and leave any in-flight reveal alone.
-            surface.wallpaper = fresh;
-        } else {
+        let bg = state.config.theme.background;
+        let accent = state.config.theme.accent;
+        let build = |src: Option<&str>| crate::render::wallpaper_buffer(
+            mode_size.0 as i32, mode_size.1 as i32, src, bg, accent,
+        );
+        if new_src != surface.wallpaper_src {
+            // Real wallpaper change → decode the new image and bloom it in from
+            // the switch point.
             let out_geo = state.space.output_geometry(&surface.output).unwrap_or_default();
             let cx = (state.pointer_location.x - out_geo.loc.x as f64)
                 .clamp(0.0, out_geo.size.w as f64) as f32;
             let cy = (state.pointer_location.y - out_geo.loc.y as f64)
                 .clamp(0.0, out_geo.size.h as f64) as f32;
-            let old = std::mem::replace(&mut surface.wallpaper, fresh);
+            let old = std::mem::replace(&mut surface.wallpaper, build(new_src.as_deref()));
             surface.old_wallpaper = Some((old, std::time::Instant::now(), (cx, cy)));
             surface.wallpaper_src = new_src;
+        } else if new_src.is_none() {
+            // Gradient theme (no image): bg/accent may have changed on a reload,
+            // so rebuild the generated gradient — cheap, no image decode.
+            surface.wallpaper = build(None);
         }
+        // else: same image src — the buffer is already correct, so SKIP the
+        // rebuild. A Dynamic theme regenerating its palette right after a
+        // wallpaper switch bumps the gen again with the same image; re-decoding
+        // that hi-res image every frame is what made the reveal stutter and snap
+        // (it ate the 700ms wall-clock the bloom animates against).
         surface.wallpaper_gen = state.wallpaper_gen;
     }
 
@@ -1599,13 +1879,9 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     const OVERVIEW_MS: f32 = 220.0;
     // The exit animation still needs the layout (hidden thumbnails fade out
     // at their cells), so keep it around for one morph span after closing.
-    let ov_exit = !state.overview
-        && (now.duration_since(state.overview_t).as_secs_f32() * 1000.0) < OVERVIEW_MS;
-    let ov_layout = if state.overview || ov_exit {
-        Some(state.overview_layout())
-    } else {
-        None
-    };
+    // Pre-computed before the GPU device borrow (whole-State &self call); its
+    // gate (in overview, or within the exit-animation window) matches here.
+    let ov_layout = overview_layout_pre;
     let overview_cells: Vec<(smithay::desktop::Window, smithay::utils::Rectangle<i32, smithay::utils::Logical>)> =
         if state.overview {
             ov_layout.as_ref().map(|l| {
@@ -1699,22 +1975,51 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         Vec::with_capacity(upper_layer_elems.len() + lower_layer_elems.len() + 16);
 
     // Cursor first — render_frame treats `elements` as front-to-back, so
-    // index 0 is drawn on top of everything else.
-    let pointer_phys = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
-        (state.pointer_location.x - out_loc.x as f64 - cursor.hotspot.0 as f64) * sf,
-        (state.pointer_location.y - out_loc.y as f64 - cursor.hotspot.1 as f64) * sf,
-    ));
+    // index 0 is drawn on top of everything else. Honour the client-requested
+    // shape: a client-drawn surface, a hidden cursor, or a themed named shape
+    // (hand/I-beam/wait/resize…); fall back to the plain arrow.
     if !locked {
-        if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
-            renderer,
-            pointer_phys,
-            &cursor.buffer,
-            None,
-            None,
-            None,
-            Kind::Cursor,
-        ) {
-            elements.push(OutputRenderElements::Memory(elem));
+        use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+        match &state.cursor_status {
+            CursorImageStatus::Hidden => {}
+            CursorImageStatus::Surface(surf) => {
+                // Client renders its own cursor into this surface; the hotspot
+                // lives in the surface's cursor attributes.
+                let hotspot = smithay::wayland::compositor::with_states(surf, |states| {
+                    states.data_map
+                        .get::<smithay::input::pointer::CursorImageSurfaceData>()
+                        .map(|d| d.lock().unwrap().hotspot)
+                        .unwrap_or_default()
+                });
+                let loc = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
+                    ((state.pointer_location.x - out_loc.x as f64 - hotspot.x as f64) * sf) as i32,
+                    ((state.pointer_location.y - out_loc.y as f64 - hotspot.y as f64) * sf) as i32,
+                ));
+                elements.extend(
+                    smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
+                        _, WaylandSurfaceRenderElement<GlesRenderer>,
+                    >(renderer, surf, loc, scale, 1.0, Kind::Cursor)
+                    .into_iter()
+                    .map(OutputRenderElements::Layer),
+                );
+            }
+            status => {
+                let icon = match status {
+                    CursorImageStatus::Named(i) => *i,
+                    _ => CursorIcon::Default,
+                };
+                let cur = named_cursors.entry(icon)
+                    .or_insert_with(|| crate::cursor::Cursor::load_icon(icon));
+                let loc = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
+                    (state.pointer_location.x - out_loc.x as f64 - cur.hotspot.0 as f64) * sf,
+                    (state.pointer_location.y - out_loc.y as f64 - cur.hotspot.1 as f64) * sf,
+                ));
+                if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer, loc, &cur.buffer, None, None, None, Kind::Cursor,
+                ) {
+                    elements.push(OutputRenderElements::Memory(elem));
+                }
+            }
         }
     }
     // Screenshots skip everything up to here (i.e. the cursor).
@@ -1802,7 +2107,11 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // its own edge; both share the window's animation transform (fade +
     // scale around the center, glide between tile slots).
     let border_w = theme.border;
-    let focused_surf = state.seat.get_keyboard().and_then(|k| k.current_focus());
+    // The keyboard-focused surface (KbFocus → its wl_surface) — drives the
+    // accent border ring on the active window.
+    let focused_surf = state.seat.get_keyboard()
+        .and_then(|k| k.current_focus())
+        .and_then(|f| f.wl_surface());
     let fullscreen = state.workspaces.active_ref().fullscreen.clone();
     let stacked: Vec<_> = if locked { Vec::new() } else { state.space.elements().cloned().collect() };
     let mut live_ids: Vec<u32> = Vec::with_capacity(stacked.len());
@@ -2139,7 +2448,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     //
     // Wallpaper switch: the new image blooms over the old one — a feathered
     // disc growing from the switch point until it swallows the far corner.
-    const REVEAL_MS: f32 = 700.0;
+    const REVEAL_MS: f32 = 900.0;
     let reveal = surface.old_wallpaper.as_ref().and_then(|(_, t0, c)| {
         let p = t0.elapsed().as_millis() as f32 / REVEAL_MS;
         (p < 1.0).then_some((ease_out(p), *c))
@@ -2156,39 +2465,36 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         (wp_mode.w as f64, wp_mode.h as f64).into(),
     ));
 
-    if let Some((p, (cx, cy))) = reveal {
-        // Radius that reaches the farthest screen corner from the center.
+    if let Some((p, _center)) = reveal {
         let osize = state.space.output_geometry(&surface.output)
             .map(|g| g.size)
             .unwrap_or_else(|| (1, 1).into());
-        let far_x = cx.max(osize.w as f32 - cx);
-        let far_y = cy.max(osize.h as f32 - cy);
-        let max_r = (far_x * far_x + far_y * far_y).sqrt();
-        // The buffer is built at physical mode size; tell the element to fill
-        // the logical output so the render scale maps it back to full physical.
+        let center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
+            ((osize.w as f64) * sf / 2.0) as i32, ((osize.h as f64) * sf / 2.0) as i32,
+        ));
+        // CROSS-FADE: the new wallpaper fades in (alpha 0→1) over the old one,
+        // which sits full underneath — a soft dissolve, far less jarring than a
+        // wipe for the frequent day→dusk→night transitions. The catch: a pure
+        // alpha change on a static fullscreen buffer NEVER reaches the NVIDIA
+        // display (the whole reason the old disc-bloom froze). So the incoming
+        // wallpaper also rides a barely-perceptible zoom (1.03→1.0); the scale
+        // is a geometry change every frame, which forces the page-flip, and the
+        // alpha rides along. Reads as a gentle fade on every GPU.
+        // NEW first = drawn on top (elements are front-to-back, index 0 topmost).
+        let fade_a = (wallpaper_alpha * p as f32).clamp(0.0, 1.0);
+        let zoom = 1.03 - 0.03 * p as f64;
         if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
-            renderer,
-            (0.0, 0.0),
-            &surface.wallpaper,
-            Some(wallpaper_alpha),
-            wp_src,
-            Some(osize),
-            Kind::Unspecified,
+            renderer, (0.0, 0.0), &surface.wallpaper, Some(fade_a), wp_src, Some(osize), Kind::Unspecified,
         ) {
-            // Reveal shader works in physical dst pixels → scale the disc.
-            elements.push(OutputRenderElements::Reveal(crate::render::RevealElement::new(
-                elem,
-                reveal_prog.clone(),
-                ((cx as f64 * sf) as f32, (cy as f64 * sf) as f32),
-                p * max_r * sf as f32,
-            )));
+            elements.push(OutputRenderElements::Wallpaper(
+                RescaleRenderElement::from_element(elem, center, zoom)));
         }
-        // The outgoing wallpaper sits underneath, untouched.
         if let Some((old, ..)) = &surface.old_wallpaper {
             if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
                 renderer, (0.0, 0.0), old, Some(wallpaper_alpha), wp_src, Some(osize), Kind::Unspecified,
             ) {
-                elements.push(OutputRenderElements::Memory(elem));
+                elements.push(OutputRenderElements::Wallpaper(
+                    RescaleRenderElement::from_element(elem, center, 1.0)));
             }
         }
     } else if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
@@ -2221,7 +2527,7 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
     // client's lock surface, and a sharp→blurred crossfade of the snapshot.
     // No live desktop surface reaches a locked frame; the lock is confirmed
     // only after the first locked frame is queued, per ext-session-lock.
-    if state.is_locked() {
+    if is_locked_pre {
         let out_size = state.space.output_geometry(&surface.output)
             .map(|g| g.size)
             .unwrap_or_else(|| (1, 1).into());
@@ -2556,11 +2862,45 @@ fn render_surface(app: &mut UdevApp, node: DrmNode, crtc: crtc::Handle) -> Resul
         state.pending_redraw = true;
     }
 
+    // Session-start fade-in: on this output's first frames, ease the whole
+    // desktop up from black so it doesn't all snap in at once. Inserted last
+    // (topmost, above the cursor) and AFTER screencopy so captures aren't
+    // darkened. Set the clock lazily on the first rendered frame.
+    let mut fading = false;
+    {
+        const FADE_IN_MS: f32 = 500.0;
+        let fade_t = *surface.start_fade.get_or_insert(now);
+        let fp = fade_t.elapsed().as_secs_f32() * 1000.0 / FADE_IN_MS;
+        if fp < 1.0 {
+            fading = true;
+            let a = (1.0 - ease_out(fp)).clamp(0.0, 1.0);
+            let phys = surface.output.current_mode().map(|m| m.size).unwrap_or((1, 1).into());
+            elements.insert(0, OutputRenderElements::Solid(
+                smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
+                    smithay::backend::renderer::element::Id::new(),
+                    smithay::utils::Rectangle::from_size(phys),
+                    0usize, // commit counter — fresh element each fade frame
+                    Color32F::new(0.0, 0.0, 0.0, a),
+                    Kind::Unspecified,
+                ),
+            ));
+            state.pending_redraw = true;
+        }
+    }
+
     // Theme background (visible only where the wallpaper doesn't cover).
     let clear = Color32F::new(
         theme.background[0], theme.background[1], theme.background[2], 1.0,
     );
-    let res = surface.compositor.render_frame(renderer, &elements, clear, FrameFlags::DEFAULT)
+    // Wallpaper reveal + session fade composite a custom shader / alpha disc over
+    // the wallpaper. The default frame flags let the DrmCompositor promote the
+    // fullscreen opaque wallpaper straight to a hardware scanout plane — which
+    // BYPASSES that GL compositing, so on NVIDIA the reveal froze and "popped"
+    // to the final image while the GL render (and screenshots) were correct.
+    // Force full GL composite (no plane scanout) for the duration of either.
+    let transitioning = fading || surface.old_wallpaper.is_some();
+    let frame_flags = if transitioning { FrameFlags::empty() } else { FrameFlags::DEFAULT };
+    let res = surface.compositor.render_frame(renderer, &elements, clear, frame_flags)
         .map_err(|e| anyhow::anyhow!("render_frame: {e:?}"))?;
     // Nothing changed → nothing to flip. Queuing anyway just earns an
     // EmptyFrame error from DRM (and a warn in the log) every idle frame.
@@ -2618,18 +2958,18 @@ fn send_frames_surface_tree(
 
 // ── event source handlers ─────────────────────────────────────────────────────
 
-fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp) {
+fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
     // Any real input resets the idle clock (device add/remove isn't activity)
     // and wakes the displays if they were powered off.
     if !matches!(event, InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }) {
-        app.state.last_activity = std::time::Instant::now();
-        app.state.auto_lock_fired = false;
+        app.last_activity = std::time::Instant::now();
+        app.auto_lock_fired = false;
         // Re-arm the screensaver for the next idle stretch. Without this, a run
         // that self-skipped (on battery / no video set) leaves screensaver_fired
         // stuck true and the screensaver never fires again.
-        app.state.screensaver_fired = false;
-        if app.state.screen_off {
-            app.state.screen_off = false;
+        app.screensaver_fired = false;
+        if app.screen_off {
+            app.screen_off = false;
             wake_outputs(app);
         }
         // A running screensaver starts fading out on the first real input.
@@ -2638,21 +2978,29 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
         // down" auto-repeating into the focused app. So swallow only pointer /
         // touch (no repeat) — a dismissing click/tap shouldn't also land on
         // whatever's underneath; a dismissing keystroke harmlessly does.
-        if app.state.begin_screensaver_dismiss()
+        if app.begin_screensaver_dismiss()
             && !matches!(event, InputEvent::Keyboard { .. })
         {
             return;
         }
     }
-    let state = &mut app.state;
+    let state = &mut *app;
     match event {
         InputEvent::DeviceAdded { mut device } => {
-            // Touchpad defaults (anything with tap support): tap-to-click,
-            // tap-and-drag, natural scrolling. Mice keep traditional scroll.
+            let cfg = &state.config;
+            // Touchpad (anything with tap support): tap-to-click, tap-and-drag,
+            // disable-while-typing — each overridable from the `input` block.
             if device.config_tap_finger_count() > 0 {
-                let _ = device.config_tap_set_enabled(true);
+                let _ = device.config_tap_set_enabled(cfg.tap_to_click.unwrap_or(true));
                 let _ = device.config_tap_set_drag_enabled(true);
-                let _ = device.config_scroll_set_natural_scroll_enabled(true);
+                let _ = device.config_dwt_set_enabled(cfg.disable_while_typing.unwrap_or(true));
+            }
+            // Natural ("reverse") scrolling defaults on everywhere (touchpad AND
+            // mouse wheel) so content tracks the fingers/wheel like macOS;
+            // `natural-scroll #false` opts out. No-op where unsupported.
+            let _ = device.config_scroll_set_natural_scroll_enabled(cfg.natural_scroll.unwrap_or(true));
+            if let Some(a) = cfg.accel_speed {
+                let _ = device.config_accel_set_speed(a.clamp(-1.0, 1.0));
             }
             tracing::info!(?device, "input device added");
         }
@@ -2741,6 +3089,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                 time:   InputEventTrait::time_msec(&event),
             });
             pointer.frame(state);
+            maybe_focus_follows_mouse(state);
             state.pending_redraw = true;
         }
 
@@ -2767,6 +3116,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
                 time:   InputEventTrait::time_msec(&event),
             });
             pointer.frame(state);
+            maybe_focus_follows_mouse(state);
             state.pending_redraw = true;
         }
 
@@ -2971,7 +3321,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut UdevApp)
     }
 }
 
-fn on_udev_event(event: UdevEvent, app: &mut UdevApp) {
+fn on_udev_event(event: UdevEvent, app: &mut State) {
     match event {
         UdevEvent::Added   { device_id, path } => tracing::info!(?device_id, ?path, "udev: device added"),
         // Monitor plugged/unplugged or changed resolution on a GPU we drive.
@@ -2983,7 +3333,7 @@ fn on_udev_event(event: UdevEvent, app: &mut UdevApp) {
                 let node = node.node_with_type(NodeType::Render)
                     .and_then(Result::ok)
                     .unwrap_or(node);
-                if app.udev.drm_devices.contains_key(&node) {
+                if app.udev.as_mut().unwrap().drm_devices.contains_key(&node) {
                     rescan_connectors(app, node);
                 }
             }

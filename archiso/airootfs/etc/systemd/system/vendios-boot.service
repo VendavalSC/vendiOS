@@ -5,7 +5,7 @@ Conflicts=getty@tty1.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/vendi-boot
+ExecStart=/usr/bin/vendi-boot
 StandardInput=tty
 StandardOutput=tty
 StandardError=journal

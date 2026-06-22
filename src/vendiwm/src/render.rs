@@ -461,7 +461,16 @@ impl RevealElement {
 
 impl Element for RevealElement {
     fn id(&self) -> &Id { self.inner.id() }
-    fn current_commit(&self) -> CommitCounter { self.inner.current_commit() }
+    fn current_commit(&self) -> CommitCounter {
+        // CRITICAL: the inner wallpaper buffer's commit never changes during the
+        // transition (same buffer) — only our `reveal` uniform grows. The damage
+        // tracker keys redraw off (id, current_commit), so returning the inner
+        // commit makes it think the element is unchanged after the first frame
+        // and skip redrawing the growing disc (it freezes, then "pops" when the
+        // element is removed at the end — the NVIDIA reveal bug). Advance the
+        // commit with `reveal` so every frame reads as changed.
+        CommitCounter::from((self.reveal * 100_000.0) as usize)
+    }
     fn location(&self, scale: Scale<f64>) -> Point<i32, Physical> { self.inner.location(scale) }
     fn src(&self) -> Rectangle<f64, BufferCoords> { self.inner.src() }
     fn transform(&self) -> Transform { self.inner.transform() }

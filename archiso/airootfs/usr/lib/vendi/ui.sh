@@ -2,46 +2,142 @@
 # vendiOS TUI library
 
 # ── Catppuccin Mocha palette (Mauve accent) ───────────────────────────────────
+# Attributes are universal (work on every terminal incl. the bare Linux VT).
 R=$'\e[0m'
 BOLD=$'\e[1m'
 DIM=$'\e[2m'
 ITALIC=$'\e[3m'
 UL=$'\e[4m'
 
-# foreground
-FG_ACCENT=$'\e[38;2;203;166;247m'    # Mauve  #CBA6F7
-FG_ACCENT2=$'\e[38;2;180;190;254m'   # Lavender #B4BEFE
-FG_BLUE=$'\e[38;2;137;180;250m'      # Blue   #89B4FA
-FG_WHITE=$'\e[38;2;205;214;244m'     # Text   #CDD6F4
-FG_SUBTEXT=$'\e[38;2;166;173;200m'   # Subtext0 #A6ADC8
-FG_DIM=$'\e[38;2;108;112;134m'       # Overlay0 #6C7086
-FG_GREEN=$'\e[38;2;166;227;161m'     # Green  #A6E3A1
-FG_TEAL=$'\e[38;2;148;226;213m'      # Teal   #94E2D5
-FG_RED=$'\e[38;2;243;139;168m'       # Red    #F38BA8
-FG_MAROON=$'\e[38;2;235;160;172m'    # Maroon #EBA0AC
-FG_YELLOW=$'\e[38;2;249;226;175m'    # Yellow #F9E2AF
-FG_ORANGE=$'\e[38;2;250;179;135m'    # Peach  #FAB387
-FG_PINK=$'\e[38;2;245;194;231m'      # Pink   #F5C2E7
+# The whole TUI is built from 24-bit colored background *bands* (no box-drawing
+# chars). Those escapes only render in a truecolor terminal emulator (foot /
+# alacritty under the live compositor). When the GPU can't bring a compositor
+# up — e.g. a too-new card the live kernel can't drive — the installer falls
+# through to the bare Linux VT console, which supports only the 16 ANSI colors.
+# There, 24-bit escapes are dropped and the band layout collapses to an
+# unreadable monochrome mess. So we pick a palette tier at startup:
+#
+#   truecolor  → exact Catppuccin 24-bit escapes (emulator under compositor)
+#   console    → the 16 ANSI indices, AND the Linux VT's 16-slot palette is
+#                remapped to the real Catppuccin RGB so it still looks right
+#
+# Layout code never changes — it only references the FG_*/BG_*/_BG_* vars set
+# here. Override detection with VENDI_COLOR=truecolor|console (handy to test).
+UI_COLORMODE=''
 
-# background
-BG_BASE=$'\e[48;2;30;30;46m'         # Base   #1E1E2E
-BG_MANTLE=$'\e[48;2;24;24;37m'       # Mantle #181825
-BG_CRUST=$'\e[48;2;17;17;27m'        # Crust  #11111B
-BG_SURFACE0=$'\e[48;2;49;50;68m'     # Surface0 #313244
-BG_SURFACE1=$'\e[48;2;69;71;90m'     # Surface1 #45475A
-BG_SEL=$'\e[48;2;49;35;73m'          # Mauve-tinted surface
-BG_PANEL=$'\e[48;2;24;24;37m'        # alias Mantle
-BG_HEADER=$'\e[48;2;17;17;27m'       # alias Crust
+ui_detect_color() {
+    if [[ -n "${VENDI_COLOR:-}" ]]; then
+        UI_COLORMODE="$VENDI_COLOR"
+    elif [[ "${COLORTERM:-}" == truecolor || "${COLORTERM:-}" == 24bit ]]; then
+        UI_COLORMODE='truecolor'
+    else
+        UI_COLORMODE='console'   # bare Linux VT (no truecolor emulator)
+    fi
+}
 
-# inline background escapes (for colored-space fills — no Unicode needed)
-_BG_MAUVE=$'\e[48;2;203;166;247m'
-_BG_GREEN=$'\e[48;2;166;227;161m'
-_BG_RED=$'\e[48;2;243;139;168m'
-_BG_YELLOW=$'\e[48;2;249;226;175m'
-_BG_ORANGE=$'\e[48;2;250;179;135m'
+ui_palette_init() {
+    [[ -z "$UI_COLORMODE" ]] && ui_detect_color
 
-# combined shortcuts
-ACCENT_ON="${BG_SEL}${BOLD}${FG_ACCENT}"
+    if [[ "$UI_COLORMODE" == 'truecolor' ]]; then
+        # foreground
+        FG_ACCENT=$'\e[38;2;203;166;247m'    # Mauve  #CBA6F7
+        FG_ACCENT2=$'\e[38;2;180;190;254m'   # Lavender #B4BEFE
+        FG_BLUE=$'\e[38;2;137;180;250m'      # Blue   #89B4FA
+        FG_WHITE=$'\e[38;2;205;214;244m'     # Text   #CDD6F4
+        FG_SUBTEXT=$'\e[38;2;166;173;200m'   # Subtext0 #A6ADC8
+        FG_DIM=$'\e[38;2;108;112;134m'       # Overlay0 #6C7086
+        FG_GREEN=$'\e[38;2;166;227;161m'     # Green  #A6E3A1
+        FG_TEAL=$'\e[38;2;148;226;213m'      # Teal   #94E2D5
+        FG_RED=$'\e[38;2;243;139;168m'       # Red    #F38BA8
+        FG_MAROON=$'\e[38;2;235;160;172m'    # Maroon #EBA0AC
+        FG_YELLOW=$'\e[38;2;249;226;175m'    # Yellow #F9E2AF
+        FG_ORANGE=$'\e[38;2;250;179;135m'    # Peach  #FAB387
+        FG_PINK=$'\e[38;2;245;194;231m'      # Pink   #F5C2E7
+
+        # background
+        BG_BASE=$'\e[48;2;30;30;46m'         # Base   #1E1E2E
+        BG_MANTLE=$'\e[48;2;24;24;37m'       # Mantle #181825
+        BG_CRUST=$'\e[48;2;17;17;27m'        # Crust  #11111B
+        BG_SURFACE0=$'\e[48;2;49;50;68m'     # Surface0 #313244
+        BG_SURFACE1=$'\e[48;2;69;71;90m'     # Surface1 #45475A
+        BG_SEL=$'\e[48;2;49;35;73m'          # Mauve-tinted surface
+
+        # inline background escapes (for colored-space fills — no Unicode needed)
+        _BG_MAUVE=$'\e[48;2;203;166;247m'
+        _BG_GREEN=$'\e[48;2;166;227;161m'
+        _BG_RED=$'\e[48;2;243;139;168m'
+        _BG_YELLOW=$'\e[48;2;249;226;175m'
+        _BG_ORANGE=$'\e[48;2;250;179;135m'
+    else
+        # ── 16-color console fallback ─────────────────────────────────────────
+        # Express every color as a standard ANSI index. The dark Catppuccin
+        # backgrounds (base/mantle/crust) all collapse to black; the surfaces to
+        # bright-black; selection to blue — enough distinct bands to keep the
+        # layout legible anywhere. Indices are remapped to exact Catppuccin RGB
+        # by ui_palette_remap below on the real Linux VT.
+        FG_ACCENT=$'\e[95m'      # bright magenta → mauve
+        FG_ACCENT2=$'\e[94m'     # bright blue → lavender
+        FG_BLUE=$'\e[94m'
+        FG_WHITE=$'\e[97m'       # bright white → text
+        FG_SUBTEXT=$'\e[37m'     # white → subtext
+        FG_DIM=$'\e[90m'         # bright black → overlay
+        FG_GREEN=$'\e[92m'
+        FG_TEAL=$'\e[96m'        # bright cyan → teal
+        FG_RED=$'\e[91m'
+        FG_MAROON=$'\e[91m'
+        FG_YELLOW=$'\e[93m'
+        FG_ORANGE=$'\e[93m'      # no orange slot → yellow
+        FG_PINK=$'\e[95m'
+
+        BG_BASE=$'\e[40m'        # black
+        BG_MANTLE=$'\e[40m'
+        BG_CRUST=$'\e[40m'
+        BG_SURFACE0=$'\e[100m'   # bright-black bg
+        BG_SURFACE1=$'\e[100m'
+        BG_SEL=$'\e[44m'         # blue bg → selection highlight
+
+        _BG_MAUVE=$'\e[105m'     # bright magenta bg
+        _BG_GREEN=$'\e[102m'
+        _BG_RED=$'\e[101m'
+        _BG_YELLOW=$'\e[103m'
+        _BG_ORANGE=$'\e[103m'
+    fi
+
+    # aliases
+    BG_PANEL="$BG_MANTLE"
+    BG_HEADER="$BG_CRUST"
+    ACCENT_ON="${BG_SEL}${BOLD}${FG_ACCENT}"
+}
+
+# Remap the Linux VT's 16 palette slots to the real Catppuccin RGB (OSC "P"
+# sequences). On the bare console this makes the 16-color fallback actually
+# look like Catppuccin; emulators ignore it harmlessly. No-op outside console
+# mode. Reset with ui_palette_reset (\e]R).
+ui_palette_remap() {
+    [[ "$UI_COLORMODE" == 'console' ]] || return 0
+    printf '\e]P0%s' '1e1e2e'   # black        → base
+    printf '\e]P8%s' '313244'   # bright black  → surface0
+    printf '\e]P1%s' 'f38ba8'   # red
+    printf '\e]P9%s' 'f38ba8'
+    printf '\e]P2%s' 'a6e3a1'   # green
+    printf '\e]PA%s' 'a6e3a1'
+    printf '\e]P3%s' 'f9e2af'   # yellow
+    printf '\e]PB%s' 'f9e2af'
+    printf '\e]P4%s' '312349'   # blue slot     → mauve-tinted selection
+    printf '\e]PC%s' 'b4befe'   # bright blue   → lavender
+    printf '\e]P5%s' 'cba6f7'   # magenta       → mauve
+    printf '\e]PD%s' 'cba6f7'
+    printf '\e]P6%s' '94e2d5'   # cyan          → teal
+    printf '\e]PE%s' '94e2d5'
+    printf '\e]P7%s' 'a6adc8'   # white         → subtext
+    printf '\e]PF%s' 'cdd6f4'   # bright white  → text
+}
+
+ui_palette_reset() { [[ "$UI_COLORMODE" == 'console' ]] && printf '\e]R'; }
+
+# Populate the color vars at source time (idempotent; ui_init re-runs after
+# setting TERM) so they're never empty if referenced before ui_init.
+ui_palette_init
 
 # ── terminal state ────────────────────────────────────────────────────────────
 UI_COLS=0
@@ -61,15 +157,22 @@ ui_resize() {
 }
 
 ui_init() {
+    # Pick the palette tier from the *real* terminal (COLORTERM) before we
+    # touch TERM — a too-new GPU drops us onto the bare VT, where only the
+    # 16-color fallback renders.
+    ui_detect_color
+    ui_palette_init
     export TERM=xterm-256color
     ui_resize
     printf '\e[?25l\e[?7l'
+    ui_palette_remap
     trap ui_cleanup EXIT INT TERM
     trap 'ui_resize; ui_redraw' WINCH
 }
 
 ui_cleanup() {
     printf '\e[?25h\e[?7h\e[0m'
+    ui_palette_reset
     tput cnorm 2>/dev/null || true
     clear
 }
@@ -611,70 +714,94 @@ ui_flash() {
     printf "${color}${msg}${R}"
 }
 
-# ── disk visualization bar ────────────────────────────────────────────────────
-# Draws a colored-band proportional partition map — no box chars needed
+# ── disk visualization ────────────────────────────────────────────────────────
+# A proportional, accurate partition map driven by disk_map (real byte sizes,
+# physical order, free-space gaps included) plus a readable table beneath it.
+# Sets UI_DISK_BAR_ROWS to the number of content rows it consumed so callers
+# can lay out controls below it.
+
+# pick the band bg + fg + short type name for a segment
+_ui_seg_color() {
+    # args: kind fs  → sets _SEG_BG _SEG_FG _SEG_KIND
+    local kind=$1 fs=$2
+    if [[ "$kind" == free ]]; then
+        _SEG_BG="${_BG_GREEN}"; _SEG_FG="${FG_GREEN}"; _SEG_KIND="Free"; return
+    fi
+    case "$fs" in
+        vfat|fat32|fat16) _SEG_BG="${_BG_YELLOW}"; _SEG_FG="${FG_YELLOW}"; _SEG_KIND="${fs:-EFI}" ;;
+        btrfs|ext4|xfs)   _SEG_BG="${_BG_MAUVE}";  _SEG_FG="${FG_ACCENT}"; _SEG_KIND="$fs" ;;
+        swap)             _SEG_BG="${_BG_ORANGE}"; _SEG_FG="${FG_ORANGE}"; _SEG_KIND="swap" ;;
+        ntfs|fuseblk)     _SEG_BG="${_BG_RED}";    _SEG_FG="${FG_RED}";    _SEG_KIND="ntfs" ;;
+        *)                _SEG_BG="${BG_SURFACE1}";_SEG_FG="${FG_SUBTEXT}";_SEG_KIND="${fs:-raw}" ;;
+    esac
+}
+
+UI_DISK_BAR_ROWS=0
 ui_disk_bar() {
     local disk=$1 offset=$2
-    local bar_w=$(( UI_W-10 )) sx=$(( UI_X+3 ))
+    local bar_w=$(( UI_W-6 )) sx=$(( UI_X+3 ))
+    local top=$(( 6+offset ))
+    UI_DISK_BAR_ROWS=0
 
-    local total_b; total_b=$(lsblk -dno SIZE --bytes "$disk" 2>/dev/null || echo 0)
-    [[ $total_b -eq 0 ]] && return
+    local total_b; total_b=$(lsblk -dno SIZE --bytes "$disk" 2>/dev/null)
+    # fall back to parted for anything lsblk won't report (e.g. image files)
+    [[ -z "$total_b" || "$total_b" == 0 ]] && \
+        total_b=$(parted -sm "$disk" unit B print 2>/dev/null | sed -n '2{s/[^:]*:\([0-9]*\)B:.*/\1/p}')
+    [[ -z "$total_b" || "$total_b" == 0 ]] && return
 
-    local -a parts=()
-    while IFS= read -r line; do
-        parts+=("$line")
-    done < <(lsblk -Pno NAME,SIZE,FSTYPE,LABEL "$disk" 2>/dev/null | \
-             grep -v "^NAME=\"${disk##*/}\"" | \
-             awk -F'"' '{print $2 "|" $4 "|" $6 "|" $8}')
+    # load the map into parallel arrays (so we can size the bar and the table
+    # from the same data in one pass)
+    local -a kind=() num=() size=() dev=() fs=() label=() mount=()
+    while IFS='|' read -r k n st sz dv f l m; do
+        kind+=("$k"); num+=("$n"); size+=("$sz"); dev+=("$dv")
+        fs+=("$f"); label+=("$l"); mount+=("$m")
+    done < <(disk_map "$disk")
+    local segs=${#kind[@]}
 
-    # header: disk path + size
-    _at $(( 6+offset )) $sx
-    printf "${BG_BASE}${FG_SUBTEXT}${disk}${R}${BG_BASE}  ${FG_WHITE}$(lsblk -dno SIZE "$disk" 2>/dev/null)${R}${BG_BASE}"
+    # header: disk path + total size
+    _at $top $sx
+    printf "${BG_BASE}${FG_WHITE}${BOLD}${disk}${R}${BG_BASE}  ${FG_SUBTEXT}$(disk_human "$total_b")${R}${BG_BASE}"
 
-    local n=${#parts[@]}
-    _at $(( 7+offset )) $sx
-
-    if [[ $n -eq 0 ]]; then
-        # whole disk free
+    # proportional colored bar — last segment absorbs rounding remainder
+    local bar_row=$(( top+1 ))
+    _at $bar_row $sx
+    if [[ $segs -eq 0 ]]; then
         printf "${_BG_GREEN}%*s${R}" "$bar_w" ''
-        _at $(( 8+offset )) $sx; printf "${BG_BASE}${FG_GREEN}free space${R}${BG_BASE}"
-        _at $(( 9+offset )) $sx
-        printf "${_BG_GREEN}   ${R}${FG_GREEN} Free${R}"
-        return
+    else
+        local used=0 i
+        for (( i=0; i<segs; i++ )); do
+            local w
+            if (( i == segs-1 )); then
+                w=$(( bar_w - used ))
+            else
+                w=$(( size[i] * bar_w / total_b ))
+                (( w < 1 )) && w=1
+                used=$(( used + w ))
+            fi
+            (( w < 0 )) && w=0
+            _ui_seg_color "${kind[i]}" "${fs[i]}"
+            printf "${_SEG_BG}%*s${R}" "$w" ''
+        done
     fi
 
-    # colored-band segments — proportional by partition count (simple equal split)
-    local seg_w=$(( bar_w / n ))
-    local i
-    for (( i=0; i<n; i++ )); do
-        IFS='|' read -r pname psize pfs plabel <<< "${parts[$i]}"
-        local w=$seg_w
-        (( i == n-1 )) && w=$(( bar_w - seg_w*(n-1) ))
-        local bg
-        case "$pfs" in
-            vfat|fat32|fat16) bg="${_BG_YELLOW}" ;;
-            btrfs|ext4|xfs)   bg="${_BG_MAUVE}"  ;;
-            swap)              bg="${_BG_ORANGE}" ;;
-            ntfs|fuseblk)     bg="${_BG_RED}"    ;;
-            *)                 bg="${_BG_GREEN}"  ;;
-        esac
-        printf "${bg}%*s${R}" "$w" ''
+    # readable table: swatch · device · size · type · label/mount
+    local trow=$(( bar_row+2 )) i shown=0
+    for (( i=0; i<segs; i++ )); do
+        _ui_seg_color "${kind[i]}" "${fs[i]}"
+        _at $trow $sx
+        if [[ "${kind[i]}" == free ]]; then
+            printf "${_SEG_BG}  ${R}${BG_BASE}  ${FG_GREEN}%-14s${R}${BG_BASE}${FG_SUBTEXT}%9s${R}${BG_BASE}  ${FG_DIM}free space${R}${BG_BASE}" \
+                "free" "$(disk_human "${size[i]}")"
+        else
+            local extra="${mount[i]:+↳ ${mount[i]}}"
+            [[ -z "$extra" && -n "${label[i]}" ]] && extra="[${label[i]}]"
+            printf "${_SEG_BG}  ${R}${BG_BASE}  ${FG_WHITE}%-14s${R}${BG_BASE}${FG_SUBTEXT}%9s${R}${BG_BASE}  ${_SEG_FG}%-7s${R}${BG_BASE}${FG_DIM}%s${R}${BG_BASE}" \
+                "${dev[i]##*/}" "$(disk_human "${size[i]}")" "${_SEG_KIND}" "$extra"
+        fi
+        (( trow++ )); (( shown++ ))
+        # don't run past the panel
+        (( trow > UI_CONTENT_BOT-1 )) && break
     done
 
-    # partition labels below bar
-    for (( i=0; i<n; i++ )); do
-        IFS='|' read -r pname psize pfs plabel <<< "${parts[$i]}"
-        local lbl="${pname##*/}"
-        local lpad=$(( seg_w*i + seg_w/2 - ${#lbl}/2 ))
-        _at $(( 8+offset )) $(( sx+lpad ))
-        printf "${BG_BASE}${FG_DIM}${lbl}${R}${BG_BASE}"
-    done
-
-    # color legend using colored squares (filled spaces)
-    _at $(( 9+offset )) $sx
-    printf "${_BG_YELLOW}   ${R}${FG_YELLOW} EFI  "
-    printf "${_BG_MAUVE}   ${R}${FG_ACCENT} Linux  "
-    printf "${_BG_RED}   ${R}${FG_RED} Windows  "
-    printf "${_BG_GREEN}   ${R}${FG_GREEN} Free  "
-    printf "${_BG_ORANGE}   ${R}${FG_ORANGE} Swap${R}"
+    UI_DISK_BAR_ROWS=$(( (trow - top) ))
 }

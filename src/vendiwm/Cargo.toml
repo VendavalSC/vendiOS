@@ -13,7 +13,7 @@ name = "vendiwm"
 path = "src/main.rs"
 
 [features]
-default     = ["winit", "udev"]
+default     = ["winit", "udev", "xwayland"]
 # Backends
 winit       = ["smithay/backend_winit"]    # nested in another compositor, for dev
 udev        = [
@@ -23,7 +23,8 @@ udev        = [
     "smithay/backend_gbm",
     "smithay/backend_session_libseat",
 ]
-# XWayland support (deferred past v0.1)
+# XWayland: run X11 apps (Discord/Electron on NVIDIA, etc.) via the Xserver.
+# Pulls in smithay's X11 window-manager + xwayland-shell glue.
 xwayland    = ["smithay/xwayland"]
 
 [dependencies]

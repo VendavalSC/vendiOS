@@ -388,63 +388,8 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
             }
         }
         Request::ReloadConfig => {
-            match crate::config::Config::load() {
-                Ok(cfg) => {
-                    state.config = cfg;
-                    // Background/accent may have changed — rebuild wallpaper.
-                    state.wallpaper_gen += 1;
-                    state.pending_redraw = true;
-                    // Apply keyboard layout + repeat live. Clone the strings
-                    // out first — set_xkb_config borrows `state` mutably, so
-                    // the XkbConfig can't also borrow state.config.
-                    if let Some(kb) = state.seat.get_keyboard() {
-                        let (layout, variant, options, delay, rate) = (
-                            state.config.kb_layout.clone(),
-                            state.config.kb_variant.clone(),
-                            state.config.kb_options.clone(),
-                            state.config.repeat_delay, state.config.repeat_rate,
-                        );
-                        if let Err(e) = kb.set_xkb_config(state, smithay::input::keyboard::XkbConfig {
-                            layout: &layout, variant: &variant,
-                            options: if options.is_empty() { None } else { Some(options) },
-                            ..Default::default()
-                        }) {
-                            tracing::warn!(?e, "set xkb config on reload");
-                        }
-                        kb.change_repeat_info(rate, delay);
-                    }
-                    // Re-apply output scale + position live. (A changed mode
-                    // needs the surface rebuilt, which happens on reconnect /
-                    // restart — scale + position take effect immediately.)
-                    let cfgs = state.config.outputs.clone();
-                    let outs: Vec<_> = state.space.outputs().cloned().collect();
-                    for o in outs {
-                        match cfgs.iter().find(|c| c.name == o.name()) {
-                            Some(c) => {
-                                let scale = c.scale.map(|s| if s.fract().abs() < 1e-6 {
-                                    smithay::output::Scale::Integer(s.max(1.0) as i32)
-                                } else {
-                                    smithay::output::Scale::Fractional(s)
-                                });
-                                o.change_current_state(None, None, scale, c.position.map(|p| p.into()));
-                                if let Some(p) = c.position { state.space.map_output(&o, p); }
-                            }
-                            // No config for this output — revert any prior scale
-                            // override back to 1 so `output reset` truly resets.
-                            None => o.change_current_state(
-                                None, None, Some(smithay::output::Scale::Integer(1)), None),
-                        }
-                        // Re-arrange layer surfaces (the bar) for the new logical
-                        // output size. Without this the bar keeps its old width and
-                        // overflows the screen once the renderer applies the scale;
-                        // arrange() reconfigures it, and the resize→commit cycle
-                        // picks up the new fractional scale via the commit handler.
-                        smithay::desktop::layer_map_for_output(&o).arrange();
-                    }
-                    state.relayout();
-                    tracing::info!("config reloaded");
-                    Response::Ok { ok: true }
-                }
+            match state.reload_config() {
+                Ok(()) => Response::Ok { ok: true },
                 Err(e) => Response::Error { error: format!("reload: {e}") },
             }
         }

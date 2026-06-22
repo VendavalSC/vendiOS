@@ -23,3 +23,5 @@ pub mod render;
 pub mod screencopy;
 pub mod state;
 pub mod workspaces;
+#[cfg(feature = "xwayland")]
+pub mod xwayland;

@@ -30,8 +30,11 @@ impl Dir {
 pub enum Action {
     /// Spawn a child process from a command string.
     Spawn(String),
-    /// Close the focused window.
+    /// Close the focused window (polite xdg close — ignored by hung clients).
     Close,
+    /// Force-kill the focused window's client (SIGKILL) and drop its tile.
+    /// Escape hatch for frozen/crashed windows that ignore Close.
+    Kill,
     /// Cycle focus to the next leaf in the layout tree.
     FocusNext,
     /// Cycle focus to the previous leaf.
@@ -48,6 +51,19 @@ pub enum Action {
     Workspace(u32),
     /// Send the focused window to workspace N.
     MoveToWorkspace(u32),
+    /// Send the focused window to workspace N and follow it there.
+    MoveToWorkspaceFollow(u32),
+    /// Switch to the next / previous workspace by id.
+    WorkspaceNext,
+    WorkspacePrev,
+    /// Toggle back to the previously-active workspace (i3 back-and-forth).
+    WorkspaceLast,
+    /// Re-read ~/.config/vendi/config and apply it live.
+    ReloadConfig,
+    /// Re-center the focused floating window on its output.
+    CenterFloating,
+    /// Cycle the active workspace's tiling layout (split → master → monocle).
+    CycleLayout,
     /// Toggle the focused window between tiled and floating.
     ToggleFloating,
     /// Toggle fullscreen on the focused window.

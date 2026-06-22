@@ -62,7 +62,7 @@ Item {
     function sh(cmd) {
         return () => Quickshell.execDetached(["sh", "-c", cmd]);
     }
-    readonly property string floatTerm: "alacritty --class vendi-float -e "
+    readonly property string floatTerm: "kitty --class vendi-float -e "
 
     // Open windows, refreshed each time the launcher opens.
     property var openWindows: []

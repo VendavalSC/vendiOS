@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use smithay::desktop::Window;
 use smithay::utils::{IsAlive, Logical, Rectangle};
 
-use crate::layout::Tree;
+use crate::layout::{LayoutMode, Tree};
 
 pub struct Workspace {
     pub id:       u32,
@@ -21,6 +21,8 @@ pub struct Workspace {
     pub focus_floating: Option<Window>,
     /// Display override: render this window over the whole output.
     pub fullscreen: Option<Window>,
+    /// How the tiled windows are arranged (BSP split / master-stack / monocle).
+    pub mode:     LayoutMode,
 }
 
 impl Workspace {
@@ -31,6 +33,7 @@ impl Workspace {
             floating: Vec::new(),
             focus_floating: None,
             fullscreen: None,
+            mode: LayoutMode::Tiling,
         }
     }
 
@@ -46,6 +49,12 @@ impl Workspace {
 
     /// The window that should hold keyboard focus on this workspace.
     pub fn focused_window(&self) -> Option<Window> {
+        // A fullscreen window (e.g. a game) covers everything and owns the
+        // keyboard — otherwise focus drifts to a backgrounded tile and the game
+        // gets no keys (transient launcher/Steam popups kept stealing it).
+        if let Some(w) = &self.fullscreen {
+            if w.alive() { return Some(w.clone()); }
+        }
         if let Some(w) = &self.focus_floating {
             if w.alive() { return Some(w.clone()); }
         }
@@ -75,14 +84,19 @@ impl Workspace {
 pub struct Workspaces {
     list:   Vec<Workspace>,   // sorted by id
     active: u32,
+    /// The workspace active before the current one — for back-and-forth.
+    previous: u32,
 }
 
 impl Workspaces {
     pub fn new() -> Self {
-        Self { list: vec![Workspace::new(1)], active: 1 }
+        Self { list: vec![Workspace::new(1)], active: 1, previous: 1 }
     }
 
     pub fn active_id(&self) -> u32 { self.active }
+
+    /// The previously-active workspace id (i3 back-and-forth target).
+    pub fn previous_id(&self) -> u32 { self.previous }
 
     pub fn active(&mut self) -> &mut Workspace {
         let id = self.active;
@@ -108,6 +122,7 @@ impl Workspaces {
         if id == self.active { return Vec::new(); }
         let hidden = self.active_ref().windows();
         let _ = self.get_mut(id);   // ensure it exists
+        self.previous = self.active;
         self.active = id;
         self.prune_empty();
         hidden

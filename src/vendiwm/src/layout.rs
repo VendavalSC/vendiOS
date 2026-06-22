@@ -26,6 +26,32 @@ impl Direction {
     }
 }
 
+/// How a workspace arranges its tiled windows. The window set + focus order
+/// always live in the BSP `Tree`; the non-tiling modes just place that same
+/// set differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMode {
+    /// i3-style binary split tree (the default).
+    Tiling,
+    /// One master pane on the left, the rest stacked on the right (dwm-style).
+    Master,
+    /// Every window fills the screen; only the focused one shows on top.
+    Monocle,
+}
+
+impl LayoutMode {
+    pub fn next(self) -> Self {
+        match self {
+            LayoutMode::Tiling  => LayoutMode::Master,
+            LayoutMode::Master  => LayoutMode::Monocle,
+            LayoutMode::Monocle => LayoutMode::Tiling,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self { LayoutMode::Tiling => "Tiling", LayoutMode::Master => "Master-stack", LayoutMode::Monocle => "Monocle" }
+    }
+}
+
 #[derive(Debug)]
 enum Node {
     Leaf(Window),
@@ -179,6 +205,18 @@ impl Tree {
         out
     }
 
+    /// Place windows for the given layout mode. Tiling defers to the BSP tree;
+    /// Master/Monocle reuse the tree's window set + order.
+    pub fn placements(&self, vp: Rectangle<i32, Logical>, mode: LayoutMode)
+        -> Vec<(Window, Rectangle<i32, Logical>)>
+    {
+        match mode {
+            LayoutMode::Tiling  => self.layout(vp),
+            LayoutMode::Monocle => self.windows().into_iter().map(|w| (w, vp)).collect(),
+            LayoutMode::Master  => master_stack(&self.windows(), vp),
+        }
+    }
+
     /// All windows in DFS (visual) order.
     pub fn windows(&self) -> Vec<Window> {
         let mut out = Vec::new();
@@ -284,6 +322,28 @@ fn insert_at(node: Node, path: &[usize], new_window: Window, dir: Direction) -> 
             Node::Split { dir: d, ratios, children }
         }
     }
+}
+
+/// dwm-style master-stack: first window fills ~60% on the left, the rest split
+/// the right column evenly top→bottom. One window fills the viewport.
+fn master_stack(ws: &[Window], vp: Rectangle<i32, Logical>) -> Vec<(Window, Rectangle<i32, Logical>)> {
+    let n = ws.len();
+    if n == 0 { return Vec::new(); }
+    if n == 1 { return vec![(ws[0].clone(), vp)]; }
+    let mw = (vp.size.w as f32 * 0.6).round() as i32;
+    let mut out = vec![(ws[0].clone(),
+        Rectangle::new(vp.loc, Size::from((mw, vp.size.h))))];
+    let stack_n = (n - 1) as i32;
+    let sx = vp.loc.x + mw;
+    let sw = vp.size.w - mw;
+    let sh = vp.size.h / stack_n;
+    for (i, w) in ws[1..].iter().enumerate() {
+        let y = vp.loc.y + i as i32 * sh;
+        // last stack window soaks up the rounding remainder
+        let h = if i as i32 == stack_n - 1 { vp.loc.y + vp.size.h - y } else { sh };
+        out.push((w.clone(), Rectangle::new((sx, y).into(), Size::from((sw, h)))));
+    }
+    out
 }
 
 fn layout_node(node: &Node, rect: Rectangle<i32, Logical>, out: &mut Vec<(Window, Rectangle<i32, Logical>)>) {

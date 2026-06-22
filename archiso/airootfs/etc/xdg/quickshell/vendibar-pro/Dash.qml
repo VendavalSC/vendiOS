@@ -413,6 +413,18 @@ Item {
                                 }
                             }
                             Item { Layout.fillWidth: true }
+                            BatteryBadge {
+                                visible: dash.bar?.batVisible ?? false
+                                pct: dash.bar?.batShow ?? 100
+                                charging: dash.bar?.batChargeShow ?? false
+                                fg: dash.fg
+                                good: dash.good
+                                alert: dash.alert
+                                textColor: dash.bar?.panel ?? "#11111b"
+                                mono: dash.mono
+                                h: 18
+                                Layout.alignment: Qt.AlignVCenter
+                            }
                         }
                     }
 
@@ -745,15 +757,15 @@ Item {
                                 }
                                 Tile {
                                     glyph: "󰤨"; label: "Wi-Fi"
-                                    run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "wifi"])
+                                    run: () => Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "wifi"])
                                 }
                                 Tile {
                                     glyph: "󰂯"; label: "Bluetooth"
-                                    run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "bt"])
+                                    run: () => Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "bt"])
                                 }
                                 Tile {
                                     glyph: "󰕾"; label: "Audio"
-                                    run: () => Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"])
+                                    run: () => Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "audio"])
                                 }
                                 Tile {
                                     glyph: "󰹑"; label: "Shot"
@@ -1154,134 +1166,500 @@ Item {
 
             // ════ WALLPAPERS ══════════════════════════════════════════════
             ColumnLayout {
+                id: wpPage
                 spacing: 12
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Mono {
-                        text: (dash.bar?.wallpapers?.length ?? 0) + " in ~/Pictures/Wallpapers"
-                        color: dash.dim
-                    }
-                    Item { Layout.fillWidth: true }
-                    component WallBtn: Rectangle {
-                        property string glyph
-                        property string label
-                        property var run
-                        implicitWidth: wbRow.implicitWidth + 26
-                        implicitHeight: 30
-                        radius: 15
-                        color: wbHover.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
-                        Behavior on color { ColorAnimation { duration: 120 } }
-                        HoverHandler { id: wbHover; cursorShape: Qt.PointingHandCursor }
-                        TapHandler { onTapped: run() }
-                        RowLayout {
-                            id: wbRow
-                            anchors.centerIn: parent
-                            spacing: 7
-                            Glyph { text: glyph; color: dash.accent; font.pixelSize: 12 }
-                            Mono { text: label; font.pixelSize: 11 }
-                        }
-                    }
-                    WallBtn {
-                        glyph: "󰒝"; label: "Shuffle"
-                        run: () => Quickshell.execDetached(["vendi-ctl", "wallpaper", "random"])
-                    }
-                    WallBtn {
-                        glyph: "󰸌"; label: "Gradient"
-                        run: () => Quickshell.execDetached(["vendi-ctl", "wallpaper", "default"])
+                // Dynamic wallpaper state, loaded from `vendi wallpaper dynamic …`.
+                property bool   dynOn: false
+                property string dynActive: ""      // active group folder name
+                property var    dynTimes: ({})     // { sunrise:"06:30", … }
+                property var    dynGroups: []      // [{name,sunrise,day,afternoon,night}]
+                function reloadDyn() { wpdyn.running = true; wpgroups.running = true }
+                Component.onCompleted: reloadDyn()
+
+                Process {
+                    id: wpdyn
+                    command: ["vendi", "wallpaper", "dynamic", "status"]
+                    property bool accOn: false
+                    property string accActive: ""
+                    property var accTimes: ({})
+                    onStarted: { accOn = false; accActive = ""; accTimes = ({}) }
+                    stdout: SplitParser { onRead: line => {
+                        line = line.trim();
+                        if (line.startsWith("enabled=")) { wpdyn.accOn = line.endsWith("1"); return; }
+                        if (line.startsWith("active="))  { wpdyn.accActive = line.slice(7); return; }
+                        const p = line.split("|");
+                        if (p[0] === "time" && p.length >= 3) { let t = wpdyn.accTimes; t[p[1]] = p[2]; wpdyn.accTimes = t; }
+                    }}
+                    onExited: { wpPage.dynOn = accOn; wpPage.dynActive = accActive; wpPage.dynTimes = accTimes }
+                }
+                Process {
+                    id: wpgroups
+                    command: ["vendi", "wallpaper", "dynamic", "groups"]
+                    property var acc: []
+                    onStarted: acc = []
+                    stdout: SplitParser { onRead: line => {
+                        const p = line.split("|");
+                        if (p.length >= 5) wpgroups.acc.push({
+                            name: p[0], sunrise: p[1], day: p[2], afternoon: p[3], night: p[4] });
+                    }}
+                    onExited: wpPage.dynGroups = wpgroups.acc
+                }
+
+                property string view: "grid"       // "grid" | "dynamic"
+                property string armGroup: ""       // group+slot awaiting an image pick
+                property string armSlot: ""
+                Timer { id: dynReload; interval: 300; onTriggered: wpPage.reloadDyn() }
+
+                component WallBtn: Rectangle {
+                    property string glyph
+                    property string label
+                    property var run
+                    property bool primary: false
+                    implicitWidth: wbRow.implicitWidth + 26
+                    implicitHeight: 30
+                    radius: 15
+                    color: primary ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.18)
+                         : wbHover.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                    HoverHandler { id: wbHover; cursorShape: Qt.PointingHandCursor }
+                    scale: wbTap.pressed ? 0.93 : wbHover.hovered ? 1.04 : 1
+                    Behavior on scale { SpringAnimation { spring: 8.0; damping: 0.55; mass: 0.5; epsilon: 0.003 } }
+                    TapHandler { id: wbTap; onTapped: run() }
+                    RowLayout {
+                        id: wbRow
+                        anchors.centerIn: parent
+                        spacing: 7
+                        Glyph { text: glyph; color: dash.accent; font.pixelSize: 12 }
+                        Mono { text: label; font.pixelSize: 11 }
                     }
                 }
 
-                GridView {
-                    id: wallGrid
+                // ════ grid view ══════════════════════════════════════════
+                ColumnLayout {
+                    id: gridView
+                    visible: wpPage.view === "grid"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    clip: true
-                    interactive: contentHeight > height
-                    boundsBehavior: Flickable.StopAtBounds
-                    cellWidth: Math.floor(width / 3)
-                    cellHeight: Math.floor(cellWidth * 0.56)
-                    model: dash.bar?.wallpapers ?? []
-                    delegate: Item {
-                        id: wallCell
-                        required property var modelData
-                        width: wallGrid.cellWidth
-                        height: wallGrid.cellHeight
-                        property bool current: modelData === (dash.bar?.currentWall ?? "")
-                        Rectangle {
-                            anchors.fill: parent
-                            anchors.margins: 6
-                            radius: 14
-                            color: Qt.rgba(1, 1, 1, 0.04)
-                            border.width: wallCell.current ? 2 : 1
-                            border.color: wallCell.current ? dash.accent : dash.cardBr
-                            Behavior on border.color { ColorAnimation { duration: 150 } }
-                            scale: wallHover.hovered ? 1.025 : 1
-                            Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
-                            ClippingRectangle {
+                    spacing: 12
+                    // slide in from the left when returning from the dynamic page
+                    opacity: visible ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 170; easing.type: Easing.OutCubic } }
+                    transform: Translate {
+                        x: gridView.visible ? 0 : -40
+                        Behavior on x { SpringAnimation { spring: 6.4; damping: 0.62; mass: 0.7; epsilon: 0.5 } }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Mono {
+                            text: (dash.bar?.wallpapers?.length ?? 0) + " in ~/Pictures/Wallpapers"
+                            color: dash.dim
+                        }
+                        Item { Layout.fillWidth: true }
+                        WallBtn {
+                            glyph: "󰖕"; label: "Dynamic"; primary: true
+                            run: () => { wpPage.reloadDyn(); wpPage.view = "dynamic" }
+                        }
+                        WallBtn {
+                            glyph: "󰒝"; label: "Shuffle"
+                            run: () => Quickshell.execDetached(["vendi", "wallpaper", "random"])
+                        }
+                        WallBtn {
+                            glyph: "󰸌"; label: "Gradient"
+                            run: () => Quickshell.execDetached(["vendi", "wallpaper", "default"])
+                        }
+                    }
+
+                    GridView {
+                        id: wallGrid
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        interactive: contentHeight > height
+                        boundsBehavior: Flickable.StopAtBounds
+                        cellWidth: Math.floor(width / 3)
+                        cellHeight: Math.floor(cellWidth * 0.56)
+                        model: dash.bar?.wallpapers ?? []
+                        delegate: Item {
+                            id: wallCell
+                            required property var modelData
+                            width: wallGrid.cellWidth
+                            height: wallGrid.cellHeight
+                            property bool current: modelData === (dash.bar?.currentWall ?? "")
+                            Rectangle {
                                 anchors.fill: parent
-                                anchors.margins: 2
-                                radius: 12
-                                color: "transparent"
-                                Image {
+                                anchors.margins: 6
+                                radius: 14
+                                color: Qt.rgba(1, 1, 1, 0.04)
+                                border.width: wallCell.current ? 2 : 1
+                                border.color: wallCell.current ? dash.accent : dash.cardBr
+                                Behavior on border.color { ColorAnimation { duration: 150 } }
+                                scale: wallHover.hovered ? 1.025 : 1
+                                Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                                ClippingRectangle {
                                     anchors.fill: parent
-                                    source: "file://" + wallCell.modelData
-                                    fillMode: Image.PreserveAspectCrop
-                                    sourceSize.width: 440
-                                    asynchronous: true
-                                }
-                                // name plate, melting up from the bottom edge
-                                Rectangle {
-                                    anchors {
-                                        left: parent.left; right: parent.right
-                                        bottom: parent.bottom
+                                    anchors.margins: 2
+                                    radius: 12
+                                    color: "transparent"
+                                    Image {
+                                        anchors.fill: parent
+                                        source: "file://" + wallCell.modelData
+                                        fillMode: Image.PreserveAspectCrop
+                                        sourceSize.width: 440
+                                        asynchronous: true
                                     }
-                                    height: 26
-                                    gradient: Gradient {
-                                        GradientStop { position: 0; color: "transparent" }
-                                        GradientStop { position: 1; color: "#c8000000" }
-                                    }
-                                    Mono {
-                                        anchors {
-                                            left: parent.left; right: parent.right
-                                            bottom: parent.bottom
-                                            leftMargin: 10; rightMargin: 10; bottomMargin: 4
+                                    Rectangle {
+                                        anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                                        height: 26
+                                        gradient: Gradient {
+                                            GradientStop { position: 0; color: "transparent" }
+                                            GradientStop { position: 1; color: "#c8000000" }
                                         }
-                                        text: {
-                                            const n = wallCell.modelData.split("/").pop();
-                                            return n.replace(/\.(png|jpe?g|webp)$/i, "");
+                                        Mono {
+                                            anchors {
+                                                left: parent.left; right: parent.right; bottom: parent.bottom
+                                                leftMargin: 10; rightMargin: 10; bottomMargin: 4
+                                            }
+                                            text: {
+                                                const n = wallCell.modelData.split("/").pop();
+                                                return n.replace(/\.(png|jpe?g|webp)$/i, "");
+                                            }
+                                            font.pixelSize: 9
+                                            elide: Text.ElideRight
                                         }
-                                        font.pixelSize: 9
-                                        elide: Text.ElideRight
+                                    }
+                                    Rectangle {
+                                        visible: wallCell.current
+                                        anchors { top: parent.top; right: parent.right; margins: 8 }
+                                        width: 20; height: 20; radius: 10
+                                        color: dash.accent
+                                        Mono { anchors.centerIn: parent; text: "󰄬"; color: "#0b0b12"; font.pixelSize: 11 }
                                     }
                                 }
-                                Rectangle {
-                                    visible: wallCell.current
-                                    anchors { top: parent.top; right: parent.right; margins: 8 }
-                                    width: 20; height: 20; radius: 10
-                                    color: dash.accent
-                                    Mono {
-                                        anchors.centerIn: parent
-                                        text: "󰄬"
-                                        color: "#0b0b12"
-                                        font.pixelSize: 11
-                                    }
+                                HoverHandler { id: wallHover; cursorShape: Qt.PointingHandCursor }
+                                TapHandler {
+                                    onTapped: Quickshell.execDetached(["vendi", "wallpaper", wallCell.modelData])
                                 }
-                            }
-                            HoverHandler { id: wallHover; cursorShape: Qt.PointingHandCursor }
-                            TapHandler {
-                                onTapped: Quickshell.execDetached(
-                                    ["vendi-ctl", "wallpaper", wallCell.modelData])
                             }
                         }
                     }
+                    Mono {
+                        visible: (dash.bar?.wallpapers?.length ?? 0) === 0
+                        text: "drop images in ~/Pictures/Wallpapers"
+                        color: dash.dim
+                        Layout.alignment: Qt.AlignHCenter
+                    }
                 }
-                Mono {
-                    visible: (dash.bar?.wallpapers?.length ?? 0) === 0
-                    text: "drop images in ~/Pictures/Wallpapers"
-                    color: dash.dim
-                    Layout.alignment: Qt.AlignHCenter
+
+                // ════ dynamic wallpapers view (its own roomy page) ═══════
+                ColumnLayout {
+                    id: dynView
+                    visible: wpPage.view === "dynamic"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 12
+                    // slides in from the right on the same spring as the notch
+                    opacity: visible ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 170; easing.type: Easing.OutCubic } }
+                    transform: Translate {
+                        x: dynView.visible ? 0 : 40
+                        Behavior on x { SpringAnimation { spring: 6.4; damping: 0.62; mass: 0.7; epsilon: 0.5 } }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Mono {
+                            text: "󰁍"; color: dash.fg; font.pixelSize: 16
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: { wpPage.armSlot = ""; wpPage.view = "grid" } }
+                        }
+                        Mono { text: "Dynamic Wallpapers"; font.bold: true; font.pixelSize: 15 }
+                        Mono { text: "a collection per time of day"; color: dash.dim; font.pixelSize: 11 }
+                        Item { Layout.fillWidth: true }
+                        Mono { text: wpPage.dynOn ? "On" : "Off"; color: dash.dim; font.pixelSize: 11 }
+                        Rectangle {   // enable pill
+                            width: 42; height: 23; radius: 12
+                            color: wpPage.dynOn ? dash.accent : Qt.rgba(1, 1, 1, 0.18)
+                            Behavior on color { ColorAnimation { duration: 120 } }
+                            Rectangle {
+                                width: 19; height: 19; radius: 10; color: "white"; y: 2
+                                x: wpPage.dynOn ? 21 : 2
+                                Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                            }
+                            TapHandler { onTapped: {
+                                Quickshell.execDetached(["vendi", "wallpaper", "dynamic", wpPage.dynOn ? "off" : "on"]);
+                                wpPage.dynOn = !wpPage.dynOn; dynReload.restart();
+                            } }
+                        }
+                    }
+
+                    // global schedule (hidden while picking an image)
+                    Mono { visible: wpPage.armSlot === ""; text: "SCHEDULE"; color: dash.dim; font.pixelSize: 10; font.bold: true }
+                    RowLayout {
+                        visible: wpPage.armSlot === ""
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Repeater {
+                            model: ["sunrise", "day", "afternoon", "night"]
+                            delegate: ColumnLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 3
+                                Mono {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: modelData.charAt(0).toUpperCase() + modelData.slice(1)
+                                    font.pixelSize: 10; color: dash.dim
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 30; radius: 8
+                                    color: Qt.rgba(1, 1, 1, 0.08)
+                                    TextInput {
+                                        anchors.fill: parent; anchors.margins: 2
+                                        horizontalAlignment: TextInput.AlignHCenter
+                                        verticalAlignment: TextInput.AlignVCenter
+                                        text: wpPage.dynTimes[modelData] ?? "--:--"
+                                        color: dash.fg; font.family: dash.mono; font.pixelSize: 14
+                                        inputMask: "99:99"
+                                        onEditingFinished: {
+                                            Quickshell.execDetached(["vendi", "wallpaper", "dynamic", "time", modelData, text]);
+                                            dynReload.restart();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // new collection
+                    RowLayout {
+                        visible: wpPage.armSlot === ""
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Mono { text: "COLLECTIONS"; color: dash.dim; font.pixelSize: 10; font.bold: true }
+                        Item { Layout.fillWidth: true }
+                        Rectangle {
+                            Layout.preferredWidth: 160; height: 28; radius: 8
+                            color: Qt.rgba(1, 1, 1, 0.08)
+                            TextInput {
+                                id: newGroupField
+                                anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
+                                verticalAlignment: TextInput.AlignVCenter
+                                color: dash.fg; font.family: dash.mono; font.pixelSize: 12
+                                clip: true
+                                onAccepted: createBtn.create()
+                                Mono {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: newGroupField.text.length === 0
+                                    text: "new collection name"; color: dash.dim; font.pixelSize: 12
+                                }
+                            }
+                        }
+                        WallBtn {
+                            id: createBtn
+                            glyph: "󰐕"; label: "Create"
+                            function create() {
+                                const n = newGroupField.text.trim();
+                                if (n.length === 0) return;
+                                Quickshell.execDetached(["vendi", "wallpaper", "dynamic", "create", n]);
+                                newGroupField.text = ""; dynReload.restart();
+                            }
+                            run: () => create()
+                        }
+                    }
+
+                    // collections list — each row: variants + name + use/delete
+                    ListView {
+                        visible: wpPage.armSlot === ""
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        spacing: 8
+                        model: wpPage.dynGroups
+                        // cards cascade in (staggered fade + spring pop)
+                        populate: Transition {
+                            SequentialAnimation {
+                                PauseAnimation { duration: Math.min((ViewTransition.index ?? 0) * 55, 330) }
+                                ParallelAnimation {
+                                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 220; easing.type: Easing.OutCubic }
+                                    NumberAnimation { property: "scale"; from: 0.92; to: 1; duration: 320; easing.type: Easing.OutBack }
+                                }
+                            }
+                        }
+                        add: Transition {
+                            ParallelAnimation {
+                                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 200; easing.type: Easing.OutCubic }
+                                NumberAnimation { property: "scale"; from: 0.92; to: 1; duration: 300; easing.type: Easing.OutBack }
+                            }
+                        }
+                        displaced: Transition { NumberAnimation { properties: "x,y"; duration: 220; easing.type: Easing.OutCubic } }
+                        delegate: Rectangle {
+                            id: grpCard
+                            required property var modelData
+                            property string gname: modelData.name
+                            width: ListView.view ? ListView.view.width : 0
+                            height: 104
+                            radius: 12
+                            property bool active: wpPage.dynActive === modelData.name
+                            HoverHandler { id: grpHov }
+                            // A full-width card can't scale or lift without clipping
+                            // against the panel, so the hover feedback is all inside
+                            // the bounds: a brighter fill + an accent ring (the ring
+                            // is drawn inset by QML so it never overruns the edges).
+                            color: active ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.16)
+                                          : grpHov.hovered ? Qt.rgba(1, 1, 1, 0.09) : Qt.rgba(1, 1, 1, 0.05)
+                            Behavior on color { ColorAnimation { duration: 140 } }
+                            border.width: active ? 2 : (grpHov.hovered ? 1 : 0)
+                            border.color: active ? dash.accent
+                                        : Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.5)
+                            Behavior on border.width { NumberAnimation { duration: 130 } }
+                            ColumnLayout {
+                                anchors.fill: parent; anchors.margins: 10; spacing: 6
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Mono { text: modelData.name; font.bold: true; font.pixelSize: 13
+                                        color: active ? dash.accent : dash.fg }
+                                    Mono { visible: active; text: "active"; color: dash.good; font.pixelSize: 10 }
+                                    Item { Layout.fillWidth: true }
+                                    WallBtn {
+                                        glyph: active ? "󰄬" : "󰸉"; label: active ? "In use" : "Use"
+                                        primary: active
+                                        run: () => {
+                                            Quickshell.execDetached(["vendi", "wallpaper", "dynamic", "use", modelData.name]);
+                                            wpPage.dynActive = modelData.name;
+                                            if (!wpPage.dynOn) {
+                                                Quickshell.execDetached(["vendi", "wallpaper", "dynamic", "on"]);
+                                                wpPage.dynOn = true;
+                                            }
+                                            dynReload.restart();
+                                        }
+                                    }
+                                    Mono {
+                                        text: "󰩹"; color: dash.dim; font.pixelSize: 15
+                                        MouseArea { anchors.fill: parent; anchors.margins: -6
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                Quickshell.execDetached(["vendi", "wallpaper", "dynamic", "delete", modelData.name]);
+                                                dynReload.restart();
+                                            } }
+                                    }
+                                }
+                                // four slot tiles — tap to assign an image
+                                RowLayout {
+                                    Layout.fillWidth: true; Layout.fillHeight: true; spacing: 6
+                                    Repeater {
+                                        model: [
+                                            { slot: "sunrise",   path: modelData.sunrise },
+                                            { slot: "day",       path: modelData.day },
+                                            { slot: "afternoon", path: modelData.afternoon },
+                                            { slot: "night",     path: modelData.night },
+                                        ]
+                                        delegate: ClippingRectangle {
+                                            id: slotTile
+                                            required property var modelData
+                                            Layout.fillWidth: true; Layout.fillHeight: true
+                                            radius: 7; color: Qt.rgba(1, 1, 1, 0.07)
+                                            HoverHandler { id: slotHov; cursorShape: Qt.PointingHandCursor }
+                                            scale: slotTap.pressed ? 0.94 : slotHov.hovered ? 1.06 : 1
+                                            Behavior on scale { SpringAnimation { spring: 8.0; damping: 0.55; mass: 0.5; epsilon: 0.003 } }
+                                            Image {
+                                                anchors.fill: parent; visible: modelData.path !== ""
+                                                source: modelData.path !== "" ? "file://" + modelData.path : ""
+                                                fillMode: Image.PreserveAspectCrop; sourceSize.width: 160; asynchronous: true
+                                            }
+                                            // brighten on hover so it reads as "pick me"
+                                            Rectangle { anchors.fill: parent; radius: 7
+                                                color: "white"; opacity: slotHov.hovered ? 0.10 : 0
+                                                Behavior on opacity { NumberAnimation { duration: 130 } } }
+                                            Rectangle {
+                                                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                                                height: 16; color: "#99000000"
+                                                Mono { anchors.centerIn: parent; text: modelData.slot
+                                                    font.pixelSize: 8; color: "white" }
+                                            }
+                                            Mono { anchors.centerIn: parent; visible: modelData.path === ""
+                                                text: "+"; color: slotHov.hovered ? dash.accent : dash.dim
+                                                font.pixelSize: slotHov.hovered ? 22 : 18
+                                                Behavior on font.pixelSize { NumberAnimation { duration: 130; easing.type: Easing.OutBack } } }
+                                            TapHandler { id: slotTap; onTapped: {
+                                                wpPage.armGroup = grpCard.gname;
+                                                wpPage.armSlot = modelData.slot;
+                                            } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Mono {
+                        visible: wpPage.armSlot === "" && wpPage.dynGroups.length === 0
+                        Layout.fillWidth: true
+                        text: "No collections yet. Name one above and Create, then tap its slots to assign day→night wallpapers."
+                        color: dash.dim; font.pixelSize: 11; wrapMode: Text.WordWrap
+                    }
+
+                    // ── image picker (shown while assigning a slot) ──
+                    Mono {
+                        visible: wpPage.armSlot !== ""
+                        text: "Pick the " + wpPage.armSlot + " wallpaper for “" + wpPage.armGroup + "”"
+                        font.bold: true; font.pixelSize: 14
+                        opacity: visible ? 1 : 0
+                        Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                    }
+                    GridView {
+                        id: pickerGrid
+                        visible: wpPage.armSlot !== ""
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        clip: true
+                        cellWidth: Math.floor(width / 4)
+                        cellHeight: Math.floor(cellWidth * 0.56)
+                        model: dash.bar?.wallpapers ?? []
+                        // whole picker rises + fades in; tiles cascade
+                        opacity: visible ? 1 : 0
+                        Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+                        transform: Translate {
+                            y: pickerGrid.visible ? 0 : 22
+                            Behavior on y { SpringAnimation { spring: 6.6; damping: 0.62; mass: 0.7; epsilon: 0.5 } }
+                        }
+                        populate: Transition {
+                            SequentialAnimation {
+                                PauseAnimation { duration: Math.min((ViewTransition.index ?? 0) * 22, 260) }
+                                ParallelAnimation {
+                                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 200; easing.type: Easing.OutCubic }
+                                    NumberAnimation { property: "scale"; from: 0.9; to: 1; duration: 280; easing.type: Easing.OutBack }
+                                }
+                            }
+                        }
+                        delegate: Item {
+                            required property var modelData
+                            width: GridView.view.cellWidth; height: GridView.view.cellHeight
+                            ClippingRectangle {
+                                id: pickTile
+                                anchors.fill: parent; anchors.margins: 5; radius: 10
+                                color: Qt.rgba(1, 1, 1, 0.05)
+                                HoverHandler { id: pickHov; cursorShape: Qt.PointingHandCursor }
+                                scale: pickTap.pressed ? 0.95 : pickHov.hovered ? 1.04 : 1
+                                Behavior on scale { SpringAnimation { spring: 8.0; damping: 0.56; mass: 0.5; epsilon: 0.003 } }
+                                Image {
+                                    anchors.fill: parent; source: "file://" + modelData
+                                    fillMode: Image.PreserveAspectCrop; sourceSize.width: 300; asynchronous: true
+                                }
+                                Rectangle {   // hover ring (plain Rectangle has border; ClippingRectangle may not)
+                                    anchors.fill: parent; radius: 10; color: "transparent"
+                                    border.width: pickHov.hovered ? 2 : 0; border.color: dash.accent
+                                    Behavior on border.width { NumberAnimation { duration: 120 } }
+                                }
+                                TapHandler { id: pickTap; onTapped: {
+                                    Quickshell.execDetached(["vendi", "wallpaper", "dynamic", "assign",
+                                        wpPage.armGroup, wpPage.armSlot, modelData]);
+                                    wpPage.armSlot = ""; dynReload.restart();
+                                } }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1471,7 +1849,7 @@ Item {
                                     run: () => {
                                         dash.requestClose();
                                         Quickshell.execDetached(["sh", "-c",
-                                            "alacritty -e \"${EDITOR:-nano}\" \"$HOME/.config/vendi/config\""]);
+                                            "kitty -e \"${EDITOR:-nano}\" \"$HOME/.config/vendi/config\""]);
                                     }
                                 }
                                 CfgRow {
@@ -1482,21 +1860,21 @@ Item {
                                     glyph: "󰕾"; label: "Audio"
                                     run: () => {
                                         dash.requestClose();
-                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "audio"]);
+                                        Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "audio"]);
                                     }
                                 }
                                 CfgRow {
                                     glyph: "󰓅"; label: "Power profile"
                                     run: () => {
                                         dash.requestClose();
-                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "vendi", "power"]);
+                                        Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "power"]);
                                     }
                                 }
                                 CfgRow {
                                     glyph: "󰏖"; label: "Install software"
                                     run: () => {
                                         dash.requestClose();
-                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "sh", "-c",
+                                        Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "sh", "-c",
                                             "pacman -Slq | fzf --multi --prompt='install> ' --preview 'pacman -Si {}' | xargs -ro sudo pacman -S; printf '\\n  done — any key closes '; read -rsn1"]);
                                     }
                                 }
@@ -1504,7 +1882,7 @@ Item {
                                     glyph: "󰚰"; label: "Update system"
                                     run: () => {
                                         dash.requestClose();
-                                        Quickshell.execDetached(["alacritty", "--class", "vendi-float", "-e", "sh", "-c",
+                                        Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "sh", "-c",
                                             "sudo vendi update; printf '\\n  done — any key closes '; read -rsn1"]);
                                     }
                                 }
@@ -1537,17 +1915,26 @@ Item {
                                 { k: "Super + B",              a: "Browser" },
                                 { k: "Super + E",              a: "Files" },
                                 { k: "Super + Q",              a: "Close window" },
+                                { k: "Super + Shift + Q",      a: "Force-kill window" },
                                 { k: "Super + F",              a: "Fullscreen" },
                                 { k: "Super + H / V",          a: "Split direction" },
                                 { k: "Super + Arrows",         a: "Focus direction" },
+                                { k: "Super + J / Tab",        a: "Focus next / prev" },
                                 { k: "Super + Shift + Arrows", a: "Move window" },
                                 { k: "Super + Ctrl + Arrows",  a: "Resize window" },
+                                { k: "Super + Shift + Space",  a: "Toggle floating" },
+                                { k: "Super + T",              a: "Cycle layout (tile/master/monocle)" },
+                                { k: "Super + C",              a: "Center floating window" },
                                 { k: "Super + 1–9",            a: "Go to workspace" },
                                 { k: "Super + Shift + 1–9",    a: "Move to workspace" },
-                                { k: "Super + Shift + Space",  a: "Toggle floating" },
+                                { k: "Super + . / ,",          a: "Next / previous workspace" },
+                                { k: "Super + `",              a: "Last workspace" },
                                 { k: "Super + O",              a: "Overview" },
                                 { k: "Super + Shift + O",      a: "Window opacity" },
                                 { k: "Super + Shift + B",      a: "Toggle blur" },
+                                { k: "Print",                  a: "Screenshot → file + clipboard" },
+                                { k: "Super + Shift + S",      a: "Screenshot region → clipboard" },
+                                { k: "Super + Shift + R",      a: "Reload config" },
                                 { k: "Super + Escape",         a: "Lock screen" },
                                 { k: "Super + K",              a: "All keybinds" },
                             ]
