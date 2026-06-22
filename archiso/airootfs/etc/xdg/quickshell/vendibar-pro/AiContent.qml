@@ -33,6 +33,12 @@ Item {
     property string curQ: ""
     property string cur: ""
     property var cards: []           // cards for the in-progress turn
+    property var pendingPerm: null   // {title, detail} awaiting Allow/Deny
+
+    function decide(ok) {
+        brain.write(ok ? "allow\n" : "deny\n");
+        pendingPerm = null;
+    }
 
     onActiveChanged: {
         if (active) input.forceActiveFocus();
@@ -53,7 +59,7 @@ Item {
             return;
         }
         if (phase === "thinking" || phase === "responding") return;
-        curQ = q; cur = ""; cards = []; phase = "thinking";
+        curQ = q; cur = ""; cards = []; pendingPerm = null; phase = "thinking";
         input.text = "";
         brain.command = ["vendi-ai", _withContext(q)];
         brain.running = true;
@@ -155,14 +161,75 @@ Item {
                     color: ai.fg; font.family: ai.mono; font.pixelSize: 15; lineHeight: 1.4
                     wrapMode: Text.WordWrap
                 }
-                // live result cards (weather / info) for this turn
+                // live result cards for this turn
                 Repeater {
                     model: ai.cards
-                    delegate: Loader {
+                    delegate: Column {
                         required property var modelData
                         width: threadCol.width
-                        sourceComponent: modelData.type === "weather" ? weatherCardC : infoCardC
-                        onLoaded: item.data = modelData
+                        WeatherCard {
+                            visible: parent.modelData.type === "weather"
+                            width: parent.width; card: parent.modelData; mono: ai.mono
+                            height: visible ? implicitHeight : 0
+                        }
+                        MatchCard {
+                            visible: parent.modelData.type === "match"
+                            width: parent.width; card: parent.modelData
+                            fg: ai.fg; dim: ai.dim; accent: ai.accent; mono: ai.mono
+                            height: visible ? implicitHeight : 0
+                        }
+                        InfoCard {
+                            visible: parent.modelData.type !== "weather" && parent.modelData.type !== "match"
+                            width: parent.width; card: parent.modelData
+                            accent: ai.accent; fg: ai.fg; dim: ai.dim; mono: ai.mono
+                            height: visible ? implicitHeight : 0
+                        }
+                    }
+                }
+
+                // permission request (Tier-2 action) — Allow/Deny
+                Rectangle {
+                    visible: ai.pendingPerm !== null
+                    width: threadCol.width
+                    implicitHeight: permCol.implicitHeight + 24
+                    radius: 14
+                    color: Qt.rgba(ai.accent.r, ai.accent.g, ai.accent.b, 0.08)
+                    border.width: 1
+                    border.color: Qt.rgba(ai.accent.r, ai.accent.g, ai.accent.b, 0.45)
+                    Column {
+                        id: permCol
+                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 12 }
+                        spacing: 8
+                        Text {
+                            width: parent.width; wrapMode: Text.WordWrap
+                            text: ai.pendingPerm ? ai.pendingPerm.title : ""
+                            color: ai.fg; font.family: ai.mono; font.pixelSize: 13; font.weight: Font.DemiBold
+                        }
+                        Text {
+                            width: parent.width; wrapMode: Text.WrapAnywhere
+                            visible: ai.pendingPerm && ai.pendingPerm.detail && String(ai.pendingPerm.detail).length
+                            text: ai.pendingPerm ? ai.pendingPerm.detail : ""
+                            color: ai.dim; font.family: ai.mono; font.pixelSize: 12
+                        }
+                        Row {
+                            spacing: 8
+                            Rectangle {
+                                width: 84; height: 30; radius: 9
+                                color: Qt.rgba(1, 1, 1, denyHover.hovered ? 0.12 : 0.06)
+                                Text { anchors.centerIn: parent; text: "Deny"; color: ai.dim
+                                       font.family: ai.mono; font.pixelSize: 12 }
+                                HoverHandler { id: denyHover }
+                                TapHandler { onTapped: ai.decide(false) }
+                            }
+                            Rectangle {
+                                width: 92; height: 30; radius: 9
+                                color: Qt.rgba(ai.accent.r, ai.accent.g, ai.accent.b, allowHover.hovered ? 0.95 : 0.75)
+                                Text { anchors.centerIn: parent; text: "Allow"; color: "#11111b"
+                                       font.family: ai.mono; font.pixelSize: 12; font.weight: Font.DemiBold }
+                                HoverHandler { id: allowHover }
+                                TapHandler { onTapped: ai.decide(true) }
+                            }
+                        }
                     }
                 }
                 // thinking — a smooth bouncing wave
@@ -222,17 +289,21 @@ Item {
         }
     }
 
-    // ── result-card components (chosen by card.type) ─────────────────────────
-    Component { id: weatherCardC; WeatherCard { mono: ai.mono } }
-    Component { id: infoCardC; InfoCard { accent: ai.accent; fg: ai.fg; dim: ai.dim; mono: ai.mono } }
-
     // ── brain (streaming) ────────────────────────────────────────────────────
     Process {
         id: brain
+        stdinEnabled: true
         stdout: SplitParser {
             splitMarker: ""
             onRead: chunk => {
                 if (ai.phase === "thinking") ai.phase = "responding";
+                // [[PERM]] — a Tier-2 action awaiting Allow/Deny
+                var qi = chunk.indexOf("[[PERM]]");
+                if (qi !== -1) {
+                    if (qi > 0) ai.cur += chunk.substring(0, qi);
+                    try { ai.pendingPerm = JSON.parse(chunk.slice(qi + 8)); } catch (e) {}
+                    return;
+                }
                 // [[CARD]]…JSON can appear anywhere in the chunk; peel out every
                 // card, keep the surrounding text.
                 var ci = chunk.indexOf("[[CARD]]");

@@ -65,6 +65,14 @@ fn main() -> Result<()> {
                 let name = c["function"]["name"].as_str().unwrap_or("");
                 let cargs = &c["function"]["arguments"];
                 eprintln!("  \x1b[2m→ {name}({cargs})\x1b[0m");
+                // Tier-2 actions (shell, power, update, …) ask the user first.
+                if let Some((title, detail)) = needs_permission(name, cargs) {
+                    if !request_permission(&title, &detail, tty) {
+                        messages.push(json!({ "role": "tool", "tool_name": name,
+                            "content": "The user DENIED permission for this action. Do not perform it; briefly tell them it was cancelled." }));
+                        continue;
+                    }
+                }
                 let (result, card) = dispatch(name, cargs);
                 if let Some(cj) = card {
                     emit_card(&cj, tty);
@@ -173,6 +181,10 @@ fn dispatch(name: &str, args: &Value) -> (String, Option<String>) {
         "web_search" => web_search(args["query"].as_str().unwrap_or("")),
         "launch_app" => launch_app(args),
         "run_vendi" => run_vendi(args),
+        "run_command" => {
+            let cmd = args["command"].as_str().unwrap_or("");
+            if cmd.is_empty() { Err("no command".into()) } else { sh("sh", &["-c", cmd]) }
+        }
         "read_file" => read_file(args["path"].as_str().unwrap_or("")),
         _ => Err(format!("unknown tool: {name}")),
     };
@@ -194,6 +206,51 @@ fn emit_card(json: &str, tty: bool) {
     let mut out = std::io::stdout();
     let _ = write!(out, "[[CARD]]{json}{SEP}");
     let _ = out.flush();
+}
+
+/// Does this tool call need explicit user permission (Tier 2)? Returns a
+/// (title, detail) to show on the permission card, or None for auto-run actions.
+fn needs_permission(name: &str, args: &Value) -> Option<(String, String)> {
+    match name {
+        "run_command" => {
+            let c = args["command"].as_str().unwrap_or("");
+            Some(("Run a shell command".to_string(), c.to_string()))
+        }
+        "run_vendi" => {
+            let list: Vec<String> = args["args"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let sub = list.first().map(String::as_str).unwrap_or("");
+            if matches!(sub, "power" | "update" | "rollback" | "clean" | "snapshot") {
+                Some((format!("Run: vendi {}", list.join(" ")), "System action".to_string()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Ask the user to approve a Tier-2 action. On the panel (piped) we emit a
+/// [[PERM]] directive and block reading the decision from stdin (the panel
+/// writes "allow"/"deny"). On a TTY we prompt y/N on stderr.
+fn request_permission(title: &str, detail: &str, tty: bool) -> bool {
+    if tty {
+        eprint!("  \x1b[33m[permission]\x1b[0m {title}\n  {detail}\n  allow? [y/N] ");
+        let _ = std::io::stderr().flush();
+    } else {
+        let payload = json!({ "title": title, "detail": detail }).to_string();
+        let mut out = std::io::stdout();
+        let _ = write!(out, "[[PERM]]{payload}{SEP}");
+        let _ = out.flush();
+    }
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    let d = line.trim().to_lowercase();
+    d == "allow" || d == "y" || d == "yes"
 }
 
 /// Weather → a rich weather card (city, temp, condition, high/low).
@@ -577,6 +634,9 @@ fn tool_defs() -> Value {
                 "accent": { "type":"string", "description":"optional hex colour like #4caf50" }
             },
             "required": ["title"]
+        })),
+        f("run_command", "Run an arbitrary shell command for things no other tool covers (managing packages, files, processes…). The user is shown the exact command and must approve it first. Prefer the specific tools (run_vendi, launch_app) when they fit.", json!({
+            "type":"object", "properties": { "command": { "type":"string" } }, "required": ["command"]
         })),
     ])
 }
