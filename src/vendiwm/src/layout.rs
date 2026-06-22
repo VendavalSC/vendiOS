@@ -37,6 +37,12 @@ pub enum LayoutMode {
     Master,
     /// Every window fills the screen; only the focused one shows on top.
     Monocle,
+    /// Each window halves the remaining area, alternating axis — windows
+    /// dwindle toward a corner (hyprland-style).
+    Dwindle,
+    /// Like dwindle, but the open area rotates so windows spiral inward
+    /// (Fibonacci).
+    Spiral,
 }
 
 impl LayoutMode {
@@ -44,11 +50,19 @@ impl LayoutMode {
         match self {
             LayoutMode::Tiling  => LayoutMode::Master,
             LayoutMode::Master  => LayoutMode::Monocle,
-            LayoutMode::Monocle => LayoutMode::Tiling,
+            LayoutMode::Monocle => LayoutMode::Dwindle,
+            LayoutMode::Dwindle => LayoutMode::Spiral,
+            LayoutMode::Spiral  => LayoutMode::Tiling,
         }
     }
     pub fn label(self) -> &'static str {
-        match self { LayoutMode::Tiling => "Tiling", LayoutMode::Master => "Master-stack", LayoutMode::Monocle => "Monocle" }
+        match self {
+            LayoutMode::Tiling  => "Tiling",
+            LayoutMode::Master  => "Master-stack",
+            LayoutMode::Monocle => "Monocle",
+            LayoutMode::Dwindle => "Dwindle",
+            LayoutMode::Spiral  => "Spiral",
+        }
     }
 }
 
@@ -214,6 +228,8 @@ impl Tree {
             LayoutMode::Tiling  => self.layout(vp),
             LayoutMode::Monocle => self.windows().into_iter().map(|w| (w, vp)).collect(),
             LayoutMode::Master  => master_stack(&self.windows(), vp),
+            LayoutMode::Dwindle => dwindle(&self.windows(), vp),
+            LayoutMode::Spiral  => spiral(&self.windows(), vp),
         }
     }
 
@@ -342,6 +358,79 @@ fn master_stack(ws: &[Window], vp: Rectangle<i32, Logical>) -> Vec<(Window, Rect
         // last stack window soaks up the rounding remainder
         let h = if i as i32 == stack_n - 1 { vp.loc.y + vp.size.h - y } else { sh };
         out.push((w.clone(), Rectangle::new((sx, y).into(), Size::from((sw, h)))));
+    }
+    out
+}
+
+/// Dwindle: each window takes half of the remaining area (alternating the split
+/// axis along whichever side is longer); the rest dwindle into the other half.
+/// The last window fills whatever is left.
+fn dwindle(ws: &[Window], vp: Rectangle<i32, Logical>) -> Vec<(Window, Rectangle<i32, Logical>)> {
+    let mut out = Vec::new();
+    let n = ws.len();
+    if n == 0 { return out; }
+    let mut rect = vp;
+    let mut horiz = rect.size.w >= rect.size.h;
+    for (i, w) in ws.iter().enumerate() {
+        if i == n - 1 {
+            out.push((w.clone(), rect));
+            break;
+        }
+        if horiz {
+            let half = rect.size.w / 2;
+            out.push((w.clone(), Rectangle::new(rect.loc, Size::from((half, rect.size.h)))));
+            rect = Rectangle::new((rect.loc.x + half, rect.loc.y).into(),
+                                  Size::from((rect.size.w - half, rect.size.h)));
+        } else {
+            let half = rect.size.h / 2;
+            out.push((w.clone(), Rectangle::new(rect.loc, Size::from((rect.size.w, half)))));
+            rect = Rectangle::new((rect.loc.x, rect.loc.y + half).into(),
+                                  Size::from((rect.size.w, rect.size.h - half)));
+        }
+        horiz = !horiz;
+    }
+    out
+}
+
+/// Spiral (Fibonacci): like dwindle, but the side the window takes alternates,
+/// so the open area rotates and windows spiral inward.
+fn spiral(ws: &[Window], vp: Rectangle<i32, Logical>) -> Vec<(Window, Rectangle<i32, Logical>)> {
+    let mut out = Vec::new();
+    let n = ws.len();
+    if n == 0 { return out; }
+    let mut rect = vp;
+    let mut horiz = rect.size.w >= rect.size.h;
+    let mut second = false; // which half the window takes — flips each step
+    for (i, w) in ws.iter().enumerate() {
+        if i == n - 1 {
+            out.push((w.clone(), rect));
+            break;
+        }
+        if horiz {
+            let half = rect.size.w / 2;
+            let (win, rest) = if second {
+                (Rectangle::new((rect.loc.x + half, rect.loc.y).into(), Size::from((rect.size.w - half, rect.size.h))),
+                 Rectangle::new(rect.loc, Size::from((half, rect.size.h))))
+            } else {
+                (Rectangle::new(rect.loc, Size::from((half, rect.size.h))),
+                 Rectangle::new((rect.loc.x + half, rect.loc.y).into(), Size::from((rect.size.w - half, rect.size.h))))
+            };
+            out.push((w.clone(), win));
+            rect = rest;
+        } else {
+            let half = rect.size.h / 2;
+            let (win, rest) = if second {
+                (Rectangle::new((rect.loc.x, rect.loc.y + half).into(), Size::from((rect.size.w, rect.size.h - half))),
+                 Rectangle::new(rect.loc, Size::from((rect.size.w, half))))
+            } else {
+                (Rectangle::new(rect.loc, Size::from((rect.size.w, half))),
+                 Rectangle::new((rect.loc.x, rect.loc.y + half).into(), Size::from((rect.size.w, rect.size.h - half))))
+            };
+            out.push((w.clone(), win));
+            rect = rest;
+        }
+        horiz = !horiz;
+        second = !second;
     }
     out
 }

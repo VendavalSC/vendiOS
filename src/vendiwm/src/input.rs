@@ -62,7 +62,8 @@ pub enum Action {
     ReloadConfig,
     /// Re-center the focused floating window on its output.
     CenterFloating,
-    /// Cycle the active workspace's tiling layout (split → master → monocle).
+    /// Cycle the active workspace's layout
+    /// (tiling → master → monocle → dwindle → spiral).
     CycleLayout,
     /// Toggle the focused window between tiled and floating.
     ToggleFloating,
