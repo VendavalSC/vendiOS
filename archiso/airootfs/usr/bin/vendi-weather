@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Prints "<emoji>|<temp>|<condition>" for the bar's weather widget.
+#
+# Uses open-meteo (a consistent forecast model — wttr.in pulled from flaky
+# stations and jumped 23↔34°C between calls). Geolocates by IP unless
+# ~/.config/vendi/weather-location holds "lat,lon" or a city name.
+set -euo pipefail
+
+# `--card` prints a richer line for the AI weather card:
+#   "<city>|<emoji>|<temp>°C|<condition>|<high>°|<low>°"
+mode=${1:-}
+loc=$(cat "$HOME/.config/vendi/weather-location" 2>/dev/null || true)
+city=""
+
+if [[ "$loc" =~ ^-?[0-9.]+,-?[0-9.]+$ ]]; then
+    lat=${loc%,*}; lon=${loc#*,}
+elif [[ -n "$loc" ]]; then
+    # City name → open-meteo geocoding.
+    g=$(curl -sf --max-time 6 "https://geocoding-api.open-meteo.com/v1/search?count=1&name=$(printf '%s' "$loc" | sed 's/ /%20/g')") || exit 0
+    lat=$(grep -oE '"latitude":-?[0-9.]+'  <<<"$g" | head -1 | cut -d: -f2)
+    lon=$(grep -oE '"longitude":-?[0-9.]+' <<<"$g" | head -1 | cut -d: -f2)
+    city=$(grep -oE '"name":"[^"]+"' <<<"$g" | head -1 | cut -d: -f2 | tr -d '"')
+else
+    # No configured location → IP geolocation.
+    geo=$(curl -sf --max-time 6 'http://ip-api.com/json/?fields=lat,lon,city') || exit 0
+    lat=$(grep -oE '"lat":-?[0-9.]+' <<<"$geo" | cut -d: -f2)
+    lon=$(grep -oE '"lon":-?[0-9.]+' <<<"$geo" | cut -d: -f2)
+    city=$(grep -oE '"city":"[^"]+"' <<<"$geo" | cut -d: -f2 | tr -d '"')
+fi
+[[ -n "${lat:-}" && -n "${lon:-}" ]] || exit 0
+
+extra=""
+[[ "$mode" == "--card" ]] && extra="&daily=temperature_2m_max,temperature_2m_min&timezone=auto"
+j=$(curl -sf --max-time 6 \
+    "https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code${extra}") || exit 0
+t=$(grep -oE '"temperature_2m":-?[0-9.]+' <<<"$j" | head -1 | cut -d: -f2)
+c=$(grep -oE '"weather_code":[0-9]+'      <<<"$j" | head -1 | cut -d: -f2)
+[[ -n "${t:-}" ]] || exit 0
+t=$(printf '%.0f' "$t")
+
+# WMO weather code → emoji + words.
+case "${c:-}" in
+    0)              e="☀️"; d="Clear" ;;
+    1)              e="🌤️"; d="Mainly clear" ;;
+    2)              e="⛅"; d="Partly cloudy" ;;
+    3)              e="☁️"; d="Overcast" ;;
+    45|48)          e="🌫️"; d="Fog" ;;
+    51|53|55|56|57) e="🌦️"; d="Drizzle" ;;
+    61|63|65|66|67) e="🌧️"; d="Rain" ;;
+    71|73|75|77)    e="🌨️"; d="Snow" ;;
+    80|81|82)       e="🌧️"; d="Showers" ;;
+    85|86)          e="🌨️"; d="Snow showers" ;;
+    95|96|99)       e="⛈️"; d="Thunderstorm" ;;
+    *)              e="🌡️"; d="" ;;
+esac
+
+if [[ "$mode" == "--card" ]]; then
+    hi=$(grep -oE '"temperature_2m_max":\[-?[0-9.]+' <<<"$j" | head -1 | grep -oE '\-?[0-9.]+$')
+    lo=$(grep -oE '"temperature_2m_min":\[-?[0-9.]+' <<<"$j" | head -1 | grep -oE '\-?[0-9.]+$')
+    [[ -n "${hi:-}" ]] && hi=$(printf '%.0f' "$hi")
+    [[ -n "${lo:-}" ]] && lo=$(printf '%.0f' "$lo")
+    printf '%s|%s|%s°C|%s|%s°|%s°\n' "${city:-}" "$e" "$t" "$d" "${hi:-}" "${lo:-}"
+else
+    printf '%s|%s°C|%s\n' "$e" "$t" "$d"
+fi

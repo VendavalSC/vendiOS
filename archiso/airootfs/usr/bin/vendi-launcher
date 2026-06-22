@@ -13,6 +13,7 @@ if [[ "$choice" == "pro" ]] && command -v quickshell >/dev/null && pgrep -x quic
     case "$mode" in
         actions) exec quickshell -c vendibar-pro ipc call dash open 4 ;;
         dash)    exec quickshell -c vendibar-pro ipc call dash toggle ;;
+        ai)      exec quickshell -c vendibar-pro ipc call ai toggle ;;
         *)       exec quickshell -c vendibar-pro ipc call launcher toggle ;;
     esac
 fi
