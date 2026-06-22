@@ -1,0 +1,17 @@
+[package]
+name = "vendi-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "vendi-ai"
+path = "src/main.rs"
+
+[dependencies]
+ureq        = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
