@@ -6,6 +6,7 @@
 
 import QtQuick
 import QtQuick.Controls.Basic
+import QtCore
 import "mockdata.js" as Mock
 
 ApplicationWindow {
@@ -18,6 +19,23 @@ ApplicationWindow {
 
     property bool dark: true
     property string ui: "Adwaita Sans"
+    // bubbles follow the live vendiOS accent (~/.config/vendi/theme-state)
+    property string accentHex: "#7b6cff"
+    function readAccent() {
+        try {
+            var cfg = "" + StandardPaths.writableLocation(StandardPaths.GenericConfigLocation);
+            if (!cfg.length) return;
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", cfg + "/vendi/theme-state", false);
+            xhr.send();
+            if (xhr.status === 200 || xhr.status === 0) {
+                var m = /ACCENT_HEX=([0-9a-fA-F]{6})/.exec(xhr.responseText);
+                if (m) accentHex = "#" + m[1];
+            }
+        } catch (e) {}
+    }
+    Component.onCompleted: readAccent()
+    Timer { interval: 3000; running: true; repeat: true; onTriggered: win.readAccent() }
     property string lightbox: ""        // source of the image shown full-screen, "" = hidden
     property bool infoOpen: false       // contact/group info page
     property bool composeOpen: false    // new-message sheet
@@ -51,9 +69,9 @@ ApplicationWindow {
     QtObject {
         id: theme
         readonly property string ui: win.ui
-        // vendi accent — a premium violet→indigo (distinct from iMessage blue)
-        readonly property color accent:        "#7b6cff"
-        readonly property color accent2:       "#5a45e0"
+        // bubbles follow the live vendiOS accent; accent2 is a derived deeper shade
+        readonly property color accent:        win.accentHex
+        readonly property color accent2:       Qt.darker(win.accentHex, 1.4)
         readonly property color bubbleOutText: "#ffffff"
         property color windowBg:      win.dark ? "#161618" : "#ffffff"
         property color sidebarBg:     win.dark ? "#1d1d20" : "#f7f7f9"
@@ -82,20 +100,34 @@ ApplicationWindow {
     property int currentIndex: 0
     readonly property var currentConvo: (conversations && currentIndex < conversations.length)
                                         ? conversations[currentIndex] : undefined
-    onCurrentConvoChanged: if (backend.connected && currentConvo && currentConvo.messages.length === 0)
-                               backend.loadRoom(currentConvo.id)
+    onCurrentConvoChanged: {
+        if (backend.connected && currentConvo && currentConvo.messages.length === 0)
+            backend.loadRoom(currentConvo.id);
+        // opening a chat clears its unread (server receipt + local), killing the
+        // stale notification dot
+        if (currentConvo && currentConvo.unread) {
+            if (backend.connected) backend.markRead(currentConvo.id);
+            _clearUnread(currentIndex);
+        }
+    }
     function _setConvos(arr) { if (backend.connected) backend.conversations = arr; else mockConvos = arr; }
+    function _clearUnread(idx) {
+        var arr = conversations.slice();
+        if (!arr[idx] || !arr[idx].unread) return;
+        var c = Object.assign({}, arr[idx]); c.unread = 0; arr[idx] = c;
+        _setConvos(arr);
+    }
 
     property int _typingFor: 0          // convo index the simulated reply is for
 
     function nowTime() {
         return Qt.formatTime(new Date(), "h:mm AP");
     }
-    function sendMessage(text, replyName, replyText) {
-        if (backend.connected) { if (currentConvo) backend.send(currentConvo.id, text); return; }
+    function sendMessage(text, replyName, replyText, replyId) {
+        if (backend.connected) { if (currentConvo) backend.send(currentConvo.id, text, replyId); return; }
         appendMessage(currentIndex, {
-            text: text, mine: true, time: nowTime(), kind: "text", source: "",
-            replyName: replyName || "", replyText: replyText || "",
+            id: "", text: text, mine: true, time: nowTime(), kind: "text", source: "",
+            replyTo: replyId || "", replyName: replyName || "", replyText: replyText || "",
             sender: "", senderColor: "", reactions: "[]"
         }, text);
         simulateReply();
@@ -174,7 +206,7 @@ ApplicationWindow {
             width: parent.width - win.sidebarW; height: parent.height
             theme: theme
             convo: win.currentConvo
-            onSend: function (t, rn, rt) { win.sendMessage(t, rn, rt); }
+            onSend: function (t, rn, rt, rid) { win.sendMessage(t, rn, rt, rid); }
             onSendImage: function (p) { win.sendImageMessage(p); }
             onOpenImage: function (s) { win.lightbox = s; }
             onOpenInfo: win.infoOpen = true
@@ -182,6 +214,10 @@ ApplicationWindow {
                 // persist into the source message so it survives a convo switch
                 if (win.currentConvo && win.currentConvo.messages[i])
                     win.currentConvo.messages[i].reactions = js;
+            }
+            onReactSent: function (mid, emoji) {
+                // send the reaction to the homeserver (display already updated locally)
+                if (backend.connected && win.currentConvo) backend.react(win.currentConvo.id, mid, emoji);
             }
         }
     }

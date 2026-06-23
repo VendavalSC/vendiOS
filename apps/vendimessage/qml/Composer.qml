@@ -14,8 +14,9 @@ Item {
 
     property string replyName: ""
     property string replyText: ""
-    function setReply(name, text) { replyName = name; replyText = text; field.forceActiveFocus(); }
-    function clearReply() { replyName = ""; replyText = ""; }
+    property string replyId: ""
+    function setReply(name, text, id) { replyName = name; replyText = text; replyId = id || ""; field.forceActiveFocus(); }
+    function clearReply() { replyName = ""; replyText = ""; replyId = ""; }
 
     readonly property int lineH: 36
     readonly property int maxH: 120

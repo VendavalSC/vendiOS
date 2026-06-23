@@ -20,12 +20,15 @@ use matrix_sdk::{
     media::{MediaFormat, MediaRequest},
     room::MessagesOptions,
     ruma::events::{
-        room::message::{MessageType, RoomMessageEventContent, SyncRoomMessageEvent},
+        reaction::ReactionEventContent,
+        relation::{Annotation, InReplyTo},
+        room::message::{MessageType, Relation, RoomMessageEventContent, SyncRoomMessageEvent},
         AnyMessageLikeEvent, AnyTimelineEvent, MessageLikeEvent,
     },
-    ruma::RoomId,
+    ruma::{EventId, RoomId},
     Client, Room as SdkRoom,
 };
+use std::collections::HashMap;
 use tokio::sync::broadcast;
 
 #[derive(Clone)]
@@ -67,6 +70,10 @@ impl MatrixBackend {
                 let sender = orig.sender.to_string();
                 let mine = me.as_deref() == Some(orig.sender.as_ref());
                 let ts = orig.origin_server_ts.0.to_string();
+                let reply_to = match &orig.content.relates_to {
+                    Some(Relation::Reply { in_reply_to }) => in_reply_to.event_id.to_string(),
+                    _ => String::new(),
+                };
                 let msg = match &orig.content.msgtype {
                     MessageType::Text(t) => {
                         Some(Message::text(id, sender, t.body.clone(), mine, ts))
@@ -85,7 +92,13 @@ impl MatrixBackend {
                     }
                     _ => None,
                 };
-                if let Some(m) = msg {
+                if let Some(mut m) = msg {
+                    if !reply_to.is_empty() {
+                        m.reply_to = reply_to;
+                        if m.kind == "text" {
+                            m.body = strip_reply_fallback(&m.body);
+                        }
+                    }
                     let _ = tx.send(Outgoing::Message { room: room.room_id().to_string(), message: m });
                 }
             }
@@ -137,6 +150,18 @@ impl MatrixBackend {
             Err(_) => return Vec::new(),
         };
 
+        // first pass: collect emoji reactions, keyed by their target event id
+        let mut reactions: HashMap<String, Vec<String>> = HashMap::new();
+        for ev in &resp.chunk {
+            if let Ok(AnyTimelineEvent::MessageLike(AnyMessageLikeEvent::Reaction(
+                MessageLikeEvent::Original(r),
+            ))) = ev.event.deserialize()
+            {
+                let target = r.content.relates_to.event_id.to_string();
+                reactions.entry(target).or_default().push(r.content.relates_to.key);
+            }
+        }
+
         let me = self.client.user_id().map(|u| u.to_owned());
         let mut out = Vec::new();
         // backward pagination yields newest-first; reverse for chronological order
@@ -152,34 +177,69 @@ impl MatrixBackend {
             let sender = orig.sender.to_string();
             let mine = me.as_deref() == Some(orig.sender.as_ref());
             let ts = orig.origin_server_ts.0.to_string();
-            match orig.content.msgtype {
-                MessageType::Text(t) => out.push(Message::text(id, sender, t.body, mine, ts)),
+            let reply_to = match &orig.content.relates_to {
+                Some(Relation::Reply { in_reply_to }) => in_reply_to.event_id.to_string(),
+                _ => String::new(),
+            };
+            let mut msg = match orig.content.msgtype {
+                MessageType::Text(t) => {
+                    let body = if reply_to.is_empty() {
+                        t.body
+                    } else {
+                        strip_reply_fallback(&t.body)
+                    };
+                    Message::text(id.clone(), sender, body, mine, ts)
+                }
                 MessageType::Image(img) => {
                     let req = MediaRequest { source: img.source.clone(), format: MediaFormat::File };
-                    if let Ok(bytes) = self.client.media().get_media_content(&req, true).await {
-                        let dest = media_cache_dir().join(format!("{id}.bin"));
-                        let _ = std::fs::write(&dest, &bytes);
-                        out.push(Message::image(
-                            id,
-                            sender,
-                            mine,
-                            ts,
-                            dest.to_string_lossy().to_string(),
-                        ));
+                    match self.client.media().get_media_content(&req, true).await {
+                        Ok(bytes) => {
+                            let dest = media_cache_dir().join(format!("{id}.bin"));
+                            let _ = std::fs::write(&dest, &bytes);
+                            Message::image(
+                                id.clone(),
+                                sender,
+                                mine,
+                                ts,
+                                dest.to_string_lossy().to_string(),
+                            )
+                        }
+                        Err(_) => continue,
                     }
                 }
-                _ => {}
+                _ => continue,
+            };
+            msg.reply_to = reply_to;
+            if let Some(rx) = reactions.remove(&id) {
+                msg.reactions = rx;
             }
+            out.push(msg);
         }
         out
     }
 
-    pub async fn send(&self, room: &str, body: &str) -> anyhow::Result<()> {
+    pub async fn send(&self, room: &str, body: &str, reply_to: Option<&str>) -> anyhow::Result<()> {
         let rid = RoomId::parse(room)?;
         let Some(room) = self.client.get_room(&rid) else {
             anyhow::bail!("unknown room {room}");
         };
-        room.send(RoomMessageEventContent::text_plain(body)).await?;
+        let mut content = RoomMessageEventContent::text_plain(body);
+        if let Some(r) = reply_to {
+            if let Ok(eid) = EventId::parse(r) {
+                content.relates_to = Some(Relation::Reply { in_reply_to: InReplyTo::new(eid) });
+            }
+        }
+        room.send(content).await?;
+        Ok(())
+    }
+
+    pub async fn react(&self, room: &str, event_id: &str, key: &str) -> anyhow::Result<()> {
+        let rid = RoomId::parse(room)?;
+        let Some(room) = self.client.get_room(&rid) else {
+            anyhow::bail!("unknown room {room}");
+        };
+        let eid = EventId::parse(event_id)?;
+        room.send(ReactionEventContent::new(Annotation::new(eid, key.to_string()))).await?;
         Ok(())
     }
 
@@ -188,18 +248,76 @@ impl MatrixBackend {
         let Some(room) = self.client.get_room(&rid) else {
             anyhow::bail!("unknown room {room}");
         };
-        let data = std::fs::read(path)?;
-        let p = std::path::Path::new(path);
-        let filename = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "image".into());
-        let mime = mime_for(p);
+        // Compress hard before upload — the homeserver (Pi) keeps a short-lived
+        // copy; clients keep the original. Downscale to <=1600px, JPEG q72.
+        let (data, mime, filename) = compress_image(path);
         room.send_attachment(&filename, &mime, data, AttachmentConfig::new()).await?;
         Ok(())
     }
 
-    pub async fn mark_read(&self, _room: &str) -> anyhow::Result<()> {
-        // TODO: send a read receipt for the latest event
+    pub async fn mark_read(&self, room: &str) -> anyhow::Result<()> {
+        use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
+        use matrix_sdk::ruma::events::receipt::ReceiptThread;
+        let Ok(rid) = RoomId::parse(room) else { return Ok(()) };
+        let Some(room) = self.client.get_room(&rid) else { return Ok(()) };
+        let mut opts = MessagesOptions::backward();
+        opts.limit = 1u32.into();
+        if let Ok(resp) = room.messages(opts).await {
+            if let Some(ev) = resp.chunk.first() {
+                if let Ok(any) = ev.event.deserialize() {
+                    let eid = any.event_id().to_owned();
+                    let _ = room
+                        .send_single_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, eid)
+                        .await;
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// Decode, downscale (longest side <=1600), and re-encode as JPEG q72. Falls back
+/// to the raw bytes if the file can't be decoded. Returns (bytes, mime, filename).
+fn compress_image(path: &str) -> (Vec<u8>, mime::Mime, String) {
+    let p = std::path::Path::new(path);
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".into());
+    match image::open(path) {
+        Ok(img) => {
+            let img = if img.width() > 1600 || img.height() > 1600 {
+                img.resize(1600, 1600, image::imageops::FilterType::Lanczos3)
+            } else {
+                img
+            };
+            let rgb = img.to_rgb8();
+            let mut buf = std::io::Cursor::new(Vec::new());
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 72);
+            if enc.encode_image(&rgb).is_ok() {
+                return (buf.into_inner(), mime::IMAGE_JPEG, format!("{stem}.jpg"));
+            }
+            (std::fs::read(path).unwrap_or_default(), mime_for(p), filename_of(p))
+        }
+        Err(_) => (std::fs::read(path).unwrap_or_default(), mime_for(p), filename_of(p)),
+    }
+}
+
+fn filename_of(p: &std::path::Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "image".into())
+}
+
+/// Strip the leading rich-reply quote fallback ("> …" lines) from a body.
+fn strip_reply_fallback(body: &str) -> String {
+    if !body.starts_with("> ") {
+        return body.to_string();
+    }
+    body.lines()
+        .skip_while(|l| l.starts_with("> ") || l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_start()
+        .to_string()
 }
 
 fn load_config() -> Option<Config> {

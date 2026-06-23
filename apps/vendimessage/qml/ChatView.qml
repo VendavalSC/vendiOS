@@ -9,11 +9,12 @@ Item {
     id: cv
     property var theme
     property var convo            // { id, name, color, messages, typing }
-    signal send(string text, string replyName, string replyText)
+    signal send(string text, string replyName, string replyText, string replyId)
     signal sendImage(string path)
     signal openImage(string source)
     signal openInfo()
     signal reacted(int index, string reactionsJson)
+    signal reactSent(string msgId, string emoji)
 
     function addReaction(idx, emoji) {
         var cur = [];
@@ -22,6 +23,8 @@ Item {
         var js = JSON.stringify(cur);
         thread.setProperty(idx, "reactions", js);
         cv.reacted(idx, js);
+        var mid = thread.get(idx).id;
+        if (mid) cv.reactSent(mid, emoji);
     }
 
     property string _loadedId: ""
@@ -41,7 +44,7 @@ Item {
         }
         Qt.callLater(msgs_view.positionViewAtEnd);
     }
-    function startReply(name, text) { composer.setReply(name, text); }
+    function startReply(name, text, id) { composer.setReply(name, text, id); }
 
     ListModel { id: thread }
 
@@ -157,9 +160,10 @@ Item {
             showSender: isGroup && !model.mine && (index === 0 || breaks(prevMsg, model))
             showAvatar: isGroup && !model.mine && breaks(nextMsg, model)
             delivered: model.mine === true && index === (thread.count - 1)
+            msgId: model.id ? model.id : ""
             onImageClicked: function (s) { cv.openImage(s); }
-            onReplyRequested: cv.startReply(model.mine ? "You" : (model.sender ? model.sender : (cv.convo ? cv.convo.name : "")),
-                                           model.kind === "image" ? "Photo" : model.text)
+            onReplyRequested: cv.startReply(model.mine ? "You" : (cv.convo ? cv.convo.name : (model.sender ? model.sender : "")),
+                                           model.kind === "image" ? "Photo" : model.text, model.id ? model.id : "")
             onReact: function (e) { cv.addReaction(index, e); }
         }
 
@@ -178,7 +182,7 @@ Item {
         id: composer
         anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
         theme: cv.theme
-        onSend: function (t) { cv.send(t, composer.replyName, composer.replyText); composer.clearReply(); }
+        onSend: function (t) { cv.send(t, composer.replyName, composer.replyText, composer.replyId); composer.clearReply(); }
         onAttach: function (p) { cv.sendImage(p); }
     }
 }

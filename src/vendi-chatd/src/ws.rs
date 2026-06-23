@@ -71,11 +71,17 @@ async fn handle_cmd(backend: &Backend, line: &str) -> Vec<Outgoing> {
             let messages = backend.timeline(&room, limit).await;
             vec![Outgoing::Timeline { room, messages }]
         }
-        Cmd::Send { room, body } => match backend.send(&room, &body).await {
+        Cmd::Send { room, body, reply_to } => {
+            match backend.send(&room, &body, reply_to.as_deref()).await {
+                Ok(()) => vec![],
+                Err(e) => vec![Outgoing::Error { message: e.to_string() }],
+            }
+        }
+        Cmd::SendImage { room, path } => match backend.send_image(&room, &path).await {
             Ok(()) => vec![],
             Err(e) => vec![Outgoing::Error { message: e.to_string() }],
         },
-        Cmd::SendImage { room, path } => match backend.send_image(&room, &path).await {
+        Cmd::React { room, event_id, key } => match backend.react(&room, &event_id, &key).await {
             Ok(()) => vec![],
             Err(e) => vec![Outgoing::Error { message: e.to_string() }],
         },

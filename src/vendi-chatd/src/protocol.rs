@@ -11,10 +11,21 @@ pub enum Cmd {
     ListRooms,
     /// Fetch recent messages for a room.
     Timeline { room: String, #[serde(default)] limit: Option<u32> },
-    /// Send a text message to a room.
-    Send { room: String, body: String },
+    /// Send a text message to a room (optionally a reply to `reply_to`).
+    Send {
+        room: String,
+        body: String,
+        #[serde(default)]
+        reply_to: Option<String>,
+    },
     /// Send an image: `path` is a local file the daemon uploads.
     SendImage { room: String, path: String },
+    /// React to a message with an emoji.
+    React {
+        room: String,
+        event_id: String,
+        key: String,
+    },
     /// Mark a room as read.
     MarkRead { room: String },
 }
@@ -58,14 +69,41 @@ pub struct Message {
     /// for images: the LOCAL cached file path the client downloaded it to (so the
     /// server can purge the original — storage lives on clients, not the server).
     pub media: String,
+    /// event id of the message this one replies to ("" = not a reply). The client
+    /// resolves the quoted sender/text from its own loaded timeline.
+    #[serde(default)]
+    pub reply_to: String,
+    /// emoji reactions on this message (one entry per reaction, repeats = count).
+    #[serde(default)]
+    pub reactions: Vec<String>,
 }
 
 impl Message {
     pub fn text(id: String, sender: String, body: String, mine: bool, ts: String) -> Self {
-        Self { id, sender, body, mine, ts, kind: "text".into(), media: String::new() }
+        Self {
+            id,
+            sender,
+            body,
+            mine,
+            ts,
+            kind: "text".into(),
+            media: String::new(),
+            reply_to: String::new(),
+            reactions: Vec::new(),
+        }
     }
     pub fn image(id: String, sender: String, mine: bool, ts: String, media: String) -> Self {
-        Self { id, sender, body: String::new(), mine, ts, kind: "image".into(), media }
+        Self {
+            id,
+            sender,
+            body: String::new(),
+            mine,
+            ts,
+            kind: "image".into(),
+            media,
+            reply_to: String::new(),
+            reactions: Vec::new(),
+        }
     }
 }
 

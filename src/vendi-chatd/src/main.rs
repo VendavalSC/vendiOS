@@ -106,13 +106,18 @@ async fn handle_client(stream: UnixStream, backend: Backend) -> anyhow::Result<(
                 let messages = backend.timeline(&room, limit).await;
                 send(&write, &Outgoing::Timeline { room, messages }).await;
             }
-            Cmd::Send { room, body } => {
-                if let Err(e) = backend.send(&room, &body).await {
+            Cmd::Send { room, body, reply_to } => {
+                if let Err(e) = backend.send(&room, &body, reply_to.as_deref()).await {
                     send(&write, &Outgoing::Error { message: e.to_string() }).await;
                 }
             }
             Cmd::SendImage { room, path } => {
                 if let Err(e) = backend.send_image(&room, &path).await {
+                    send(&write, &Outgoing::Error { message: e.to_string() }).await;
+                }
+            }
+            Cmd::React { room, event_id, key } => {
+                if let Err(e) = backend.react(&room, &event_id, &key).await {
                     send(&write, &Outgoing::Error { message: e.to_string() }).await;
                 }
             }

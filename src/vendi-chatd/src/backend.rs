@@ -64,12 +64,15 @@ impl Backend {
         }
     }
 
-    pub async fn send(&self, room: &str, body: &str) -> anyhow::Result<()> {
+    pub async fn send(&self, room: &str, body: &str, reply_to: Option<&str>) -> anyhow::Result<()> {
         match &self.inner {
             Inner::Mock(s) => {
-                let msg = Message::text(
+                let mut msg = Message::text(
                     format!("m{}", now_secs()), "me".into(), body.to_string(), true, "now".into(),
                 );
+                if let Some(r) = reply_to {
+                    msg.reply_to = r.to_string();
+                }
                 {
                     let mut st = s.lock().unwrap();
                     st.msgs.entry(room.to_string()).or_default().push(msg.clone());
@@ -81,7 +84,24 @@ impl Backend {
                 Ok(())
             }
             #[cfg(feature = "matrix")]
-            Inner::Matrix(m) => m.send(room, body).await,
+            Inner::Matrix(m) => m.send(room, body, reply_to).await,
+        }
+    }
+
+    /// React to a message with an emoji.
+    pub async fn react(&self, room: &str, event_id: &str, key: &str) -> anyhow::Result<()> {
+        match &self.inner {
+            Inner::Mock(s) => {
+                let mut st = s.lock().unwrap();
+                if let Some(msgs) = st.msgs.get_mut(room) {
+                    if let Some(m) = msgs.iter_mut().find(|m| m.id == event_id) {
+                        m.reactions.push(key.to_string());
+                    }
+                }
+                Ok(())
+            }
+            #[cfg(feature = "matrix")]
+            Inner::Matrix(m) => m.react(room, event_id, key).await,
         }
     }
 

@@ -8,6 +8,7 @@ import QtQuick
 Item {
     id: b
     property var theme
+    property string msgId: ""
     property string text: ""
     property string time: ""
     property bool mine: false

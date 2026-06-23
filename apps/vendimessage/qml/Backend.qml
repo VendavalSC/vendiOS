@@ -39,14 +39,35 @@ Item {
         if (/^\d+$/.test(String(ts))) return Qt.formatDateTime(new Date(parseInt(ts)), "h:mm AP");
         return ts;
     }
+    // "@armando:vendi.chat" → "Armando"
+    function _name(mxid) {
+        var s = String(mxid || "");
+        var m = /^@([^:]+):/.exec(s);
+        var u = m ? m[1] : s.replace(/^@/, "");
+        return u.length ? u.charAt(0).toUpperCase() + u.slice(1) : u;
+    }
     // map a daemon message → the UI message shape
     function _map(d) {
         return {
-            text: d.body || "", mine: d.mine === true, time: _fmtTs(d.ts),
+            id: d.id || "", text: d.body || "", mine: d.mine === true, time: _fmtTs(d.ts),
             kind: d.kind || "text", source: d.media || "",
-            replyName: "", replyText: "", sender: d.sender || "",
-            senderColor: "", reactions: "[]"
+            replyTo: d.reply_to || "", replyName: "", replyText: "",
+            sender: d.sender || "", senderColor: "",
+            reactions: JSON.stringify(d.reactions || [])
         };
+    }
+    // fill in the quoted sender/text for any reply, resolved from the same thread
+    function _resolveReplies(msgs) {
+        var byId = {};
+        for (var i = 0; i < msgs.length; i++) if (msgs[i].id) byId[msgs[i].id] = msgs[i];
+        for (var j = 0; j < msgs.length; j++) {
+            var t = msgs[j].replyTo ? byId[msgs[j].replyTo] : null;
+            if (t) {
+                msgs[j].replyName = t.mine ? "You" : _name(t.sender);
+                msgs[j].replyText = t.kind === "image" ? "Photo" : t.text;
+            }
+        }
+        return msgs;
     }
     function _find(id) {
         for (var i = 0; i < conversations.length; i++)
@@ -69,13 +90,13 @@ Item {
             var idx = _find(m.room); if (idx < 0) return;
             var cs = conversations.slice();
             var c = Object.assign({}, cs[idx]);
-            c.messages = (m.messages || []).map(_map);
+            c.messages = _resolveReplies((m.messages || []).map(_map));
             cs[idx] = c; conversations = cs;
         } else if (m.type === "message") {
             var j = _find(m.room); if (j < 0) return;
             var cs2 = conversations.slice();
             var c2 = Object.assign({}, cs2[j]);
-            c2.messages = c2.messages.concat([_map(m.message)]);
+            c2.messages = _resolveReplies(c2.messages.concat([_map(m.message)]));
             c2.preview = m.message.body || (m.message.kind === "image" ? "📷 Photo" : "");
             cs2[j] = c2; conversations = cs2;
         }
@@ -83,6 +104,12 @@ Item {
 
     // public API
     function loadRoom(id) { _send({ cmd: "timeline", room: id }); }
-    function send(id, text) { _send({ cmd: "send", room: id, body: text }); }
+    function send(id, text, replyTo) {
+        _send({ cmd: "send", room: id, body: text, reply_to: replyTo || null });
+    }
     function sendImage(id, path) { _send({ cmd: "send_image", room: id, path: path }); }
+    function react(id, eventId, key) {
+        if (eventId) _send({ cmd: "react", room: id, event_id: eventId, key: key });
+    }
+    function markRead(id) { _send({ cmd: "mark_read", room: id }); }
 }

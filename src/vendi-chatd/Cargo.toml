@@ -16,7 +16,7 @@ path = "src/main.rs"
 # and IPC be developed/tested. `--features matrix` pulls matrix-sdk for the real
 # backend (heavier build; needs a homeserver to actually log in).
 default = []
-matrix = ["dep:matrix-sdk", "dep:mime"]
+matrix = ["dep:matrix-sdk", "dep:mime", "dep:image"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
@@ -31,3 +31,5 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 # real backend, opt-in
 matrix-sdk = { version = "0.7", default-features = true, optional = true }
 mime = { version = "0.3", optional = true }
+# image compression before upload (downscale + JPEG re-encode) — keep server light
+image = { version = "0.25", optional = true }
