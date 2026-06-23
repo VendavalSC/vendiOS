@@ -31,7 +31,7 @@ ApplicationWindow {
             color: palette[Math.floor(Math.random() * palette.length)],
             preview: "", time: nowTime(), unread: false, messages: []
         };
-        conversations = [c].concat(conversations);
+        _setConvos([c].concat(conversations));
         currentIndex = 0;
         composeOpen = false;
     }
@@ -40,7 +40,7 @@ ApplicationWindow {
         var c = Object.assign({}, convos[currentIndex]);
         c.muted = !c.muted;
         convos[currentIndex] = c;
-        conversations = convos;
+        _setConvos(convos);
     }
 
     function isImageUrl(u) {
@@ -75,10 +75,16 @@ ApplicationWindow {
         Behavior on inputBg       { ColorAnimation { duration: 260; easing.type: Easing.InOutQuad } }
     }
 
-    // ── backend (mock for now) ────────────────────────────────────────────────
-    property var conversations: Mock.conversations()
+    // ── backend: live vendi-chatd over WebSocket, mock fallback when offline ───
+    Backend { id: backend }
+    property var mockConvos: Mock.conversations()
+    readonly property var conversations: backend.connected ? backend.conversations : mockConvos
     property int currentIndex: 0
-    readonly property var currentConvo: conversations[currentIndex]   // pure binding
+    readonly property var currentConvo: (conversations && currentIndex < conversations.length)
+                                        ? conversations[currentIndex] : undefined
+    onCurrentConvoChanged: if (backend.connected && currentConvo && currentConvo.messages.length === 0)
+                               backend.loadRoom(currentConvo.id)
+    function _setConvos(arr) { if (backend.connected) backend.conversations = arr; else mockConvos = arr; }
 
     property int _typingFor: 0          // convo index the simulated reply is for
 
@@ -86,21 +92,21 @@ ApplicationWindow {
         return Qt.formatTime(new Date(), "h:mm AP");
     }
     function sendMessage(text, replyName, replyText) {
+        if (backend.connected) { if (currentConvo) backend.send(currentConvo.id, text); return; }
         appendMessage(currentIndex, {
             text: text, mine: true, time: nowTime(), kind: "text", source: "",
             replyName: replyName || "", replyText: replyText || "",
             sender: "", senderColor: "", reactions: "[]"
         }, text);
         simulateReply();
-        // TODO: backend.send(c.id, text) → vendi-chatd
     }
     function sendImageMessage(path) {
+        if (backend.connected) { if (currentConvo) backend.sendImage(currentConvo.id, path); return; }
         appendMessage(currentIndex, {
             text: "", mine: true, time: nowTime(), kind: "image", source: path,
             replyName: "", replyText: "", sender: "", senderColor: "", reactions: "[]"
         }, "📷 Photo");
         simulateReply();
-        // TODO: backend.send_image(c.id, path) → vendi-chatd uploads, peers download to cache
     }
     function appendMessage(idx, msg, preview) {
         var convos = conversations.slice();
@@ -109,14 +115,14 @@ ApplicationWindow {
         c.preview = preview;
         c.typing = false;
         convos[idx] = c;
-        conversations = convos;          // re-triggers currentConvo → live update
+        _setConvos(convos);              // re-triggers currentConvo → live update
     }
     function setTyping(idx, on) {
         var convos = conversations.slice();
         var c = Object.assign({}, convos[idx]);
         c.typing = on;
         convos[idx] = c;
-        conversations = convos;
+        _setConvos(convos);
     }
 
     // MOCK only: pretend the contact starts typing, then replies. Goes away once

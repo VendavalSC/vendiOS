@@ -11,6 +11,9 @@ mod backend;
 #[cfg(feature = "matrix")]
 mod matrix;
 mod protocol;
+mod ws;
+
+const WS_ADDR: &str = "127.0.0.1:8765";
 
 use backend::Backend;
 use protocol::{Cmd, Outgoing};
@@ -27,6 +30,16 @@ async fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&path); // clear a stale socket
     let listener = UnixListener::bind(&path)?;
     eprintln!("vendi-chatd: listening on {}", path.display());
+
+    // websocket transport for the QML client
+    {
+        let b = backend.clone();
+        tokio::spawn(async move {
+            if let Err(e) = ws::serve(b, WS_ADDR).await {
+                eprintln!("vendi-chatd: websocket server error: {e}");
+            }
+        });
+    }
 
     // tidy the socket on Ctrl-C / SIGTERM
     {
