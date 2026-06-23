@@ -18,7 +18,11 @@ use matrix_sdk::{
     attachment::AttachmentConfig,
     config::SyncSettings,
     media::{MediaFormat, MediaRequest},
-    ruma::events::room::message::{MessageType, RoomMessageEventContent, SyncRoomMessageEvent},
+    room::MessagesOptions,
+    ruma::events::{
+        room::message::{MessageType, RoomMessageEventContent, SyncRoomMessageEvent},
+        AnyMessageLikeEvent, AnyTimelineEvent, MessageLikeEvent,
+    },
     ruma::RoomId,
     Client, Room as SdkRoom,
 };
@@ -62,9 +66,10 @@ impl MatrixBackend {
                 let id = orig.event_id.to_string();
                 let sender = orig.sender.to_string();
                 let mine = me.as_deref() == Some(orig.sender.as_ref());
+                let ts = orig.origin_server_ts.0.to_string();
                 let msg = match &orig.content.msgtype {
                     MessageType::Text(t) => {
-                        Some(Message::text(id, sender, t.body.clone(), mine, String::new()))
+                        Some(Message::text(id, sender, t.body.clone(), mine, ts))
                     }
                     MessageType::Image(img) => {
                         let req = MediaRequest { source: img.source.clone(), format: MediaFormat::File };
@@ -72,7 +77,7 @@ impl MatrixBackend {
                             Ok(bytes) => {
                                 let dest = media_cache_dir().join(format!("{id}.bin"));
                                 let _ = std::fs::write(&dest, bytes);
-                                Some(Message::image(id, sender, mine, String::new(),
+                                Some(Message::image(id, sender, mine, ts,
                                                     dest.to_string_lossy().to_string()))
                             }
                             Err(_) => None,
@@ -118,10 +123,55 @@ impl MatrixBackend {
         out
     }
 
-    pub async fn timeline(&self, _room: &str, _limit: Option<u32>) -> Vec<Message> {
-        // TODO: scrollback via matrix-sdk-ui Timeline. Live messages arrive via
-        // the sync event handler in the meantime.
-        Vec::new()
+    /// Scrollback: fetch recent history via the /messages endpoint (backward
+    /// pagination). Images are downloaded into the local media cache, so the
+    /// server can purge its copies — storage lives on the clients.
+    pub async fn timeline(&self, room: &str, limit: Option<u32>) -> Vec<Message> {
+        let Ok(rid) = RoomId::parse(room) else { return Vec::new() };
+        let Some(room) = self.client.get_room(&rid) else { return Vec::new() };
+
+        let mut opts = MessagesOptions::backward();
+        opts.limit = limit.unwrap_or(50).into();
+        let resp = match room.messages(opts).await {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let me = self.client.user_id().map(|u| u.to_owned());
+        let mut out = Vec::new();
+        // backward pagination yields newest-first; reverse for chronological order
+        for ev in resp.chunk.into_iter().rev() {
+            let Ok(any) = ev.event.deserialize() else { continue };
+            let AnyTimelineEvent::MessageLike(AnyMessageLikeEvent::RoomMessage(
+                MessageLikeEvent::Original(orig),
+            )) = any
+            else {
+                continue;
+            };
+            let id = orig.event_id.to_string();
+            let sender = orig.sender.to_string();
+            let mine = me.as_deref() == Some(orig.sender.as_ref());
+            let ts = orig.origin_server_ts.0.to_string();
+            match orig.content.msgtype {
+                MessageType::Text(t) => out.push(Message::text(id, sender, t.body, mine, ts)),
+                MessageType::Image(img) => {
+                    let req = MediaRequest { source: img.source.clone(), format: MediaFormat::File };
+                    if let Ok(bytes) = self.client.media().get_media_content(&req, true).await {
+                        let dest = media_cache_dir().join(format!("{id}.bin"));
+                        let _ = std::fs::write(&dest, &bytes);
+                        out.push(Message::image(
+                            id,
+                            sender,
+                            mine,
+                            ts,
+                            dest.to_string_lossy().to_string(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     pub async fn send(&self, room: &str, body: &str) -> anyhow::Result<()> {

@@ -33,10 +33,16 @@ Item {
         if (sock.status === WebSocket.Open) sock.sendTextMessage(JSON.stringify(obj));
     }
 
+    // a daemon ts is epoch-millis (from matrix) or a plain label (from mock)
+    function _fmtTs(ts) {
+        if (!ts) return "";
+        if (/^\d+$/.test(String(ts))) return Qt.formatDateTime(new Date(parseInt(ts)), "h:mm AP");
+        return ts;
+    }
     // map a daemon message → the UI message shape
     function _map(d) {
         return {
-            text: d.body || "", mine: d.mine === true, time: d.ts || "",
+            text: d.body || "", mine: d.mine === true, time: _fmtTs(d.ts),
             kind: d.kind || "text", source: d.media || "",
             replyName: "", replyText: "", sender: d.sender || "",
             senderColor: "", reactions: "[]"
