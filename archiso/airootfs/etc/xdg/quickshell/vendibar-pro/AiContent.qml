@@ -297,6 +297,13 @@ Item {
             splitMarker: ""
             onRead: chunk => {
                 if (ai.phase === "thinking") ai.phase = "responding";
+                // [[CLEAR]] — the text streamed so far was pre-tool chatter; drop it
+                // so only the real answer (streamed next) is shown.
+                if (chunk.indexOf("[[CLEAR]]") !== -1) {
+                    ai.cur = "";
+                    chunk = chunk.split("[[CLEAR]]").join("");
+                    if (chunk.length === 0) return;
+                }
                 // [[PERM]] — a Tier-2 action awaiting Allow/Deny
                 var qi = chunk.indexOf("[[PERM]]");
                 if (qi !== -1) {

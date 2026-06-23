@@ -13,12 +13,34 @@ Rectangle {
     property var card: ({})
     property string mono: "JetBrainsMonoNL Nerd Font"
 
+    // night? (from the weather payload's is_day flag)
+    readonly property bool night: card.night === true || String(card.night) === "true"
+    // condition bucket from the condition text
+    readonly property string wcat: {
+        var c = String(card.cond || "").toLowerCase();
+        if (/thunder|storm/.test(c)) return "storm";
+        if (/rain|drizzle|shower/.test(c)) return "rain";
+        if (/snow/.test(c)) return "snow";
+        if (/cloud|overcast|fog/.test(c)) return "cloud";
+        return "clear";
+    }
+    // [top, bottom] gradient per condition × day/night — clear is blue; cloud/
+    // rain get grayer & darker; night drops to deep indigo/slate.
+    readonly property var pal: ({
+        clear: night ? ["#243a6e", "#121d3a"] : ["#3a8fd6", "#2061ad"],
+        cloud: night ? ["#3b414b", "#23272e"] : ["#71808f", "#4c5662"],
+        rain:  night ? ["#2c3a46", "#18212a"] : ["#46607a", "#2b3c4a"],
+        storm: night ? ["#262f3c", "#141a22"] : ["#3c4b5e", "#232c39"],
+        snow:  night ? ["#414856", "#272c35"] : ["#90a6bd", "#5f7185"]
+    })
+    readonly property var cols: pal[wcat]
+
     implicitHeight: 104
     radius: 20
     gradient: Gradient {
         orientation: Gradient.Vertical
-        GradientStop { position: 0.0; color: "#3a8fd6" }
-        GradientStop { position: 1.0; color: "#2061ad" }
+        GradientStop { position: 0.0; color: wc.cols[0] }
+        GradientStop { position: 1.0; color: wc.cols[1] }
     }
 
     // soft top sheen
@@ -53,7 +75,7 @@ Rectangle {
     // icon
     Text {
         anchors { right: parent.right; top: parent.top; rightMargin: 18; topMargin: 10 }
-        text: wc.card.icon ? wc.card.icon : "☀️"
+        text: wc.card.icon ? wc.card.icon : (wc.night ? "🌙" : "☀️")
         font.pixelSize: 30
     }
     // condition + hi/lo

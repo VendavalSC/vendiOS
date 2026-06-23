@@ -8,8 +8,17 @@ set -euo pipefail
 
 # `--card` prints a richer line for the AI weather card:
 #   "<city>|<emoji>|<temp>°C|<condition>|<high>°|<low>°"
-mode=${1:-}
-loc=$(cat "$HOME/.config/vendi/weather-location" 2>/dev/null || true)
+# An extra non-flag argument overrides the location for this call (a "lat,lon"
+# or a city name), so the AI can answer "weather in Tokyo".
+mode=""
+locarg=""
+for a in "$@"; do
+    case "$a" in
+        --card) mode="--card" ;;
+        *)      locarg="$a" ;;
+    esac
+done
+loc=${locarg:-$(cat "$HOME/.config/vendi/weather-location" 2>/dev/null || true)}
 city=""
 
 if [[ "$loc" =~ ^-?[0-9.]+,-?[0-9.]+$ ]]; then
@@ -32,9 +41,10 @@ fi
 extra=""
 [[ "$mode" == "--card" ]] && extra="&daily=temperature_2m_max,temperature_2m_min&timezone=auto"
 j=$(curl -sf --max-time 6 \
-    "https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code${extra}") || exit 0
+    "https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code,is_day${extra}") || exit 0
 t=$(grep -oE '"temperature_2m":-?[0-9.]+' <<<"$j" | head -1 | cut -d: -f2)
 c=$(grep -oE '"weather_code":[0-9]+'      <<<"$j" | head -1 | cut -d: -f2)
+day=$(grep -oE '"is_day":[0-9]+'          <<<"$j" | head -1 | cut -d: -f2)
 [[ -n "${t:-}" ]] || exit 0
 t=$(printf '%.0f' "$t")
 
@@ -54,12 +64,21 @@ case "${c:-}" in
     *)              e="🌡️"; d="" ;;
 esac
 
+# At night (is_day=0) the clear/partly-clear icons carry a sun → swap for a moon
+# (cloud/rain/snow icons look the same after dark, so leave them).
+if [[ "${day:-1}" == "0" ]]; then
+    case "${c:-}" in
+        0|1) e="🌙" ;;
+        2)   e="☁️" ;;
+    esac
+fi
+
 if [[ "$mode" == "--card" ]]; then
     hi=$(grep -oE '"temperature_2m_max":\[-?[0-9.]+' <<<"$j" | head -1 | grep -oE '\-?[0-9.]+$')
     lo=$(grep -oE '"temperature_2m_min":\[-?[0-9.]+' <<<"$j" | head -1 | grep -oE '\-?[0-9.]+$')
     [[ -n "${hi:-}" ]] && hi=$(printf '%.0f' "$hi")
     [[ -n "${lo:-}" ]] && lo=$(printf '%.0f' "$lo")
-    printf '%s|%s|%s°C|%s|%s°|%s°\n' "${city:-}" "$e" "$t" "$d" "${hi:-}" "${lo:-}"
+    printf '%s|%s|%s°C|%s|%s°|%s°|%s\n' "${city:-}" "$e" "$t" "$d" "${hi:-}" "${lo:-}" "${day:-1}"
 else
     printf '%s|%s°C|%s\n' "$e" "$t" "$d"
 fi

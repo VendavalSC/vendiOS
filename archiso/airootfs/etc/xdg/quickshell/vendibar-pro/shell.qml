@@ -849,10 +849,16 @@ ShellRoot {
                 Rectangle {
                     anchors.fill: parent; anchors.margins: 34
                     radius: 30
+                    // Vivify the theme accent for the glow: force decent saturation
+                    // and a mid lightness so washed-out/monochrome accents (e.g. a
+                    // pale dynamic-wallpaper accent) don't blur into white/gray.
+                    readonly property real gh: root.accent.hslHue
+                    readonly property real gs: Math.max(root.accent.hslSaturation, 0.62)
+                    readonly property real gl: Math.min(Math.max(root.accent.hslLightness, 0.46), 0.60)
                     gradient: Gradient {
                         orientation: Gradient.Horizontal
-                        GradientStop { position: 0.0; color: root.accent }
-                        GradientStop { position: 1.0; color: Qt.hsla((root.accent.hslHue + 0.12) % 1.0, 0.7, 0.62, 1) }
+                        GradientStop { position: 0.0; color: Qt.hsla(parent.gh, parent.gs, parent.gl, 1) }
+                        GradientStop { position: 1.0; color: Qt.hsla((parent.gh + 0.12) % 1.0, parent.gs, parent.gl, 1) }
                     }
                 }
             }
