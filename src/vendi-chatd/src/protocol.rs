@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Cmd {
+    /// Create a new account on the homeserver, then sign in.
+    Register { user: String, password: String },
+    /// Sign in to an existing account.
+    Login { user: String, password: String },
+    /// Sign out (forget the saved session; back to the login screen).
+    Logout,
     /// List the conversations.
     ListRooms,
     /// Fetch recent messages for a room.
@@ -26,6 +32,12 @@ pub enum Cmd {
         event_id: String,
         key: String,
     },
+    /// Start a new chat with a user ("@bob:vendi.chat" or just "bob").
+    StartChat { user: String },
+    /// Accept a pending chat request (join an invited room).
+    AcceptInvite { room: String },
+    /// Decline a pending chat request (leave/reject an invited room).
+    RejectInvite { room: String },
     /// Mark a room as read.
     MarkRead { room: String },
 }
@@ -54,6 +66,9 @@ pub struct Room {
     pub unread: u32,
     /// stable colour seed for the avatar monogram
     pub color: String,
+    /// true = a pending chat request (an invite not yet accepted)
+    #[serde(default)]
+    pub invite: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

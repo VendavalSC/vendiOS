@@ -80,8 +80,8 @@ async fn handle_client(stream: UnixStream, backend: Backend) -> anyhow::Result<(
         });
     }
 
-    // greet
-    send(&write, &Outgoing::Status { state: "ready".into() }).await;
+    // greet with the current auth state
+    send(&write, &Outgoing::Status { state: backend.status().await.into() }).await;
 
     // command loop
     let mut lines = BufReader::new(read).lines();
@@ -98,6 +98,34 @@ async fn handle_client(stream: UnixStream, backend: Backend) -> anyhow::Result<(
             }
         };
         match cmd {
+            Cmd::Register { user, password } => {
+                if let Err(e) = backend.login(&user, &password, true).await {
+                    send(&write, &Outgoing::Error { message: e.to_string() }).await;
+                }
+            }
+            Cmd::Login { user, password } => {
+                if let Err(e) = backend.login(&user, &password, false).await {
+                    send(&write, &Outgoing::Error { message: e.to_string() }).await;
+                }
+            }
+            Cmd::Logout => {
+                let _ = backend.logout().await;
+            }
+            Cmd::StartChat { user } => {
+                if let Err(e) = backend.start_chat(&user).await {
+                    send(&write, &Outgoing::Error { message: e.to_string() }).await;
+                }
+            }
+            Cmd::AcceptInvite { room } => {
+                if let Err(e) = backend.accept_invite(&room).await {
+                    send(&write, &Outgoing::Error { message: e.to_string() }).await;
+                }
+            }
+            Cmd::RejectInvite { room } => {
+                if let Err(e) = backend.reject_invite(&room).await {
+                    send(&write, &Outgoing::Error { message: e.to_string() }).await;
+                }
+            }
             Cmd::ListRooms => {
                 let rooms = backend.list_rooms().await;
                 send(&write, &Outgoing::Rooms { rooms }).await;

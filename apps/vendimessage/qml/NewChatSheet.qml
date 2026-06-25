@@ -8,6 +8,7 @@ Item {
     id: ns
     property var theme
     property bool open: false
+    property bool connected: false   // real backend → start a Matrix chat by @user
     signal create(string name)
     signal closed()
 
@@ -51,7 +52,7 @@ Item {
                 TextField {
                     id: toField
                     anchors.fill: parent; anchors.leftMargin: 42; anchors.rightMargin: 12
-                    placeholderText: "Name"; placeholderTextColor: theme.textSecondary
+                    placeholderText: ns.connected ? "@username" : "Name"; placeholderTextColor: theme.textSecondary
                     color: theme.textPrimary; font.pixelSize: 14; font.family: theme.ui
                     background: null; verticalAlignment: TextInput.AlignVCenter
                     onAccepted: if (text.trim().length) ns.create(text.trim())

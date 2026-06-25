@@ -8,8 +8,12 @@ import QtWebSockets
 
 Item {
     id: be
-    property bool connected: false
+    property bool connected: false      // socket open
+    property bool authed: false         // signed in (daemon has a session)
     property var conversations: []
+    property var requests: []           // pending chat requests (invites)
+    property string lastError: ""
+    signal errored(string message)
     property string url: "ws://127.0.0.1:8765"
 
     WebSocket {
@@ -77,15 +81,24 @@ Item {
 
     function _onMessage(text) {
         var m; try { m = JSON.parse(text); } catch (e) { return; }
-        if (m.type === "rooms") {
-            var out = [];
+        if (m.type === "status") {
+            be.authed = (m.state === "ready");
+            if (be.authed) _send({ cmd: "list_rooms" });
+            else { conversations = []; requests = []; }
+        } else if (m.type === "error") {
+            be.lastError = m.message || "Something went wrong";
+            be.errored(be.lastError);
+        } else if (m.type === "rooms") {
+            var convos = [], reqs = [];
             for (var i = 0; i < m.rooms.length; i++) {
                 var r = m.rooms[i];
-                out.push({ id: r.id, name: r.name, color: r.color || "#7d8590",
-                           preview: r.preview || "", time: "", unread: r.unread || 0,
-                           group: false, members: [], typing: false, messages: [] });
+                var o = { id: r.id, name: r.name, color: r.color || "#7d8590",
+                          preview: r.preview || "", time: "", unread: r.unread || 0,
+                          group: false, members: [], typing: false, messages: [],
+                          invite: r.invite === true };
+                if (o.invite) reqs.push(o); else convos.push(o);
             }
-            conversations = out;
+            conversations = convos; requests = reqs;
         } else if (m.type === "timeline") {
             var idx = _find(m.room); if (idx < 0) return;
             var cs = conversations.slice();
@@ -112,4 +125,12 @@ Item {
         if (eventId) _send({ cmd: "react", room: id, event_id: eventId, key: key });
     }
     function markRead(id) { _send({ cmd: "mark_read", room: id }); }
+
+    // auth + people
+    function register(user, password) { _send({ cmd: "register", user: user, password: password }); }
+    function login(user, password) { _send({ cmd: "login", user: user, password: password }); }
+    function logout() { _send({ cmd: "logout" }); }
+    function startChat(user) { _send({ cmd: "start_chat", user: user }); }
+    function acceptInvite(id) { _send({ cmd: "accept_invite", room: id }); }
+    function rejectInvite(id) { _send({ cmd: "reject_invite", room: id }); }
 }

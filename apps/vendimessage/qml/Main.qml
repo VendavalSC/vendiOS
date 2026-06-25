@@ -43,6 +43,7 @@ ApplicationWindow {
 
     function createConversation(name) {
         if (!String(name).trim().length) return;
+        if (backend.connected) { backend.startChat(String(name).trim()); composeOpen = false; return; }
         var palette = ["#5b7cfa", "#f0883e", "#bc6bd9", "#56b36a", "#d9534f", "#e0b341", "#34c759"];
         var c = {
             id: "!new" + Date.now(), name: String(name).trim(),
@@ -194,6 +195,7 @@ ApplicationWindow {
             theme: theme
             dark: win.dark
             model: win.conversations
+            requests: backend.connected ? backend.requests : []
             currentIndex: win.currentIndex
             onSelected: function (id) {
                 for (var i = 0; i < win.conversations.length; i++)
@@ -201,6 +203,8 @@ ApplicationWindow {
             }
             onToggleTheme: win.dark = !win.dark
             onNewChat: win.composeOpen = true
+            onAcceptRequest: function (id) { if (backend.connected) backend.acceptInvite(id); }
+            onRejectRequest: function (id) { if (backend.connected) backend.rejectInvite(id); }
         }
         ChatView {
             width: parent.width - win.sidebarW; height: parent.height
@@ -239,8 +243,27 @@ ApplicationWindow {
     NewChatSheet {
         theme: theme
         open: win.composeOpen
+        connected: backend.connected
         onClosed: win.composeOpen = false
         onCreate: function (name) { win.createConversation(name); }
+    }
+
+    // ── onboarding: login / create account (shown until the daemon has a session)
+    LoginPage {
+        id: loginPage
+        anchors.fill: parent
+        z: 100
+        visible: backend.connected && !backend.authed
+        theme: theme
+        onSubmit: function (user, password, isRegister) {
+            if (isRegister) backend.register(user, password);
+            else backend.login(user, password);
+        }
+    }
+    Connections {
+        target: backend
+        function onErrored(message) { loginPage.errorText = message; }
+        function onAuthedChanged() { if (backend.authed) { loginPage.busy = false; loginPage.errorText = ""; } }
     }
 
     // ── drag & drop images anywhere in the window ──────────────────────────────

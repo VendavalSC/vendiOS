@@ -30,7 +30,7 @@ where
     let (mut tx, mut rx) = ws.split();
     let mut events = backend.subscribe();
 
-    tx.send(Message::Text(Outgoing::Status { state: "ready".into() }.to_line())).await?;
+    tx.send(Message::Text(Outgoing::Status { state: backend.status().await.into() }.to_line())).await?;
 
     loop {
         tokio::select! {
@@ -66,6 +66,30 @@ async fn handle_cmd(backend: &Backend, line: &str) -> Vec<Outgoing> {
         Err(e) => return vec![Outgoing::Error { message: format!("bad command: {e}") }],
     };
     match cmd {
+        Cmd::Register { user, password } => match backend.login(&user, &password, true).await {
+            Ok(()) => vec![],
+            Err(e) => vec![Outgoing::Error { message: e.to_string() }],
+        },
+        Cmd::Login { user, password } => match backend.login(&user, &password, false).await {
+            Ok(()) => vec![],
+            Err(e) => vec![Outgoing::Error { message: e.to_string() }],
+        },
+        Cmd::Logout => {
+            let _ = backend.logout().await;
+            vec![]
+        }
+        Cmd::StartChat { user } => match backend.start_chat(&user).await {
+            Ok(()) => vec![],
+            Err(e) => vec![Outgoing::Error { message: e.to_string() }],
+        },
+        Cmd::AcceptInvite { room } => match backend.accept_invite(&room).await {
+            Ok(()) => vec![],
+            Err(e) => vec![Outgoing::Error { message: e.to_string() }],
+        },
+        Cmd::RejectInvite { room } => match backend.reject_invite(&room).await {
+            Ok(()) => vec![],
+            Err(e) => vec![Outgoing::Error { message: e.to_string() }],
+        },
         Cmd::ListRooms => vec![Outgoing::Rooms { rooms: backend.list_rooms().await }],
         Cmd::Timeline { room, limit } => {
             let messages = backend.timeline(&room, limit).await;

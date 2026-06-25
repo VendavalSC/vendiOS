@@ -47,14 +47,39 @@ struct Config {
 impl MatrixBackend {
     pub async fn from_config(events: broadcast::Sender<Outgoing>) -> anyhow::Result<Option<Self>> {
         let Some(cfg) = load_config() else { return Ok(None) };
-
         let client = Client::builder().homeserver_url(&cfg.homeserver).build().await?;
         client
             .matrix_auth()
             .login_username(&cfg.user, &cfg.password)
             .initial_device_display_name("vendiMessage")
             .await?;
+        Ok(Some(Self::start(client, events).await?))
+    }
 
+    /// Runtime sign-in (optionally creating the account first), persisting creds
+    /// so the next launch auto-signs-in.
+    pub async fn connect(
+        events: broadcast::Sender<Outgoing>,
+        user: &str,
+        password: &str,
+        register: bool,
+    ) -> anyhow::Result<Self> {
+        let homeserver = homeserver_url();
+        let client = Client::builder().homeserver_url(&homeserver).build().await?;
+        if register {
+            do_register(&client, user, password).await?;
+        }
+        client
+            .matrix_auth()
+            .login_username(user, password)
+            .initial_device_display_name("vendiMessage")
+            .await?;
+        save_config(&homeserver, user, password);
+        Self::start(client, events).await
+    }
+
+    /// Wire the live event handlers and kick off background sync.
+    async fn start(client: Client, events: broadcast::Sender<Outgoing>) -> anyhow::Result<Self> {
         let me = client.user_id().map(|u| u.to_owned());
 
         // live incoming messages → broadcast. Images are DOWNLOADED to the local
@@ -113,12 +138,17 @@ impl MatrixBackend {
             let _ = bg.sync(SyncSettings::default()).await;
         });
 
-        Ok(Some(Self { client, events }))
+        Ok(Self { client, events })
     }
 
     pub async fn list_rooms(&self) -> Vec<Room> {
         let mut out = Vec::new();
         for r in self.client.rooms() {
+            let state = r.state();
+            if matches!(state, matrix_sdk::RoomState::Left) {
+                continue; // a declined/left chat shouldn't show
+            }
+            let invite = matches!(state, matrix_sdk::RoomState::Invited);
             let name = r
                 .display_name()
                 .await
@@ -131,9 +161,47 @@ impl MatrixBackend {
                 preview: String::new(),
                 unread,
                 color: color_for(r.room_id().as_str()),
+                invite,
             });
         }
         out
+    }
+
+    /// Start a new chat (DM) with a user; accepts "@bob:vendi.chat" or "bob".
+    pub async fn start_chat(&self, user: &str) -> anyhow::Result<()> {
+        let full = if user.starts_with('@') {
+            user.to_string()
+        } else {
+            let server = self
+                .client
+                .user_id()
+                .map(|u| u.server_name().to_string())
+                .unwrap_or_else(|| "vendi.chat".to_string());
+            format!("@{}:{}", user.trim_start_matches('@'), server)
+        };
+        let uid = matrix_sdk::ruma::UserId::parse(&full)?;
+        self.client.create_dm(&uid).await?;
+        Ok(())
+    }
+
+    /// Accept a pending chat request (join the invited room).
+    pub async fn accept_invite(&self, room: &str) -> anyhow::Result<()> {
+        let rid = RoomId::parse(room)?;
+        let Some(room) = self.client.get_room(&rid) else {
+            anyhow::bail!("unknown room {room}");
+        };
+        room.join().await?;
+        Ok(())
+    }
+
+    /// Decline a pending chat request (leave the invited room).
+    pub async fn reject_invite(&self, room: &str) -> anyhow::Result<()> {
+        let rid = RoomId::parse(room)?;
+        let Some(room) = self.client.get_room(&rid) else {
+            anyhow::bail!("unknown room {room}");
+        };
+        room.leave().await?;
+        Ok(())
     }
 
     /// Scrollback: fetch recent history via the /messages endpoint (backward
@@ -320,31 +388,93 @@ fn strip_reply_fallback(body: &str) -> String {
         .to_string()
 }
 
-fn load_config() -> Option<Config> {
-    let path = dirs::config_dir()?.join("vendi/chat.conf");
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut homeserver = String::new();
-    let mut user = String::new();
-    let mut password = String::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            let (k, v) = (k.trim(), v.trim());
-            match k {
-                "homeserver" => homeserver = v.to_string(),
-                "user" => user = v.to_string(),
-                "password" => password = v.to_string(),
-                _ => {}
+const DEFAULT_HOMESERVER: &str = "https://server.emerald-ayu.ts.net";
+
+fn config_path() -> Option<std::path::PathBuf> {
+    Some(dirs::config_dir()?.join("vendi/chat.conf"))
+}
+
+fn read_kv() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    if let Some(p) = config_path() {
+        if let Ok(text) = std::fs::read_to_string(p) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = line.split_once('=') {
+                    m.insert(k.trim().to_string(), v.trim().to_string());
+                }
             }
         }
     }
-    if homeserver.is_empty() || user.is_empty() {
-        return None;
+    m
+}
+
+/// The homeserver the app signs in to (chat.conf override, else the default).
+fn homeserver_url() -> String {
+    read_kv()
+        .get("homeserver")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_HOMESERVER.to_string())
+}
+
+fn load_config() -> Option<Config> {
+    let m = read_kv();
+    let user = m.get("user").cloned().unwrap_or_default();
+    let password = m.get("password").cloned().unwrap_or_default();
+    if user.is_empty() || password.is_empty() {
+        return None; // not signed in yet
     }
-    Some(Config { homeserver, user, password })
+    Some(Config { homeserver: homeserver_url(), user, password })
+}
+
+/// Persist the session so the next launch auto-signs-in.
+pub fn save_config(homeserver: &str, user: &str, password: &str) {
+    if let Some(p) = config_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let body = format!(
+            "# vendiMessage session (written by vendi-chatd)\nhomeserver = {homeserver}\nuser = {user}\npassword = {password}\n"
+        );
+        let _ = std::fs::write(p, body);
+    }
+}
+
+/// Forget the saved session (keep the homeserver, drop user/password).
+pub fn clear_config() {
+    let hs = homeserver_url();
+    if let Some(p) = config_path() {
+        let _ = std::fs::write(p, format!("# vendiMessage session (signed out)\nhomeserver = {hs}\n"));
+    }
+}
+
+/// Create an account via the UIA dummy flow (open registration).
+async fn do_register(client: &Client, user: &str, password: &str) -> anyhow::Result<()> {
+    use matrix_sdk::ruma::api::client::account::register;
+    use matrix_sdk::ruma::api::client::uiaa::{AuthData, Dummy};
+    let mut req = register::v3::Request::new();
+    req.username = Some(user.to_string());
+    req.password = Some(password.to_string());
+    req.inhibit_login = true;
+    match client.matrix_auth().register(req.clone()).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // a 401 UIA challenge gives us the session id for the dummy stage
+            if let Some(info) = e.as_uiaa_response() {
+                let mut dummy = Dummy::new();
+                dummy.session = info.session.clone();
+                req.auth = Some(AuthData::Dummy(dummy));
+                client.matrix_auth().register(req).await?;
+                Ok(())
+            } else {
+                Err(e.into())
+            }
+        }
+    }
 }
 
 fn mime_for(p: &std::path::Path) -> mime::Mime {
