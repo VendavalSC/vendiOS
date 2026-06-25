@@ -1082,6 +1082,7 @@ cmd_help() {
     }
 
     _cmd "update"   "refresh mirrors and upgrade all packages"
+    _cmd "install"  "install an extra app (msg = vendiMessage)"
     _cmd "clean"    "remove cached packages and vacuum journal"
     _cmd "snapshot" "create / manage btrfs snapshots"
     _cmd "rollback" "roll back to a previous snapshot"
@@ -1355,8 +1356,70 @@ cmd_ai() {
 }
 
 # ── dispatch ──────────────────────────────────────────────────────────────────
+# ── install extra apps ────────────────────────────────────────────────────────
+_install_msg() {
+    _header "vendiMessage"
+    if [[ ! -x /usr/bin/vendi-chatd || ! -f /usr/share/vendimessage/qml/Main.qml ]]; then
+        _err "vendiMessage payload missing — this vendiOS image doesn't ship it"
+        return 1
+    fi
+    # transport dependency: the Qt WebSockets QML module
+    if [[ ! -d /usr/lib/qt6/qml/QtWebSockets ]]; then
+        _step "installing qt6-websockets…"
+        sudo pacman -S --noconfirm --needed qt6-websockets >/dev/null 2>&1 \
+            || { _err "could not install qt6-websockets"; return 1; }
+    fi
+    # homeserver config (don't clobber an existing signed-in session)
+    mkdir -p "$HOME/.config/vendi"
+    if [[ ! -f "$HOME/.config/vendi/chat.conf" ]]; then
+        printf '# vendiMessage\nhomeserver = https://server.emerald-ayu.ts.net\n' \
+            > "$HOME/.config/vendi/chat.conf"
+    fi
+    # background daemon as a user service
+    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$HOME/.config/systemd/user/vendi-chatd.service" <<'UNIT'
+[Unit]
+Description=vendiMessage backend daemon (vendi-chatd)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/vendi-chatd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+UNIT
+    # app-launcher entry
+    mkdir -p "$HOME/.local/share/applications"
+    cat > "$HOME/.local/share/applications/vendimessage.desktop" <<'DESK'
+[Desktop Entry]
+Type=Application
+Name=vendiMessage
+Comment=Messaging for vendiOS
+Exec=/usr/bin/vendimessage
+Icon=vendimessage
+Terminal=false
+Categories=Network;InstantMessaging;
+DESK
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable --now vendi-chatd.service 2>/dev/null || true
+    _ok "vendiMessage installed"
+    _info "launch with:  vendimessage   (or from your app launcher)"
+    _info "first run shows a sign-in / create-account screen"
+}
+
+cmd_install() {
+    case "${1:-}" in
+        msg|messenger|vendimessage) _install_msg ;;
+        ""|help) _err "usage: vendi install <app>   (apps: msg)"; return 1 ;;
+        *) _err "unknown app: $1   (try: msg)"; return 1 ;;
+    esac
+}
+
 case "${1:-help}" in
     update)   cmd_update   ;;
+    install)  shift; cmd_install "$@" ;;
     clean)    cmd_clean    ;;
     snapshot) cmd_snapshot ;;
     rollback) shift; cmd_rollback "$@" ;;
