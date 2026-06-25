@@ -52,14 +52,16 @@ RUST_BIN_DIR="${PROFILE}/airootfs/usr/bin"
 BUILD_USER="${SUDO_USER:-$(whoami)}"
 
 echo "  Building Rust workspace as user '${BUILD_USER}'..."
+# vendi-chatd (vendiMessage backend) needs its real Matrix backend, so it builds
+# with --features matrix in a second pass.
 if [[ "$BUILD_USER" != "root" ]]; then
     sudo -u "$BUILD_USER" -H bash -lc \
-        "cd '${RUST_SRC}' && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu"
+        "cd '${RUST_SRC}' && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu && cargo build --release --locked --features matrix -p vendi-chatd"
 else
-    (cd "$RUST_SRC" && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu)
+    (cd "$RUST_SRC" && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu && cargo build --release --locked --features matrix -p vendi-chatd)
 fi
 
-for bin in vendiwm vendi-ctl vendi-demo vendibar vendi-menu; do
+for bin in vendiwm vendi-ctl vendi-demo vendibar vendi-menu vendi-chatd; do
     src="${RUST_SRC}/target/release/${bin}"
     if [[ ! -x "$src" ]]; then
         echo "error: built binary missing: ${src}"
@@ -141,6 +143,9 @@ if $CLEAN; then
             umount -lf "${WORK}/x86_64/airootfs/${mnt}" 2>/dev/null || true
     done
     [[ -d "$WORK" ]] && rm -rf "$WORK"
+    # Also wipe the cached offline repo — its package set must match BASE_PKGS,
+    # which may have changed since the last build. --offline will re-download.
+    rm -rf "${PROFILE}/airootfs/opt/vendios"
 else
     # Incremental: reuse the expensive pacstrap of the live root, but force
     # EVERYTHING downstream of it to rebuild — the profile airootfs overlay,

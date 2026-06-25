@@ -1,0 +1,19 @@
+pkgbase = vendimessage
+	pkgdesc = Private, iMessage-inspired messenger for vendiOS (Matrix-backed, walled-garden)
+	pkgver = 0.0.1
+	pkgrel = 1
+	url = https://github.com/VendavalSC/vendiOS
+	install = vendimessage.install
+	arch = x86_64
+	license = MIT
+	makedepends = rust
+	makedepends = cargo
+	depends = qt6-declarative
+	depends = qt6-quickcontrols2
+	depends = qt6-websockets
+	depends = gcc-libs
+	optdepends = adwaita-fonts: default UI font (Adwaita Sans)
+	source = vendimessage-0.0.1.tar.gz::https://github.com/VendavalSC/vendiOS/archive/refs/tags/v0.0.1.tar.gz
+	sha256sums = SKIP
+
+pkgname = vendimessage

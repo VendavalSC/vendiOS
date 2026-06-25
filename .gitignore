@@ -27,6 +27,8 @@ src/target/
 archiso/airootfs/usr/bin/vendiwm
 archiso/airootfs/usr/bin/vendi-ctl
 archiso/airootfs/usr/bin/vendi-demo
+# vendiMessage backend — 24MB matrix-sdk binary, built by build.sh (--features matrix)
+archiso/airootfs/usr/bin/vendi-chatd
 
 # QEMU test fixtures (disk image, OVMF NVRAM copy)
 vm/

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=vendiMessage
+GenericName=Messaging
+Comment=Private messaging for vendiOS
+Exec=/usr/bin/vendimessage
+Icon=vendimessage
+Terminal=false
+Categories=Network;InstantMessaging;Qt;
+Keywords=chat;message;matrix;vendi;
+StartupNotify=true
