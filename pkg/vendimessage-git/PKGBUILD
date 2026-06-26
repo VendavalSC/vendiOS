@@ -1,0 +1,54 @@
+# Maintainer: vendiOS <layoguerrero@gmail.com>
+pkgname=vendimessage-git
+_pkgname=vendimessage
+# Snapshot versioning to match vendi-git (YYwWW<letter>); bump by hand each snapshot.
+pkgver=26w26a
+pkgrel=1
+pkgdesc="vendiMessage — private, iMessage-inspired messenger for vendiOS (Matrix, federation off)"
+arch=('x86_64')
+url="https://github.com/VendavalSC/vendiOS"
+license=('MIT')
+depends=(
+    'qt6-declarative'      # qml6 runtime + QtQuick + QtQuick.Effects/Dialogs + QtCore
+    'qt6-quickcontrols2'   # QtQuick.Controls.Basic
+    'qt6-websockets'       # the app's transport to vendi-chatd
+    'gcc-libs'
+)
+optdepends=('adwaita-fonts: default UI font (Adwaita Sans)')
+makedepends=('git' 'rust' 'cargo')
+provides=("${_pkgname}")
+conflicts=("${_pkgname}")
+source=("${_pkgname}::git+${url}.git")
+sha256sums=('SKIP')
+
+# NB: no pkgver() — snapshot versions are set by hand above (matching vendi-git).
+
+build() {
+    cd "${_pkgname}/src"
+    # the messenger daemon needs its real Matrix backend
+    cargo build --release --locked --features matrix -p vendi-chatd
+}
+
+package() {
+    cd "${_pkgname}"
+
+    # backend daemon + GUI launcher
+    install -Dm755 src/target/release/vendi-chatd "${pkgdir}/usr/bin/vendi-chatd"
+    install -Dm755 packaging/vendimessage          "${pkgdir}/usr/bin/vendimessage"
+
+    # QML application
+    install -Dm644 -t "${pkgdir}/usr/share/vendimessage/qml" apps/vendimessage/qml/*.qml
+    install -Dm644 -t "${pkgdir}/usr/share/vendimessage/qml" apps/vendimessage/qml/*.js
+
+    # desktop entry + systemd user service
+    install -Dm644 packaging/vendimessage.desktop "${pkgdir}/usr/share/applications/vendimessage.desktop"
+    install -Dm644 packaging/vendi-chatd.service  "${pkgdir}/usr/lib/systemd/user/vendi-chatd.service"
+
+    # license + sample homeserver config
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    install -Dm644 /dev/stdin "${pkgdir}/usr/share/vendimessage/chat.conf.example" <<'CONF'
+# Copy to ~/.config/vendi/chat.conf and set your homeserver.
+# vendiMessage signs in / registers against this server (federation off).
+homeserver = https://server.emerald-ayu.ts.net
+CONF
+}

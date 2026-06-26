@@ -36,7 +36,7 @@ with `vendimessage` (or from the app menu).
 **Anywhere (Arch / AUR):**
 
 ```sh
-yay -S vendimessage          # PKGBUILD in packaging/aur/
+yay -S vendimessage-git        # PKGBUILD in pkg/vendimessage-git/
 cp /usr/share/vendimessage/chat.conf.example ~/.config/vendi/chat.conf
 systemctl --user enable --now vendi-chatd.service
 vendimessage
