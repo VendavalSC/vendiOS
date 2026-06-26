@@ -33,6 +33,15 @@ Item {
     readonly property int topGap: groupStart ? 10 : 0
     implicitHeight: col.height + topGap
 
+    // iMessage grouping: the corners facing a neighbour in the same run flatten,
+    // and the last bubble of a run grows a tail toward its sender.
+    readonly property int rBig: 18
+    readonly property int rSmall: 5
+    readonly property int tlR: mine ? rBig : (groupStart ? rBig : rSmall)
+    readonly property int trR: mine ? (groupStart ? rBig : rSmall) : rBig
+    readonly property int blR: mine ? rBig : (showTail ? rBig : rSmall)
+    readonly property int brR: mine ? (showTail ? rBig : rSmall) : rBig
+
     // softened sender name colour (the raw member colours were too loud)
     readonly property color softSender: Qt.rgba(senderColor.r * 0.62 + 0.16,
                                                 senderColor.g * 0.62 + 0.16,
@@ -110,11 +119,36 @@ Item {
             }
 
             // ── text bubble (with optional nested reply quote) ──
+            // ── iMessage tail (last bubble of a run) — CSS double-block trick ──
+            Rectangle {   // tail body: a nub that flows out of the near-bottom corner
+                visible: b.showTail && b.kind !== "image" && !b.jumbo
+                width: 15; height: 16
+                color: b.mine ? b.theme.accent2 : b.theme.bubbleIn
+                anchors.bottom: bubble.bottom
+                anchors.left: b.mine ? undefined : bubble.left
+                anchors.right: b.mine ? bubble.right : undefined
+                anchors.leftMargin: -6; anchors.rightMargin: -6
+                bottomRightRadius: b.mine ? 0 : 13
+                bottomLeftRadius: b.mine ? 13 : 0
+            }
+            Rectangle {   // mask: carves the outer side so the nub tapers to a point
+                visible: b.showTail && b.kind !== "image" && !b.jumbo
+                width: 12; height: 17
+                color: b.theme.windowBg
+                anchors.bottom: bubble.bottom
+                anchors.left: b.mine ? undefined : bubble.left
+                anchors.right: b.mine ? bubble.right : undefined
+                anchors.leftMargin: -18; anchors.rightMargin: -18
+                bottomRightRadius: b.mine ? 0 : 11
+                bottomLeftRadius: b.mine ? 11 : 0
+            }
+
             Rectangle {
                 id: bubble
                 visible: b.kind !== "image" && !b.jumbo
                 readonly property bool hasReply: b.replyText.length > 0
-                radius: 18
+                topLeftRadius: b.tlR; topRightRadius: b.trR
+                bottomLeftRadius: b.blR; bottomRightRadius: b.brR
                 gradient: Gradient {
                     GradientStop { position: 0.0; color: b.mine ? b.theme.accent : b.theme.bubbleIn }
                     GradientStop { position: 1.0; color: b.mine ? b.theme.accent2 : b.theme.bubbleIn }

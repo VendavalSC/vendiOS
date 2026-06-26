@@ -74,15 +74,16 @@ ApplicationWindow {
         readonly property color accent:        win.accentHex
         readonly property color accent2:       Qt.darker(win.accentHex, 1.4)
         readonly property color bubbleOutText: "#ffffff"
-        property color windowBg:      win.dark ? "#161618" : "#ffffff"
-        property color sidebarBg:     win.dark ? "#1d1d20" : "#f7f7f9"
-        property color divider:       win.dark ? "#2b2b2f" : "#e9e9ec"
-        property color textPrimary:   win.dark ? "#f4f4f7" : "#16161a"
-        property color textSecondary: win.dark ? "#8c8c94" : "#86868b"
-        property color bubbleIn:      win.dark ? "#2c2c30" : "#ececef"
-        property color bubbleInText:  win.dark ? "#f4f4f7" : "#16161a"
-        property color inputBg:       win.dark ? "#252529" : "#eeeef1"
-        property color hoverBg:       win.dark ? Qt.rgba(1,1,1,0.06) : Qt.rgba(0,0,0,0.05)
+        // Apple-accurate system palette (light / dark)
+        property color windowBg:      win.dark ? "#1c1c1e" : "#ffffff"
+        property color sidebarBg:     win.dark ? "#242426" : "#f5f5f7"
+        property color divider:       win.dark ? "#313135" : "#e4e4e7"
+        property color textPrimary:   win.dark ? "#ffffff" : "#000000"
+        property color textSecondary: win.dark ? "#98989f" : "#8e8e93"
+        property color bubbleIn:      win.dark ? "#3b3b3d" : "#e9e9eb"
+        property color bubbleInText:  win.dark ? "#ffffff" : "#000000"
+        property color inputBg:       win.dark ? "#2c2c2e" : "#ffffff"
+        property color hoverBg:       win.dark ? Qt.rgba(1,1,1,0.07) : Qt.rgba(0,0,0,0.045)
 
         // animate the whole palette when the theme toggles
         Behavior on windowBg      { ColorAnimation { duration: 260; easing.type: Easing.InOutQuad } }
@@ -124,6 +125,11 @@ ApplicationWindow {
     function nowTime() {
         return Qt.formatTime(new Date(), "h:mm AP");
     }
+
+    // ── transient toast ────────────────────────────────────────────────────────
+    property string toastText: ""
+    function toast(msg) { toastText = msg; toastTimer.restart(); }
+    Timer { id: toastTimer; interval: 2200; onTriggered: win.toastText = "" }
     function sendMessage(text, replyName, replyText, replyId) {
         if (backend.connected) { if (currentConvo) backend.send(currentConvo.id, text, replyId); return; }
         appendMessage(currentIndex, {
@@ -225,6 +231,7 @@ ApplicationWindow {
                 // send the reaction to the homeserver (display already updated locally)
                 if (backend.connected && win.currentConvo) backend.react(win.currentConvo.id, mid, emoji);
             }
+            onStartCall: function (video) { win.toast((video ? "Video" : "Audio") + " call — coming soon"); }
         }
     }
 
@@ -266,6 +273,22 @@ ApplicationWindow {
         target: backend
         function onErrored(message) { loginPage.errorText = message; }
         function onAuthedChanged() { if (backend.authed) { loginPage.busy = false; loginPage.errorText = ""; } }
+    }
+
+    // ── toast ──────────────────────────────────────────────────────────────────
+    Rectangle {
+        z: 200
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 28
+        width: toastLabel.implicitWidth + 32; height: 38; radius: 19
+        color: Qt.rgba(0, 0, 0, 0.82)
+        visible: opacity > 0
+        opacity: win.toastText.length ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 180 } }
+        Text {
+            id: toastLabel; anchors.centerIn: parent; text: win.toastText
+            color: "white"; font.pixelSize: 13; font.family: theme.ui
+        }
     }
 
     // ── drag & drop images anywhere in the window ──────────────────────────────

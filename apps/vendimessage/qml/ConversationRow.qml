@@ -24,6 +24,16 @@ Item {
     HoverHandler { id: hover }
     TapHandler { onTapped: row.clicked() }
 
+    Rectangle {   // unread dot — iMessage puts it in the far-left margin
+        visible: row.convo && row.convo.unread && !row.selected
+        width: 8; height: 8; radius: 4
+        color: theme.accent
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.left: parent.left; anchors.leftMargin: 6
+        scale: visible ? 1 : 0
+        Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
+    }
+
     Avatar {
         id: av
         name: row.convo ? row.convo.name : ""
@@ -34,7 +44,7 @@ Item {
         members: row.convo && row.convo.members ? row.convo.members : []
         anchors.verticalCenter: parent.verticalCenter
         anchors.left: parent.left
-        anchors.leftMargin: 16
+        anchors.leftMargin: 22
     }
 
     Column {
@@ -67,13 +77,4 @@ Item {
         anchors.right: parent.right; anchors.rightMargin: 16
     }
 
-    Rectangle {   // unread dot — sits a little below the timestamp
-        visible: row.convo && row.convo.unread && !row.selected
-        width: 9; height: 9; radius: 4.5
-        color: theme.accent
-        anchors.right: time.right
-        anchors.top: time.bottom; anchors.topMargin: 8
-        scale: visible ? 1 : 0
-        Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
-    }
 }

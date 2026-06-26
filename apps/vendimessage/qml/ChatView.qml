@@ -13,6 +13,7 @@ Item {
     signal sendImage(string path)
     signal openImage(string source)
     signal openInfo()
+    signal startCall(bool video)
     signal reacted(int index, string reactionsJson)
     signal reactSent(string msgId, string emoji)
 
@@ -48,67 +49,102 @@ Item {
 
     ListModel { id: thread }
 
-    // ── header ─────────────────────────────────────────────────────────────────
+    // ── header (iMessage: centered avatar + name › , call buttons top-right) ─────
     Item {
         id: header
         anchors { left: parent.left; right: parent.right; top: parent.top }
-        height: 58
-        Row {
+        height: 64
+
+        Column {
             anchors.centerIn: parent
-            spacing: 9
+            spacing: 3
             Avatar {
+                anchors.horizontalCenter: parent.horizontalCenter
                 name: cv.convo ? cv.convo.name : ""
                 tint: cv.convo ? cv.convo.color : theme.textSecondary
-                size: 30
-                ui: theme.ui
+                size: 30; ui: theme.ui
                 group: cv.convo ? cv.convo.group === true : false
                 members: cv.convo && cv.convo.members ? cv.convo.members : []
-                anchors.verticalCenter: parent.verticalCenter
             }
-            Column {
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: 0
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: 3
                 Text {
                     text: cv.convo ? cv.convo.name : ""
                     color: theme.textPrimary
-                    font.pixelSize: 15; font.weight: Font.DemiBold; font.family: theme.ui
-                    horizontalAlignment: Text.AlignHCenter; anchors.horizontalCenter: parent.horizontalCenter
+                    font.pixelSize: 13; font.weight: Font.DemiBold; font.family: theme.ui
+                    anchors.verticalCenter: parent.verticalCenter
                 }
                 Text {
-                    visible: cv.convo && cv.convo.group === true
-                    text: cv.convo && cv.convo.members
-                          ? ("You, " + cv.convo.members.map(function (m) { return m.name; }).join(", "))
-                          : ""
-                    color: theme.textSecondary
-                    font.pixelSize: 11; font.family: theme.ui
-                    elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: Math.min(implicitWidth, 280)
+                    text: "›"; color: theme.textSecondary
+                    font.pixelSize: 14; font.family: theme.ui
+                    anchors.verticalCenter: parent.verticalCenter
                 }
             }
         }
-        Rectangle {
-            id: infoBtn
-            width: 32; height: 32; radius: 16
-            color: infoHover.hovered ? theme.hoverBg : "transparent"
+        TapHandler { onTapped: cv.openInfo() }   // tap the name area → details
+
+        // call buttons (FaceTime audio + video)
+        Row {
             anchors.right: parent.right; anchors.rightMargin: 14
             anchors.verticalCenter: parent.verticalCenter
-            scale: infoTap.pressed ? 0.9 : 1.0
-            Behavior on scale { NumberAnimation { duration: 110; easing.type: Easing.OutQuad } }
-            Rectangle {
-                anchors.centerIn: parent
-                width: 19; height: 19; radius: 9.5
-                color: "transparent"; border.width: 1.6; border.color: theme.accent
-                Text { anchors.centerIn: parent; text: "i"; color: theme.accent
-                       font.pixelSize: 12; font.italic: true; font.family: theme.ui }
-            }
-            HoverHandler { id: infoHover }
-            TapHandler { id: infoTap; onTapped: cv.openInfo() }
+            spacing: 2
+            CallButton { kind: "audio"; theme: cv.theme; onClicked: cv.startCall(false) }
+            CallButton { kind: "video"; theme: cv.theme; onClicked: cv.startCall(true) }
         }
+
         Rectangle {
             anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
             height: 1; color: theme.divider
         }
+    }
+
+    // drawn phone / video-camera button
+    component CallButton: Rectangle {
+        property var theme
+        property string kind: "video"
+        signal clicked()
+        width: 34; height: 34; radius: 17
+        color: cbHover.hovered ? theme.hoverBg : "transparent"
+        scale: cbTap.pressed ? 0.88 : 1.0
+        Behavior on scale { NumberAnimation { duration: 110; easing.type: Easing.OutQuad } }
+        Canvas {
+            id: callIcon
+            anchors.centerIn: parent; width: 20; height: 18
+            onPaint: {
+                var ctx = getContext("2d"); ctx.clearRect(0, 0, width, height);
+                ctx.strokeStyle = theme.accent; ctx.fillStyle = theme.accent;
+                ctx.lineWidth = 1.7; ctx.lineCap = "round"; ctx.lineJoin = "round";
+                if (kind === "video") {
+                    // camera body
+                    ctx.beginPath(); ctx.moveTo(2,5); ctx.lineTo(12,5);
+                    ctx.quadraticCurveTo(14,5,14,7); ctx.lineTo(14,11);
+                    ctx.quadraticCurveTo(14,13,12,13); ctx.lineTo(2,13);
+                    ctx.quadraticCurveTo(0,13,0,11); ctx.lineTo(0,7);
+                    ctx.quadraticCurveTo(0,5,2,5); ctx.stroke();
+                    // lens triangle
+                    ctx.beginPath(); ctx.moveTo(15,7); ctx.lineTo(20,4); ctx.lineTo(20,14); ctx.lineTo(15,11); ctx.closePath(); ctx.stroke();
+                } else {
+                    // phone handset
+                    ctx.beginPath();
+                    ctx.moveTo(2,3);
+                    ctx.quadraticCurveTo(2,1,4,2);
+                    ctx.lineTo(7,4);
+                    ctx.quadraticCurveTo(8,5,7,6);
+                    ctx.lineTo(6,7);
+                    ctx.quadraticCurveTo(8,11,12,13);
+                    ctx.lineTo(13,12);
+                    ctx.quadraticCurveTo(14,11,15,12);
+                    ctx.lineTo(17,15);
+                    ctx.quadraticCurveTo(18,17,16,17);
+                    ctx.quadraticCurveTo(7,17,2,3);
+                    ctx.stroke();
+                }
+            }
+            Connections { target: theme; function onAccentChanged() { callIcon.requestPaint() } }
+        }
+        HoverHandler { id: cbHover }
+        TapHandler { id: cbTap; onTapped: parent.clicked() }
     }
 
     // ── messages ────────────────────────────────────────────────────────────────
