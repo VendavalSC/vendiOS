@@ -1,4 +1,0 @@
-#!/bin/sh
-# vendiMessage — launches the QML app against the local vendi-chatd daemon.
-export QML_XHR_ALLOW_FILE_READ=1   # the app reads ~/.config/vendi/theme-state for the accent
-exec qml6 /usr/share/vendimessage/qml/Main.qml "$@"

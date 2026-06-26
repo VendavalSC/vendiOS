@@ -52,16 +52,14 @@ RUST_BIN_DIR="${PROFILE}/airootfs/usr/bin"
 BUILD_USER="${SUDO_USER:-$(whoami)}"
 
 echo "  Building Rust workspace as user '${BUILD_USER}'..."
-# vendi-chatd (vendiMessage backend) needs its real Matrix backend, so it builds
-# with --features matrix in a second pass.
 if [[ "$BUILD_USER" != "root" ]]; then
     sudo -u "$BUILD_USER" -H bash -lc \
-        "cd '${RUST_SRC}' && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu && cargo build --release --locked --features matrix -p vendi-chatd"
+        "cd '${RUST_SRC}' && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu"
 else
-    (cd "$RUST_SRC" && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu && cargo build --release --locked --features matrix -p vendi-chatd)
+    (cd "$RUST_SRC" && cargo build --release --locked -p vendiwm -p vendi-ctl -p vendi-demo -p vendibar -p vendi-menu)
 fi
 
-for bin in vendiwm vendi-ctl vendi-demo vendibar vendi-menu vendi-chatd; do
+for bin in vendiwm vendi-ctl vendi-demo vendibar vendi-menu; do
     src="${RUST_SRC}/target/release/${bin}"
     if [[ ! -x "$src" ]]; then
         echo "error: built binary missing: ${src}"
