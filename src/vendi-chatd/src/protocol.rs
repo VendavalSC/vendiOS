@@ -32,6 +32,12 @@ pub enum Cmd {
         event_id: String,
         key: String,
     },
+    /// Search the user directory by name/username.
+    SearchUsers { query: String },
+    /// Block (ignore) a user — their messages stop arriving.
+    Block { user: String },
+    /// Unblock a previously blocked user.
+    Unblock { user: String },
     /// Start a new chat with a user ("@bob:vendi.chat" or just "bob").
     StartChat { user: String },
     /// Accept a pending chat request (join an invited room).
@@ -54,8 +60,16 @@ pub enum Outgoing {
     Timeline { room: String, messages: Vec<Message> },
     /// A newly arrived (or just-sent) message — pushed to every client.
     Message { room: String, message: Message },
+    /// Reply to SearchUsers.
+    SearchResults { users: Vec<UserHit> },
     /// An error for a command.
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UserHit {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +83,9 @@ pub struct Room {
     /// true = a pending chat request (an invite not yet accepted)
     #[serde(default)]
     pub invite: bool,
+    /// for a 1:1 DM, the other user's id (so the client can block them); "" for groups
+    #[serde(default)]
+    pub peer: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

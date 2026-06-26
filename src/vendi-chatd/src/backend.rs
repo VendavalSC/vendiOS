@@ -7,7 +7,7 @@
 //! + a broadcast stream of pushed events, so the daemon and UI don't care which is
 //! running.
 
-use crate::protocol::{Message, Outgoing, Room};
+use crate::protocol::{Message, Outgoing, Room, UserHit};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
@@ -196,6 +196,33 @@ impl Backend {
         Ok(())
     }
 
+    pub async fn search_users(&self, query: &str) -> Vec<UserHit> {
+        #[cfg(feature = "matrix")]
+        if let Some(m) = self.matrix().await {
+            return m.search_users(query).await;
+        }
+        let _ = query;
+        Vec::new()
+    }
+
+    pub async fn block(&self, user: &str) -> anyhow::Result<()> {
+        #[cfg(feature = "matrix")]
+        if let Some(m) = self.matrix().await {
+            return m.block(user).await;
+        }
+        let _ = user;
+        Ok(())
+    }
+
+    pub async fn unblock(&self, user: &str) -> anyhow::Result<()> {
+        #[cfg(feature = "matrix")]
+        if let Some(m) = self.matrix().await {
+            return m.unblock(user).await;
+        }
+        let _ = user;
+        Ok(())
+    }
+
     pub async fn accept_invite(&self, room: &str) -> anyhow::Result<()> {
         #[cfg(feature = "matrix")]
         if let Some(m) = self.matrix().await {
@@ -247,11 +274,11 @@ impl MockState {
     fn seed() -> Self {
         let rooms = vec![
             Room { id: "!armando".into(), name: "Armando Cajide".into(),
-                   preview: "That's awesome!".into(), unread: 0, color: "#5b7cfa".into(), invite: false },
+                   preview: "That's awesome!".into(), unread: 0, color: "#5b7cfa".into(), invite: false, peer: String::new() },
             Room { id: "!ariel".into(), name: "Ariel".into(),
-                   preview: "see you tomorrow!".into(), unread: 1, color: "#f0883e".into(), invite: false },
+                   preview: "see you tomorrow!".into(), unread: 1, color: "#f0883e".into(), invite: false, peer: String::new() },
             Room { id: "!zoe".into(), name: "Zoe".into(),
-                   preview: "haha that's so true".into(), unread: 0, color: "#bc6bd9".into(), invite: false },
+                   preview: "haha that's so true".into(), unread: 0, color: "#bc6bd9".into(), invite: false, peer: String::new() },
         ];
         let mut msgs = HashMap::new();
         msgs.insert("!armando".into(), vec![

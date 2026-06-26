@@ -12,6 +12,7 @@ Item {
     property bool authed: false         // signed in (daemon has a session)
     property var conversations: []
     property var requests: []           // pending chat requests (invites)
+    property var searchResults: []      // user-directory search hits
     property string lastError: ""
     signal errored(string message)
     property string url: "ws://127.0.0.1:8765"
@@ -88,6 +89,8 @@ Item {
         } else if (m.type === "error") {
             be.lastError = m.message || "Something went wrong";
             be.errored(be.lastError);
+        } else if (m.type === "search_results") {
+            be.searchResults = m.users || [];
         } else if (m.type === "rooms") {
             var convos = [], reqs = [];
             for (var i = 0; i < m.rooms.length; i++) {
@@ -95,7 +98,7 @@ Item {
                 var o = { id: r.id, name: r.name, color: r.color || "#7d8590",
                           preview: r.preview || "", time: "", unread: r.unread || 0,
                           group: false, members: [], typing: false, messages: [],
-                          invite: r.invite === true };
+                          invite: r.invite === true, peer: r.peer || "" };
                 if (o.invite) reqs.push(o); else convos.push(o);
             }
             conversations = convos; requests = reqs;
@@ -133,4 +136,10 @@ Item {
     function startChat(user) { _send({ cmd: "start_chat", user: user }); }
     function acceptInvite(id) { _send({ cmd: "accept_invite", room: id }); }
     function rejectInvite(id) { _send({ cmd: "reject_invite", room: id }); }
+    function searchUsers(query) {
+        if (query && query.length) _send({ cmd: "search_users", query: query });
+        else searchResults = [];
+    }
+    function block(user) { _send({ cmd: "block", user: user }); }
+    function unblock(user) { _send({ cmd: "unblock", user: user }); }
 }

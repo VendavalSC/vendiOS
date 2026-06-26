@@ -1,5 +1,5 @@
-// NewChatSheet — the compose (pencil) flow: a small modal to start a new
-// conversation. Type a name and press Start/Enter. Fades + scales in.
+// NewChatSheet — the compose (pencil) flow: search the user directory and pick
+// someone to message, or type an exact @username. Fades + scales in.
 
 import QtQuick
 import QtQuick.Controls.Basic
@@ -8,21 +8,26 @@ Item {
     id: ns
     property var theme
     property bool open: false
-    property bool connected: false   // real backend → start a Matrix chat by @user
-    signal create(string name)
+    property bool connected: false   // real backend → search + start a Matrix chat
+    property var results: []         // user-directory hits (from Backend.searchResults)
+    signal create(string name)       // name = a user id / display name
+    signal search(string query)
     signal closed()
 
     anchors.fill: parent
     visible: opacity > 0
     opacity: open ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 170; easing.type: Easing.OutQuad } }
-    onOpenChanged: if (open) { toField.text = ""; toField.forceActiveFocus(); }
+    onOpenChanged: if (open) { toField.text = ""; ns.search(""); toField.forceActiveFocus(); }
+
+    // debounce typing → search
+    Timer { id: deb; interval: 220; onTriggered: ns.search(toField.text.trim()) }
 
     Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.5) }
     TapHandler { onTapped: ns.closed() }
 
     Rectangle {
-        width: 340; height: card.implicitHeight + 40
+        width: 360; height: card.implicitHeight + 36
         anchors.centerIn: parent
         radius: 20
         color: theme.windowBg
@@ -33,8 +38,8 @@ Item {
         Column {
             id: card
             anchors.centerIn: parent
-            width: parent.width - 40
-            spacing: 16
+            width: parent.width - 36
+            spacing: 14
 
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -52,12 +57,49 @@ Item {
                 TextField {
                     id: toField
                     anchors.fill: parent; anchors.leftMargin: 42; anchors.rightMargin: 12
-                    placeholderText: ns.connected ? "@username" : "Name"; placeholderTextColor: theme.textSecondary
+                    placeholderText: ns.connected ? "Search people or type @username" : "Name"
+                    placeholderTextColor: theme.textSecondary
                     color: theme.textPrimary; font.pixelSize: 14; font.family: theme.ui
                     background: null; verticalAlignment: TextInput.AlignVCenter
+                    onTextChanged: if (ns.connected) deb.restart()
                     onAccepted: if (text.trim().length) ns.create(text.trim())
                 }
             }
+
+            // ── search results ──
+            Rectangle {
+                width: parent.width
+                height: Math.min(ns.results.length, 4) * 52
+                visible: ns.connected && ns.results.length > 0
+                color: "transparent"
+                ListView {
+                    id: resList
+                    anchors.fill: parent
+                    clip: true
+                    model: ns.results
+                    spacing: 0
+                    delegate: Rectangle {
+                        width: resList.width; height: 52; radius: 10
+                        color: rHov.hovered ? theme.hoverBg : "transparent"
+                        Avatar {
+                            id: rav; name: modelData.name; tint: theme.accent; size: 36; ui: theme.ui
+                            anchors.left: parent.left; anchors.leftMargin: 6; anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Column {
+                            anchors.left: rav.right; anchors.leftMargin: 10
+                            anchors.right: parent.right; anchors.rightMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter; spacing: 1
+                            Text { text: modelData.name; color: theme.textPrimary; width: parent.width; elide: Text.ElideRight
+                                   font.pixelSize: 14; font.weight: Font.DemiBold; font.family: theme.ui }
+                            Text { text: modelData.id; color: theme.textSecondary; width: parent.width; elide: Text.ElideRight
+                                   font.pixelSize: 12; font.family: theme.ui }
+                        }
+                        HoverHandler { id: rHov }
+                        TapHandler { onTapped: ns.create(modelData.id) }
+                    }
+                }
+            }
+
             Rectangle {
                 width: parent.width; height: 42; radius: 11
                 property bool ready: toField.text.trim().length > 0

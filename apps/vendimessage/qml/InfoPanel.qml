@@ -93,6 +93,21 @@ Item {
                 QuickAction { glyph: "search";  label: "Search"; onClicked: ip.act("search") }
             }
 
+            // block (1:1 chats only)
+            Rectangle {
+                visible: !ip.group && ip.convo && ip.convo.peer && ip.convo.peer.length > 0
+                width: parent.width; height: 46; radius: 12
+                color: blkHover.hovered ? Qt.rgba(0.9, 0.32, 0.28, 0.16) : ip.panel
+                Behavior on color { ColorAnimation { duration: 120 } }
+                Text {
+                    anchors.centerIn: parent
+                    text: "Block " + (ip.convo ? ip.convo.name : "")
+                    color: "#e5534b"; font.pixelSize: 14; font.weight: Font.DemiBold; font.family: theme.ui
+                }
+                HoverHandler { id: blkHover }
+                TapHandler { onTapped: ip.act("block") }
+            }
+
             // grouped section: members (groups) — iOS-style rounded list
             Column {
                 visible: ip.group
@@ -149,6 +164,7 @@ Item {
             scale: qaTap.pressed ? 0.9 : (qaHover.hovered ? 1.07 : 1.0)
             Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutBack } }
             Canvas {
+                id: qaIcon
                 anchors.centerIn: parent; width: 20; height: 20
                 onPaint: {
                     var c = getContext("2d"); c.clearRect(0, 0, 20, 20);
@@ -171,7 +187,7 @@ Item {
                         c.beginPath(); c.moveTo(12.2,12.2); c.lineTo(17,17); c.stroke();
                     }
                 }
-                Connections { target: theme; function onAccentChanged() { parent.requestPaint() } }
+                Connections { target: theme; function onAccentChanged() { qaIcon.requestPaint() } }
             }
             HoverHandler { id: qaHover }
             TapHandler { id: qaTap; onTapped: qa.clicked() }

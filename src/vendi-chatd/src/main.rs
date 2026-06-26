@@ -111,6 +111,20 @@ async fn handle_client(stream: UnixStream, backend: Backend) -> anyhow::Result<(
             Cmd::Logout => {
                 let _ = backend.logout().await;
             }
+            Cmd::SearchUsers { query } => {
+                let users = backend.search_users(&query).await;
+                send(&write, &Outgoing::SearchResults { users }).await;
+            }
+            Cmd::Block { user } => {
+                if let Err(e) = backend.block(&user).await {
+                    send(&write, &Outgoing::Error { message: e.to_string() }).await;
+                }
+            }
+            Cmd::Unblock { user } => {
+                if let Err(e) = backend.unblock(&user).await {
+                    send(&write, &Outgoing::Error { message: e.to_string() }).await;
+                }
+            }
             Cmd::StartChat { user } => {
                 if let Err(e) = backend.start_chat(&user).await {
                     send(&write, &Outgoing::Error { message: e.to_string() }).await;

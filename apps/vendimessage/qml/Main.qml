@@ -245,6 +245,12 @@ ApplicationWindow {
             if (which === "message") win.infoOpen = false;
             else if (which === "search") { win.infoOpen = false; sidebar.focusSearch(); }
             else if (which === "mute") win.toggleMute();
+            else if (which === "block") {
+                if (backend.connected && win.currentConvo && win.currentConvo.peer)
+                    backend.block(win.currentConvo.peer);
+                win.toast("Blocked");
+                win.infoOpen = false;
+            }
         }
     }
 
@@ -253,6 +259,8 @@ ApplicationWindow {
         theme: theme
         open: win.composeOpen
         connected: backend.connected
+        results: backend.connected ? backend.searchResults : []
+        onSearch: function (q) { if (backend.connected) backend.searchUsers(q); }
         onClosed: win.composeOpen = false
         onCreate: function (name) { win.createConversation(name); }
     }

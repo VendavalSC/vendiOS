@@ -12,7 +12,7 @@
 //! matrix-sdk-ui Timeline; for now it returns the empty set and live messages
 //! stream in via the sync handler.
 
-use crate::protocol::{Message, Outgoing, Room};
+use crate::protocol::{Message, Outgoing, Room, UserHit};
 use crate::backend::media_cache_dir;
 use matrix_sdk::{
     attachment::AttachmentConfig,
@@ -155,6 +155,7 @@ impl MatrixBackend {
                 .map(|d| d.to_string())
                 .unwrap_or_else(|_| r.room_id().to_string());
             let unread = r.unread_notification_counts().notification_count as u32;
+            let peer = r.direct_targets().into_iter().next().map(|u| u.to_string()).unwrap_or_default();
             out.push(Room {
                 id: r.room_id().to_string(),
                 name,
@@ -162,25 +163,81 @@ impl MatrixBackend {
                 unread,
                 color: color_for(r.room_id().as_str()),
                 invite,
+                peer,
             });
         }
         out
     }
 
+    /// Normalize "bob" / "@bob" / "@bob:vendi.chat" → a full "@bob:server" id.
+    fn full_user_id(&self, user: &str) -> String {
+        if user.starts_with('@') && user.contains(':') {
+            return user.to_string();
+        }
+        let server = self
+            .client
+            .user_id()
+            .map(|u| u.server_name().to_string())
+            .unwrap_or_else(|| "vendi.chat".to_string());
+        format!("@{}:{}", user.trim_start_matches('@'), server)
+    }
+
     /// Start a new chat (DM) with a user; accepts "@bob:vendi.chat" or "bob".
     pub async fn start_chat(&self, user: &str) -> anyhow::Result<()> {
-        let full = if user.starts_with('@') {
-            user.to_string()
-        } else {
-            let server = self
-                .client
-                .user_id()
-                .map(|u| u.server_name().to_string())
-                .unwrap_or_else(|| "vendi.chat".to_string());
-            format!("@{}:{}", user.trim_start_matches('@'), server)
-        };
-        let uid = matrix_sdk::ruma::UserId::parse(&full)?;
+        let uid = matrix_sdk::ruma::UserId::parse(self.full_user_id(user))?;
         self.client.create_dm(&uid).await?;
+        Ok(())
+    }
+
+    /// Find users. Tries the homeserver's user directory first; continuwuity
+    /// doesn't populate one, so it falls back to resolving "@<query>:server"
+    /// directly via a profile lookup (exact-username match — fine for a walled
+    /// garden where people know each other's handles).
+    pub async fn search_users(&self, query: &str) -> Vec<UserHit> {
+        let q = query.trim().trim_start_matches('@');
+        if q.is_empty() {
+            return Vec::new();
+        }
+
+        // 1) directory search (works on servers that index one)
+        if let Ok(resp) = self.client.search_users(query, 20).await {
+            if !resp.results.is_empty() {
+                return resp
+                    .results
+                    .into_iter()
+                    .map(|u| {
+                        let id = u.user_id.to_string();
+                        let name = u
+                            .display_name
+                            .unwrap_or_else(|| localpart(&id));
+                        UserHit { id, name }
+                    })
+                    .collect();
+            }
+        }
+
+        // 2) walled-garden fallback: resolve the exact handle
+        let full = self.full_user_id(q);
+        if let Ok(uid) = matrix_sdk::ruma::UserId::parse(&full) {
+            if let Ok(profile) = self.client.get_profile(&uid).await {
+                let name = profile.displayname.unwrap_or_else(|| q.to_string());
+                return vec![UserHit { id: full, name }];
+            }
+        }
+        Vec::new()
+    }
+
+    /// Block (ignore) a user — their events stop arriving.
+    pub async fn block(&self, user: &str) -> anyhow::Result<()> {
+        let uid = matrix_sdk::ruma::UserId::parse(self.full_user_id(user))?;
+        self.client.account().ignore_user(&uid).await?;
+        Ok(())
+    }
+
+    /// Unblock a previously blocked user.
+    pub async fn unblock(&self, user: &str) -> anyhow::Result<()> {
+        let uid = matrix_sdk::ruma::UserId::parse(self.full_user_id(user))?;
+        self.client.account().unignore_user(&uid).await?;
         Ok(())
     }
 
@@ -485,6 +542,11 @@ fn mime_for(p: &std::path::Path) -> mime::Mime {
         Some("bmp") => "image/bmp".parse().unwrap(),
         _ => mime::IMAGE_JPEG,
     }
+}
+
+/// "@bob:vendi.chat" → "bob"
+fn localpart(id: &str) -> String {
+    id.trim_start_matches('@').split(':').next().unwrap_or(id).to_string()
 }
 
 /// Deterministic avatar colour from the room id (so it's stable across runs).

@@ -78,6 +78,17 @@ async fn handle_cmd(backend: &Backend, line: &str) -> Vec<Outgoing> {
             let _ = backend.logout().await;
             vec![]
         }
+        Cmd::SearchUsers { query } => {
+            vec![Outgoing::SearchResults { users: backend.search_users(&query).await }]
+        }
+        Cmd::Block { user } => match backend.block(&user).await {
+            Ok(()) => vec![],
+            Err(e) => vec![Outgoing::Error { message: e.to_string() }],
+        },
+        Cmd::Unblock { user } => match backend.unblock(&user).await {
+            Ok(()) => vec![],
+            Err(e) => vec![Outgoing::Error { message: e.to_string() }],
+        },
         Cmd::StartChat { user } => match backend.start_chat(&user).await {
             Ok(()) => vec![],
             Err(e) => vec![Outgoing::Error { message: e.to_string() }],
