@@ -617,6 +617,11 @@ ShellRoot {
     property bool nightOsd: false
     property bool nightOn:  false
     property int  nightTemp: 6500
+    // Warmth colour for the night pill: warm orange at 2500K → pale at 6500K.
+    readonly property color nightTone: {
+        const f = Math.max(0, Math.min(1, (nightTemp - 2500) / 4000));
+        return Qt.rgba(1.0, 0.55 + 0.32 * f, 0.32 + 0.55 * f, 1.0);
+    }
     Timer { id: nightOsdTimer; interval: 2600; onTriggered: root.nightOsd = false }
     function nightNotch(temp) {
         nightTemp = temp; nightOn = temp < 6500;
@@ -988,23 +993,13 @@ ShellRoot {
                     font.bold: true
                     color: root.fg
                 }
-                // night-light pill: moon glyph + temperature, flanks the clock.
-                Row {
+                // night-light, left wing: the label (the moon + warmth swatch
+                // are on the right wing, so the island stays symmetric).
+                Mono {
                     visible: root.nightOsd
-                    spacing: 5
-                    anchors.verticalCenter: parent.verticalCenter
-                    Mono {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "\u{f0594}"   // weather-night (moon)
-                        font.pixelSize: 13
-                        color: root.nightOn ? root.accent : root.fg
-                    }
-                    Mono {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.nightOn ? ("Night " + root.nightTemp + "K") : "Night Off"
-                        font.bold: true
-                        color: root.fg
-                    }
+                    text: root.nightOn ? ("Night " + root.nightTemp + "K") : "Night Off"
+                    font.bold: true
+                    color: root.fg
                 }
                 // screen-recording pill — blinking red dot + elapsed time;
                 // click it to stop the recording (brainshell-style).
@@ -1168,6 +1163,28 @@ ShellRoot {
                             width: 2.5; height: 4; radius: 0.5
                             color: centerRow.batTone
                         }
+                    }
+                }
+                // night-light, right wing: moon glyph + a warmth swatch (warm
+                // orange → pale), symmetric with the temperature label on the left.
+                Row {
+                    visible: root.nightOsd
+                    spacing: 6
+                    Layout.alignment: Qt.AlignVCenter
+                    Mono {
+                        text: "\u{f0594}"   // weather-night (moon)
+                        font.pixelSize: 13
+                        color: root.nightOn ? root.nightTone : root.fg
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 22; height: 12; radius: 3
+                        color: root.nightOn ? root.nightTone : "transparent"
+                        border.width: root.nightOn ? 0 : 1.5
+                        border.color: root.fg
+                        opacity: root.nightOn ? 0.9 : 0.6
+                        Behavior on color { ColorAnimation { duration: 220 } }
                     }
                 }
                 TapHandler { onTapped: panelWin.toggleCenter() }
