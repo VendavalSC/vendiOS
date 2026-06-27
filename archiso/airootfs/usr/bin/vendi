@@ -2017,7 +2017,7 @@ _game_status() {
 # no external tool. The chosen temp persists so vendi-session can re-apply it on
 # login (gamma resets on the compositor restart).
 NIGHT_STATE="$HOME/.config/vendi/night"
-NIGHT_WARM=4000   # default "on" warmth
+NIGHT_WARM=4500   # default "on" warmth (gentle; lower = more orange)
 
 # Fade the colour temperature from `from` → `target` over ~0.4s, then persist.
 # The bar shows its own night-light pill (it watches ~/.config/vendi/night).

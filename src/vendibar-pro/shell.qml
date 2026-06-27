@@ -159,6 +159,18 @@ ShellRoot {
         onFileChanged: reload()
     }
 
+    // Night-light state (the saved colour temperature). Drives the persistent
+    // corner moon — set silently here; the transient pill comes from panel.night.
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/vendi/night"
+        watchChanges: true
+        onLoaded: {
+            const t = parseInt(text().trim());
+            if (!isNaN(t)) { root.nightTemp = t; root.nightOn = t < 6500; }
+        }
+        onFileChanged: reload()
+    }
+
     // ── compositor state ─────────────────────────────────────────────────────
     property int activeWs: 1
     property var wsList: [{ id: 1, windows: 0 }]
@@ -412,22 +424,33 @@ ShellRoot {
 
     // ── network ──────────────────────────────────────────────────────────────
     property string netIcon: "󰤭"
+    property bool   vpnUp: false      // a VPN / WireGuard tunnel is active
     Process {
         id: netProc
         // Note whether wifi / ethernet are actually connected, then pick the icon
         // on exit (wifi wins). A bare ":connected" substring match used to let the
         // "loopback:connected" line overwrite the wifi icon with the ethernet one.
+        // Also flags an active VPN (device type wireguard/tun, or an active vpn
+        // connection) so the corner can show a shield.
         property bool wifiUp: false
         property bool ethUp:  false
-        command: ["sh", "-c", "nmcli -t -f TYPE,STATE d 2>/dev/null | grep -v unmanaged"]
+        property bool vpn:    false
+        command: ["sh", "-c",
+            "nmcli -t -f TYPE,STATE d 2>/dev/null | grep -v unmanaged; " +
+            "nmcli -t -f TYPE,STATE c show --active 2>/dev/null"]
         stdout: SplitParser {
             onRead: line => {
                 if (line.startsWith("wifi:connected")) netProc.wifiUp = true;
                 else if (line.startsWith("ethernet:connected")) netProc.ethUp = true;
+                if (line.startsWith("vpn:") || line.startsWith("wireguard:") || line.startsWith("tun:"))
+                    netProc.vpn = true;
             }
         }
-        onStarted: { wifiUp = false; ethUp = false; }
-        onExited: root.netIcon = netProc.wifiUp ? "󰤨" : netProc.ethUp ? "󰈀" : "󰤭";
+        onStarted: { wifiUp = false; ethUp = false; vpn = false; }
+        onExited: {
+            root.netIcon = netProc.wifiUp ? "󰤨" : netProc.ethUp ? "󰈀" : "󰤭";
+            root.vpnUp = netProc.vpn;
+        }
     }
     Timer {
         interval: 8000; running: true; repeat: true; triggeredOnStart: true
@@ -1309,6 +1332,20 @@ ShellRoot {
                     opacity: panelWin.sideHidden ? 0 : 1
                     Behavior on opacity { NumberAnimation { duration: 150 } }
                     Glyph { text: root.netIcon; font.pixelSize: 14 }
+                    // VPN shield — only present while a tunnel is up.
+                    Glyph {
+                        visible: root.vpnUp
+                        text: "󰦝"
+                        color: root.accent
+                        font.pixelSize: 14
+                    }
+                    // Night-light moon — present while night light is on.
+                    Glyph {
+                        visible: root.nightOn
+                        text: "󰖔"
+                        color: root.nightTone
+                        font.pixelSize: 14
+                    }
                     Glyph {
                         text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
                         color: root.muted ? root.dim : root.fg
