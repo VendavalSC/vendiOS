@@ -61,8 +61,10 @@ _claude_running() {
     done < <(pgrep -af claude 2>/dev/null)
     return 1
 }
-if ! _claude_running \
-   && [[ -z "$(find "$HOME/.claude/projects" -name '*.jsonl' -mmin -1 2>/dev/null | head -1)" ]]; then
+# Purely process-based: when the interactive `claude` exits, the gadget hides on
+# the next poll (no transcript-recency fallback — a just-touched transcript would
+# otherwise keep it up for a minute after you quit).
+if ! _claude_running; then
     echo "STATE=off"; exit 0
 fi
 # A cmdline carrying --model (versioned launch) lets us read the model directly.
