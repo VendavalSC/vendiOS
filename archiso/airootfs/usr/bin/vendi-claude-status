@@ -45,12 +45,16 @@ print(u("five_hour"), u("seven_day"))
 fi
 
 # ── poll mode ─────────────────────────────────────────────────────────────────
-# Session open = a live session-host process (falls back to a <1-min transcript).
-pcmd=$(pgrep -af 'claude/versions' 2>/dev/null | grep -- '--session-id' | head -1 || true)
-if [[ -z "$pcmd" ]]; then
-    [[ -n "$(find "$HOME/.claude/projects" -name '*.jsonl' -mmin -1 2>/dev/null | head -1)" ]] \
-        || { echo "STATE=off"; exit 0; }
+# Session open = a claude process — either the bare `claude` binary (comm=claude)
+# or a versioned session host — or, as a fallback, a transcript written in the
+# last minute.
+if ! pgrep -x claude >/dev/null 2>&1 \
+   && ! pgrep -f 'claude/versions' >/dev/null 2>&1 \
+   && [[ -z "$(find "$HOME/.claude/projects" -name '*.jsonl' -mmin -1 2>/dev/null | head -1)" ]]; then
+    echo "STATE=off"; exit 0
 fi
+# A cmdline carrying --model (versioned launch) lets us read the model directly.
+pcmd=$(pgrep -af 'claude' 2>/dev/null | grep -viE 'vendi-claude|claude-status|pgrep' | grep -- '--model' | head -1 || true)
 
 # Model: from the running process's --model flag; else the newest transcript.
 model=$(printf '%s' "$pcmd" | grep -oE -- '--model[= ]+[A-Za-z0-9._-]+' | head -1 | sed -E 's/--model[= ]+//')
@@ -58,6 +62,10 @@ if [[ -z "$model" ]]; then
     newest=$(find "$HOME/.claude/projects" -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
     # skip synthetic / placeholder model entries (e.g. "<synthetic>")
     model=$(grep -o '"model":"[^"]*"' "$newest" 2>/dev/null | grep -vE 'synthetic|"<' | tail -1 | sed 's/.*:"//; s/"$//')
+fi
+# last resort: the configured model in settings.json (covers custom aliases)
+if [[ -z "$model" ]]; then
+    model=$(python3 -c "import json;print(json.load(open('$HOME/.claude/settings.json')).get('model') or '')" 2>/dev/null)
 fi
 case "$model" in
     *[Oo]pus*) model=Opus ;; *[Ss]onnet*) model=Sonnet ;; *[Hh]aiku*) model=Haiku ;;

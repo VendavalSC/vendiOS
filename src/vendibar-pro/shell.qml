@@ -799,7 +799,8 @@ ShellRoot {
                 : searchOpen ? Math.min(panelWin.screen.height - 80, root.stripH + searchItem.wantHeight)
                 : root.barH
             property real rh: rightMode === "control"
-                    ? (control.ccPage !== "main" ? 470
+                    ? (control.ccPage === "audio" ? control.audioPageH
+                       : control.ccPage !== "main" ? 470
                        : 312 + (root.batVisible ? 30 : 0)
                        + (root.notifHistory.length > 0
                              ? 30 + Math.min(root.notifHistory.length, 3) * 22 : 0))
@@ -1693,6 +1694,10 @@ ShellRoot {
                 // Wi-Fi / Bluetooth sub-page slid in over it. Reset to main when
                 // the center closes (see onRightOpenChanged).
                 property string ccPage: "main"
+                // Audio page sizes to its device lists (no big empty panel).
+                readonly property int audioPageH: Math.min(470,
+                    150 + (Math.max(1, root.audioSinks.length)
+                         + Math.max(1, root.audioSources.length)) * 36)
                 x: panelWin.width - panelWin.rw
                 y: root.stripH
                 width: panelWin.rw
