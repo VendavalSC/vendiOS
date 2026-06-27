@@ -47,12 +47,14 @@ Item {
     // Reset + grab the keyboard whenever search (re)opens or flips mode.
     function refocus() {
         crumb = [];
-        query.text = "";
+        // "clip" mode is search pre-seeded with the clipboard-history prefix, so
+        // `vendi clip` lands straight in the bar's spotlight on recent copies.
+        query.text = (mode === "clip") ? "v " : "";
         list.currentIndex = 0;
         winRefresh.running = true;
         clipRefresh.running = true;
         if (mode === "actions") wpRefresh.running = true;
-        Qt.callLater(() => query.forceActiveFocus());
+        Qt.callLater(() => { query.forceActiveFocus(); query.cursorPosition = query.text.length; });
     }
     onActiveChanged: if (active) refocus()
     onModeChanged: if (active) refocus()

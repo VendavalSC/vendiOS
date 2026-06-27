@@ -1775,6 +1775,12 @@ cmd_clip() {
             local sel; sel=$(cliphist list | _clip_picker "delete from history") || return 0
             [[ -n "$sel" ]] && printf '%s' "$sel" | cliphist delete && _ok "entry removed" ;;
         pick|"")
+            # Prefer the bar's own spotlight (clipboard lives there) so it's one
+            # integrated UI, not a separate menu. Fall back to wofi/fzf only if
+            # the pro bar isn't running (classic bar / TTY).
+            if quickshell -c vendibar-pro ipc call launcher clip >/dev/null 2>&1; then
+                return 0
+            fi
             local sel; sel=$(cliphist list | _clip_picker "clipboard history") || return 0
             [[ -z "$sel" ]] && return 0
             printf '%s' "$sel" | cliphist decode | wl-copy
@@ -2013,26 +2019,35 @@ _game_status() {
 NIGHT_STATE="$HOME/.config/vendi/night"
 NIGHT_WARM=4000   # default "on" warmth
 
+# Fade the colour temperature from `from` → `target` over ~0.4s, then persist.
+# The bar shows its own night-light pill (it watches ~/.config/vendi/night).
 _night_set() {
-    local k=$1
-    vendi-ctl night "$k" >/dev/null 2>&1 || {
-        _err "couldn't reach vendiwm (needs the current compositor — relogin if just updated)"; return 1; }
-    mkdir -p "$(dirname "$NIGHT_STATE")"; echo "$k" > "$NIGHT_STATE"
-    if [[ "$k" -ge 6500 ]]; then _ok "night light off (neutral 6500K)"
-    else _ok "night light on (${k}K)"; fi
+    local target=$1 from=${2:-6500}
+    # Pulse the bar's night-light pill immediately (best-effort; pro bar only).
+    quickshell -c vendibar-pro ipc call panel night "$target" >/dev/null 2>&1 || true
+    local steps=16 i k
+    for ((i = 1; i <= steps; i++)); do
+        k=$(( from + (target - from) * i / steps ))
+        vendi-ctl night "$k" >/dev/null 2>&1 || {
+            _err "couldn't reach vendiwm (needs the current compositor — relogin if just updated)"; return 1; }
+        sleep 0.025
+    done
+    mkdir -p "$(dirname "$NIGHT_STATE")"; echo "$target" > "$NIGHT_STATE"
+    if [[ "$target" -ge 6500 ]]; then _ok "night light off (neutral 6500K)"
+    else _ok "night light on (${target}K)"; fi
 }
 
 cmd_night() {
     local cur=6500; [[ -f "$NIGHT_STATE" ]] && cur=$(cat "$NIGHT_STATE" 2>/dev/null)
     local sub=${1:-toggle}
     case "$sub" in
-        on)     _night_set "$NIGHT_WARM" ;;
-        off)    _night_set 6500 ;;
-        toggle) if [[ "${cur:-6500}" -ge 6500 ]]; then _night_set "$NIGHT_WARM"; else _night_set 6500; fi ;;
+        on)     _night_set "$NIGHT_WARM" "$cur" ;;
+        off)    _night_set 6500 "$cur" ;;
+        toggle) if [[ "${cur:-6500}" -ge 6500 ]]; then _night_set "$NIGHT_WARM" "$cur"; else _night_set 6500 "$cur"; fi ;;
         status) if [[ "${cur:-6500}" -ge 6500 ]]; then _info "night light: off (6500K)"
                 else _ok "night light: on (${cur}K)"; fi ;;
-        warmer) _night_set $(( cur > 2500 ? cur - 500 : 2500 )) ;;
-        cooler) _night_set $(( cur < 6500 ? cur + 500 : 6500 )) ;;
+        warmer) _night_set $(( cur > 2500 ? cur - 500 : 2500 )) "$cur" ;;
+        cooler) _night_set $(( cur < 6500 ? cur + 500 : 6500 )) "$cur" ;;
         *)      if [[ "$sub" =~ ^[0-9]+$ ]]; then _night_set "$sub"
                 else _err "unknown: vendi night ${sub}"
                      _info "usage: vendi night [on|off|toggle|warmer|cooler|<kelvin>|status]"; return 1; fi ;;

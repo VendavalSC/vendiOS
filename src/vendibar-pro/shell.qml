@@ -46,6 +46,7 @@ ShellRoot {
         target: "launcher"
         function toggle(): void { root.searchToggle("search"); }
         function actions(): void { root.searchToggle("actions"); }
+        function clip(): void { root.searchToggle("clip"); }
     }
     // Dashboard (the expanded center notch) — super+d via vendi-launcher dash.
     signal dashToggle()
@@ -119,6 +120,9 @@ ShellRoot {
             root.batteryNotch(pct, charging);
         }
         function batteryDemoOff(): void { root.batDemo = -1; }
+        // Night light changed (vendi night) — pulse the bar pill. temp in Kelvin,
+        // 6500 = off.
+        function night(temp: int): void { root.nightNotch(temp); }
     }
 
     // ── theme ────────────────────────────────────────────────────────────────
@@ -607,6 +611,18 @@ ShellRoot {
         batOsd = true; batOsdTimer.restart();
     }
 
+    // Night-light pill: the left wing bulges into "Night 4000K" / "Night Off"
+    // for a moment when the colour temperature changes (panel.night IPC), then
+    // springs back — same iOS-island feel as the battery pill.
+    property bool nightOsd: false
+    property bool nightOn:  false
+    property int  nightTemp: 6500
+    Timer { id: nightOsdTimer; interval: 2600; onTriggered: root.nightOsd = false }
+    function nightNotch(temp) {
+        nightTemp = temp; nightOn = temp < 6500;
+        nightOsd = true; nightOsdTimer.restart();
+    }
+
     // ── 1s heartbeat: clocks, media progress, active player ─────────────────
     Timer {
         interval: 1000; running: true; repeat: true; triggeredOnStart: true
@@ -971,6 +987,24 @@ ShellRoot {
                     text: root.batOsdCharging ? "Charging" : "Low Battery"
                     font.bold: true
                     color: root.fg
+                }
+                // night-light pill: moon glyph + temperature, flanks the clock.
+                Row {
+                    visible: root.nightOsd
+                    spacing: 5
+                    anchors.verticalCenter: parent.verticalCenter
+                    Mono {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "\u{f0594}"   // weather-night (moon)
+                        font.pixelSize: 13
+                        color: root.nightOn ? root.accent : root.fg
+                    }
+                    Mono {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.nightOn ? ("Night " + root.nightTemp + "K") : "Night Off"
+                        font.bold: true
+                        color: root.fg
+                    }
                 }
                 // screen-recording pill — blinking red dot + elapsed time;
                 // click it to stop the recording (brainshell-style).
