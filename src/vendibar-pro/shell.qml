@@ -1153,7 +1153,8 @@ ShellRoot {
                     }
                     Mono {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: root.claudeUsage; color: root.dim
+                        text: root.claudeUsage; color: root.fg
+                        font.pixelSize: 13
                     }
                 }
                 // date · time · weather — the bold clock sits in the middle,
