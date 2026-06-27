@@ -129,6 +129,11 @@ ShellRoot {
             root.dnd = (mode === "on") ? true : (mode === "off") ? false : !root.dnd;
             root.notify(root.dnd ? "Do Not Disturb" : "Notifications on", "");
         }
+        // Voice typing feedback: "listening" | "transcribing" | "off"/"".
+        function voice(state: string): void {
+            root.voiceState = (state === "off") ? "" : state;
+            if (root.voiceState !== "") voiceGuard.restart();
+        }
     }
 
     // ── theme ────────────────────────────────────────────────────────────────
@@ -689,6 +694,11 @@ ShellRoot {
         nightOsd = true; nightOsdTimer.restart();
     }
 
+    // ── voice typing feedback (vendi voice via panel.voice IPC) ─────────────
+    property string voiceState: ""   // "" | "listening" | "transcribing"
+    // Auto-clear if the CLI never sends "off" (e.g. it crashed mid-record).
+    Timer { id: voiceGuard; interval: 120000; onTriggered: root.voiceState = "" }
+
     // ── Claude Code gadget ──────────────────────────────────────────────────
     // Fed by vendi-claude-status (Claude Code statusLine + hooks) writing
     // ~/.config/vendi/claude. Idle: usage · model. Working: the verb pulses.
@@ -1071,6 +1081,32 @@ ShellRoot {
                     text: root.nightOn ? ("Night " + root.nightTemp + "K") : "Night Off"
                     font.bold: true
                     color: root.fg
+                }
+                // voice typing, left wing: pulsing mic + "Speak now" while
+                // listening, "Transcribing…" while it works. Clear feedback so
+                // you know when vendi voice is recording.
+                Row {
+                    visible: root.voiceState !== ""
+                    spacing: 6
+                    anchors.verticalCenter: parent.verticalCenter
+                    Glyph {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "󰍬"
+                        font.pixelSize: 14
+                        color: root.voiceState === "listening" ? "#f25c5c" : root.accent
+                        SequentialAnimation on opacity {
+                            running: root.voiceState === "listening"
+                            loops: Animation.Infinite
+                            NumberAnimation { to: 0.3; duration: 550; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0; duration: 550; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Mono {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.voiceState === "transcribing" ? "Transcribing…" : "Speak now"
+                        font.bold: true
+                        color: root.fg
+                    }
                 }
                 // screen-recording pill — blinking red dot + elapsed time;
                 // click it to stop the recording (brainshell-style).

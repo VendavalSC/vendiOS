@@ -2066,6 +2066,10 @@ VOICE_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-
 
 _voice_bin() { local b; for b in whisper-cli whisper.cpp whisper main; do _have "$b" && { echo "$b"; return; }; done; }
 
+# Tell the bar what voice typing is doing (listening|transcribing|off) so it can
+# show feedback. Best-effort (pro bar only).
+_voice_bar() { quickshell -c vendibar-pro ipc call panel voice "$1" >/dev/null 2>&1 || true; }
+
 cmd_voice() {
     local pidf="${XDG_RUNTIME_DIR:-/tmp}/vendi-voice.pid"
     local wav="${XDG_RUNTIME_DIR:-/tmp}/vendi-voice.wav"
@@ -2075,15 +2079,17 @@ cmd_voice() {
     # ── stop + transcribe + type ──────────────────────────────
     if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
         kill -INT "$(cat "$pidf")" 2>/dev/null; rm -f "$pidf"
+        _voice_bar transcribing
         local wbin; wbin=$(_voice_bin)
-        [[ -z "$wbin" ]] && { _err "whisper.cpp not installed"; return 1; }
+        [[ -z "$wbin" ]] && { _err "whisper.cpp not installed"; _voice_bar off; return 1; }
         _step "transcribing…"; _toast "Voice" "Transcribing…"
         local text; text=$("$wbin" -m "$VOICE_MODEL" -f "$wav" -nt 2>/dev/null \
             | tr '\n' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/  */ /g')
         rm -f "$wav"
-        [[ -z "${text//[[:space:]]/}" ]] && { _warn "nothing recognised"; _toast "Voice" "Nothing heard"; return 1; }
+        [[ -z "${text//[[:space:]]/}" ]] && { _warn "nothing recognised"; _toast "Voice" "Nothing heard"; _voice_bar off; return 1; }
         if _have wtype; then wtype -- "$text"; _ok "typed: ${text}"; _toast "Voice" "$text"
         else printf '%s' "$text" | wl-copy; _warn "wtype missing — copied to clipboard"; fi
+        _voice_bar off
         return 0
     fi
 
@@ -2108,6 +2114,7 @@ cmd_voice() {
     elif _have pw-record; then rec=(pw-record --rate 16000 --channels 1 --format s16 "$wav")
     else _err "no audio recorder (parecord/pw-record)"; return 1; fi
     "${rec[@]}" >/dev/null 2>&1 & echo $! > "$pidf"
+    _voice_bar listening
     _ok "listening… run 'vendi voice' again to transcribe + type"
     _toast "Voice" "Listening — repeat the key to type what you said"
 }
