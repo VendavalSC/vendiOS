@@ -1131,6 +1131,7 @@ cmd_help() {
     _cmd "ocr"      "select a region and copy its text (tesseract)"
     _cmd "clip"     "clipboard history — pick, list, delete, wipe"
     _cmd "font"     "switch the terminal monospace font (kitty/foot/alacritty)"
+    _cmd "game"     "install the gaming stack; 'game run <cmd>' for gamemode+overlay"
     _cmd "fingerprint" "enroll a fingerprint to unlock (swipe at the lock)"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"
@@ -1799,6 +1800,125 @@ cmd_font() {
     esac
 }
 
+# ── gaming (`vendi game`) ─────────────────────────────────────────────────────
+# Opt-in. Installs the gaming stack (needs multilib) and gives a launch wrapper
+# that layers gamemode + mangohud + gamescope and picks a GPU, bumping the power
+# profile to performance for the duration.
+GAME_PKGS=(            # official repos (multilib)
+    gamemode lib32-gamemode
+    gamescope
+    mangohud lib32-mangohud
+    vulkan-icd-loader lib32-vulkan-icd-loader vulkan-tools
+    steam lutris
+)
+GAME_AUR=(             # nice-to-haves, only with an AUR helper
+    heroic-games-launcher-bin protonup-qt vkbasalt lib32-vkbasalt moonlight-qt
+)
+
+# Make sure [multilib] is enabled — Steam and the 32-bit libs need it.
+_game_multilib() {
+    if grep -qE "^\[multilib\]" /etc/pacman.conf; then
+        _ok "multilib already enabled"; return 0
+    fi
+    _step "enabling [multilib] in /etc/pacman.conf"
+    sudo sed -i '/^#\[multilib\]/{s/^#//; n; s/^#//}' /etc/pacman.conf
+    grep -qE "^\[multilib\]" /etc/pacman.conf || {
+        _err "couldn't enable multilib automatically — add [multilib] to /etc/pacman.conf"; return 1; }
+    sudo pacman -Sy
+}
+
+cmd_game() {
+    local sub=${1:-setup}
+    case "$sub" in
+        setup|"")
+            _header "vendi game — gaming stack"
+            _game_multilib || return 1
+            _step "installing: ${GAME_PKGS[*]}"
+            sudo pacman -S --needed --noconfirm "${GAME_PKGS[@]}" || { _err "install failed"; return 1; }
+            # Optional AUR extras (Heroic, ProtonUp-Qt, vkBasalt, Moonlight).
+            local helper; helper=$(_dev_aur_helper)
+            if [[ -n "$helper" ]]; then
+                _step "AUR extras via ${helper}: ${GAME_AUR[*]}"
+                "$helper" -S --needed --noconfirm "${GAME_AUR[@]}" || _warn "some AUR extras failed (non-fatal)"
+            else
+                _info "no AUR helper — skipping Heroic/ProtonUp-Qt/vkBasalt/Moonlight"
+                _info "install yay/paru then: vendi game extras"
+            fi
+            echo
+            _ok "gaming stack ready"
+            _info "launch a game with the overlay + gamemode:  vendi game run <command>"
+            _info "Proton-GE: install via ProtonUp-Qt; Steam → enable Steam Play for all titles"
+            ;;
+        extras)
+            local helper; helper=$(_dev_aur_helper)
+            [[ -z "$helper" ]] && { _err "needs an AUR helper (yay/paru)"; return 1; }
+            "$helper" -S --needed --noconfirm "${GAME_AUR[@]}" ;;
+        run) shift; _game_run "$@" ;;
+        status) _game_status ;;
+        *) _err "unknown: vendi game ${sub}"; _info "usage: vendi game [setup|extras|run <cmd>|status]"; return 1 ;;
+    esac
+}
+
+# vendi game run [--gpu nvidia|amd] [--gamescope[=WxH]] [--no-mango] <cmd...>
+_game_run() {
+    local gpu="" gs=0 gsres="" mango=1
+    while [[ $# -gt 0 ]]; do case "$1" in
+        --gpu) gpu=$2; shift 2 ;;
+        --gpu=*) gpu=${1#*=}; shift ;;
+        --gamescope) gs=1; shift ;;
+        --gamescope=*) gs=1; gsres=${1#*=}; shift ;;
+        --no-mango) mango=0; shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac; done
+    [[ $# -eq 0 ]] && { _err "usage: vendi game run [opts] <command…>"; return 1; }
+
+    # GPU selection env (dual-GPU offload).
+    local -a env=()
+    case "$gpu" in
+        nvidia) env=(__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia
+                     __VK_LAYER_NV_optimus=NVIDIA_only) ;;
+        amd)    env=(DRI_PRIME=1) ;;
+        "")     ;;
+        *) _warn "unknown --gpu ${gpu} (use nvidia|amd)" ;;
+    esac
+
+    # Build the wrapper chain from whatever is actually installed.
+    local -a pre=()
+    _have gamemoderun && pre+=(gamemoderun)
+    [[ $mango -eq 1 ]] && _have mangohud && pre+=(mangohud)
+    if [[ $gs -eq 1 ]] && _have gamescope; then
+        local -a g=(gamescope -f)
+        [[ -n "$gsres" ]] && g+=(-W "${gsres%x*}" -H "${gsres#*x}")
+        pre+=("${g[@]}" --)
+    fi
+
+    # Power → performance for the session, restored on exit.
+    local prev=""
+    if _have powerprofilesctl; then
+        prev=$(powerprofilesctl get 2>/dev/null)
+        powerprofilesctl set performance 2>/dev/null && _info "power profile → performance"
+    fi
+    _ok "launching: ${env[*]:+${env[*]} }${pre[*]:+${pre[*]} }$*"
+    env "${env[@]}" "${pre[@]}" "$@"
+    local rc=$?
+    [[ -n "$prev" ]] && powerprofilesctl set "$prev" 2>/dev/null && _info "power profile → ${prev}"
+    return $rc
+}
+
+_game_status() {
+    _header "gaming"
+    grep -qE "^\[multilib\]" /etc/pacman.conf && _ok "multilib enabled" || _warn "multilib disabled"
+    echo
+    local t
+    for t in steam gamescope gamemoderun mangohud lutris heroic vkbasalt moonlight-qt protonup-qt vulkaninfo; do
+        if _have "$t"; then printf "  ${GREEN}${BOLD}✓${R}  ${TEXT}%s${R}\n" "$t"
+        else printf "  ${OVERLAY}○  %s${R}\n" "$t"; fi
+    done
+    echo
+    _info "GPUs:"; lspci 2>/dev/null | grep -iE "vga|3d controller" | sed 's/^/    /'
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 case "${1:-help}" in
     update)   cmd_update   ;;
@@ -1822,6 +1942,7 @@ case "${1:-help}" in
     ocr)      shift; cmd_ocr "$@" ;;
     clip|clipboard) shift; cmd_clip "$@" ;;
     font)     shift; cmd_font "$@" ;;
+    game|gaming) shift; cmd_game "$@" ;;
     fingerprint|finger|fp) shift; cmd_fingerprint "$@" ;;
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;

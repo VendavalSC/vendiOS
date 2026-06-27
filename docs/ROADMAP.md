@@ -52,9 +52,12 @@ pass; scratchpad (drop-down term); smart gaps; window groups/tabs; richer window
 rules; multi-monitor + per-monitor workspaces; per-corner rounding + blur knobs.
 
 ### 4. Gaming — `vendi game`
-gamemode, gamescope, mangohud, vkBasalt, Steam + Proton-GE, lutris/heroic, moonlight
-(stream from the RTX desktop), lib32/Vulkan, controller udev, auto power→performance
-on launch, per-game gamescope profiles, NVIDIA env.
+✅ SHIPPED — `vendi game setup` (auto-enables multilib; installs gamemode/gamescope/
+mangohud/lib32/Vulkan/steam/lutris + AUR heroic/protonup-qt/vkbasalt/moonlight via
+yay/paru) · `vendi game run [--gpu nvidia|amd] [--gamescope[=WxH]] [--no-mango] <cmd>`
+layers gamemode+mangohud+gamescope, injects dual-GPU offload env, bumps power profile to
+performance for the run · `vendi game status`. Verified on HW (status, run wrapper, pkg
+resolution). TODO: controller udev rules, per-game profile presets.
 
 ### 5. Productivity / utilities (Omarchy parity)
 ✅ `vendi shot|record|ocr` (grim/slurp/wf-recorder/tesseract) + `vendi clip` (cliphist,
@@ -83,8 +86,9 @@ default app set for an instantly-usable first-run.
 ## Sequencing
 1. Gadget framework + Claude gadget + indicators
 2. ~~**`vendi dev` + vendiVim**~~ ✅ SHIPPED (2026-06-27)
-3. capture + clipboard ✅ SHIPPED (`vendi shot|record|ocr|clip`, 2026-06-27); voice +
+3. capture + clipboard ✅ SHIPPED (`vendi shot|record|ocr|clip|font`, 2026-06-27); voice +
    OSD + night light still TODO
+4. gaming ✅ SHIPPED (`vendi game setup|run|status`, 2026-06-27)
 3. Capture + voice + clipboard + OSD + night light
 4. `vendi game` + compositor tearing/VRR
 5. Theming depth + hardware profiles + curated apps
