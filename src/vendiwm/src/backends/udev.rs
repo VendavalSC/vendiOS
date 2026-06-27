@@ -866,6 +866,9 @@ fn build_state(
     let data_control_state   = smithay::wayland::selection::wlr_data_control::DataControlState::new::<State, _>(
         dh, Some(&primary_selection_state), |_| true);
     let idle_inhibit_state   = smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<State>(dh);
+    // Virtual keyboard (zwp_virtual_keyboard_v1) so `wtype` / `vendi voice` can
+    // type into the focused field. Dispatch is covered by delegate_dispatch2!.
+    let _ = smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<State, _>(dh, |_client| true);
     let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(dh);
     let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(dh);
     let fractional_scale_manager_state =
@@ -3339,5 +3342,60 @@ fn on_udev_event(event: UdevEvent, app: &mut State) {
             }
         }
         UdevEvent::Removed { device_id }       => tracing::info!(?device_id,        "udev: device removed"),
+    }
+}
+
+// ── night light (DRM colour-temperature gamma) ────────────────────────────────
+// vendiwm applies night light itself, via the CRTC gamma LUT — no wlr-gamma
+// protocol or external tool. `vendi night` → vendi-ctl → IPC → apply_night.
+
+/// Kelvin → linear RGB white-point multipliers (Tanner Helland approximation).
+/// 6500K ≈ (1,1,1) neutral; lower is warmer (less blue).
+fn kelvin_rgb(kelvin: u16) -> (f64, f64, f64) {
+    let t = (kelvin as f64).clamp(1000.0, 40000.0) / 100.0;
+    let r = if t <= 66.0 {
+        1.0
+    } else {
+        329.698_727_446 * (t - 60.0).powf(-0.133_204_759_2) / 255.0
+    };
+    let g = if t <= 66.0 {
+        (99.470_802_586_1 * t.ln() - 161.119_568_166_1) / 255.0
+    } else {
+        288.122_169_528_3 * (t - 60.0).powf(-0.075_514_849_2) / 255.0
+    };
+    let b = if t >= 66.0 {
+        1.0
+    } else if t <= 19.0 {
+        0.0
+    } else {
+        (138.517_731_223_1 * (t - 10.0).ln() - 305.044_792_730_7) / 255.0
+    };
+    (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+}
+
+/// Apply a colour-temperature gamma ramp to every active CRTC. temp 6500 resets
+/// to a neutral (linear) ramp. The LUT persists until the next modeset.
+pub fn apply_night(udev: &UdevData, temp: u16) {
+    let (rs, gs, bs) = kelvin_rgb(temp);
+    for dev in udev.drm_devices.values() {
+        for &crtc in dev.surfaces.keys() {
+            let len = match dev.drm.get_crtc(crtc) {
+                Ok(info) => info.gamma_length() as usize,
+                Err(_) => continue,
+            };
+            if len < 2 {
+                continue;
+            }
+            let (mut r, mut g, mut b) = (vec![0u16; len], vec![0u16; len], vec![0u16; len]);
+            for i in 0..len {
+                let v = i as f64 / (len - 1) as f64;
+                r[i] = (v * rs * 65535.0).round().clamp(0.0, 65535.0) as u16;
+                g[i] = (v * gs * 65535.0).round().clamp(0.0, 65535.0) as u16;
+                b[i] = (v * bs * 65535.0).round().clamp(0.0, 65535.0) as u16;
+            }
+            if let Err(e) = dev.drm.set_gamma(crtc, &r, &g, &b) {
+                tracing::warn!(?e, "night: set_gamma failed");
+            }
+        }
     }
 }

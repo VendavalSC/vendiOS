@@ -114,6 +114,14 @@ spawn_desktop() {
         wl-paste --type text  --watch cliphist store >>"$LOG" 2>&1 &
         wl-paste --type image --watch cliphist store >>"$LOG" 2>&1 &
     fi
+    # Night light: the CRTC gamma LUT resets on every compositor start, so
+    # re-apply the saved colour temperature (vendi night) once the IPC is up.
+    if [ -r "${HOME}/.config/vendi/night" ] && command -v vendi-ctl >/dev/null; then
+        _nt="$(cat "${HOME}/.config/vendi/night" 2>/dev/null)"
+        case "$_nt" in ''|6500) ;; *[!0-9]*) ;; *)
+            ( sleep 2; vendi-ctl night "$_nt" >>"$LOG" 2>&1 || true ) & ;;
+        esac
+    fi
     # Security: lock before the machine sleeps (lid close / suspend / hibernate)
     # so it always resumes to the lock screen — never a live desktop. Watches
     # logind's PrepareForSleep(true) signal on the system bus.

@@ -62,6 +62,9 @@ pub enum Request {
     /// the battery/no-video gate so `vendi screensaver test` always shows it).
     /// Any input dismisses it, same as the idle-triggered one.
     Screensaver,
+    /// Night light: set the screen colour temperature in Kelvin via the CRTC
+    /// gamma LUT. 6500 = neutral (off); lower = warmer. udev backend only.
+    Night         { temp: u16 },
 }
 
 #[derive(Debug, Deserialize)]
@@ -385,6 +388,25 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
                     Ok(child) => { state.screensaver_child = Some(child); Response::Ok { ok: true } }
                     Err(e) => { state.screensaver_fired = false; Response::Error { error: e.to_string() } }
                 }
+            }
+        }
+        Request::Night { temp } => {
+            #[cfg(feature = "udev")]
+            {
+                match state.udev.as_ref() {
+                    Some(udev) => {
+                        crate::backends::udev::apply_night(udev, temp);
+                        Response::Ok { ok: true }
+                    }
+                    None => Response::Error {
+                        error: "night light needs the udev (hardware) backend".into(),
+                    },
+                }
+            }
+            #[cfg(not(feature = "udev"))]
+            {
+                let _ = temp;
+                Response::Error { error: "night light needs the udev backend".into() }
             }
         }
         Request::ReloadConfig => {

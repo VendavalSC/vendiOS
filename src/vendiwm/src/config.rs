@@ -100,6 +100,8 @@ binds {
     bind "super+shift+r"       "spawn vendi record"
     bind "super+shift+t"       "spawn vendi ocr"
     bind "super+v"             "spawn vendi clip"
+    bind "super+shift+n"       "spawn vendi night toggle"
+    bind "super+shift+v"       "spawn vendi voice"
 
     // ── media keys ─────────────────────────────────────────────
     bind "XF86AudioRaiseVolume" "spawn wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"

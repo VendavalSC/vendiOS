@@ -64,12 +64,15 @@ resolution). TODO: controller udev rules, per-game profile presets.
 fzf/wofi picker, self-starting watcher) + `vendi font` (mono font cascade across
 kitty/foot/alacritty, persists across theme switches) — SHIPPED, verified on HW; binds
 wired in config.rs (Print / Super+Shift+S / Super+Shift+R / Super+Shift+T / Super+V).
-Remaining: `vendi voice` (whisper.cpp local → types into focused field — BLOCKED: needs
-virtual-keyboard-unstable-v1 in vendiwm); `vendi night` (color-temp + schedule — BLOCKED:
-needs wlr-gamma-control-unstable-v1 in vendiwm); `vendi webapp` (theme-aware PWAs); idle
-daemon (compositor already does lock+dpms; add dim→suspend stages); OSD popups (notch
-already bulges for vol/brightness — extend to caps/mic); DND/notification toggle (talk to
-vendiwm's island notification server).
+✅ `vendi night` (color temp) — vendiwm applies the CRTC gamma LUT itself (no wlr-gamma
+protocol/external tool); on/off/toggle/warmer/cooler/<kelvin>/status, persists +
+re-applies on login. ✅ `vendi voice` — local whisper.cpp STT typed into the focused field
+via wtype, now that vendiwm advertises virtual-keyboard-unstable-v1. Both verified to
+build + deploy; bound to super+shift+n / super+shift+v.
+Remaining: `vendi webapp` (theme-aware PWAs); idle daemon (compositor already does
+lock+dpms; add dim→suspend stages); OSD popups (notch already bulges for vol/brightness —
+extend to caps/mic); DND/notification toggle (talk to vendiwm's island notification
+server); night-light auto schedule (sunset/sunrise).
 
 ### 6. Theming depth
 Cascade `vendi theme` into: nvim (vendiVim ✅), kitty ✅, GTK/libadwaita ✅ (@define-color

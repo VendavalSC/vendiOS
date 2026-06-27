@@ -42,6 +42,7 @@ fn main() -> Result<()> {
         "wallpaper"        => wallpaper_cmd(&args[1..]),
         "palette"          => palette_cmd(&args[1..]),
         "output"           => output_cmd(&args[1..]),
+        "night"            => night_cmd(&args[1..]),
         cmd => { eprintln!("unknown command: {cmd}\n"); print_usage(); std::process::exit(2); }
     }
 }
@@ -71,6 +72,7 @@ Usage:
   vendi-ctl output position <name> <x> <y>  place a monitor in the layout
   vendi-ctl output mode <name> <WxH[@hz]>   set resolution / refresh
   vendi-ctl output reset [name]         clear arrangement (all, or one monitor)
+  vendi-ctl night <kelvin>             set screen colour temperature (6500=off)
   vendi-ctl reload                      re-read vendiwm.kdl live (theme, binds)
 
 Reads $VENDIWM_SOCK or falls back to $XDG_RUNTIME_DIR/vendiwm-1.ipc.sock."#);
@@ -310,6 +312,12 @@ fn split_cmd(args: &[String]) -> Result<()> {
     let dir = args.first().ok_or_else(|| anyhow::anyhow!("split: missing direction"))?;
     if dir != "horizontal" && dir != "vertical" { bail!("split: direction must be horizontal or vertical"); }
     ipc_call(json!({"cmd": "split", "dir": dir}))
+}
+
+fn night_cmd(args: &[String]) -> Result<()> {
+    let temp: u16 = args.first().ok_or_else(|| anyhow::anyhow!("night: missing temperature (Kelvin)"))?
+        .parse().context("night: temperature must be a number in Kelvin (e.g. 4000, 6500=off)")?;
+    ipc_call(json!({"cmd": "night", "temp": temp}))
 }
 
 fn move_cmd(args: &[String]) -> Result<()> {

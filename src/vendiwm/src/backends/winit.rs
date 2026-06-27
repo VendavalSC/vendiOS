@@ -59,6 +59,7 @@ pub fn run() -> Result<()> {
     let shm_state            = ShmState::new::<State>(&dh, backend.renderer().shm_formats());
     let data_device_state    = DataDeviceState::new::<State>(&dh);
     let _ = smithay::wayland::cursor_shape::CursorShapeManagerState::new::<State>(&dh);
+    let _ = smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<State, _>(&dh, |_client| true);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
     let layer_shell_state    = smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<State>(&dh);
     let session_lock_state   = smithay::wayland::session_lock::SessionLockManagerState::new::<State, _>(&dh, |_| true);

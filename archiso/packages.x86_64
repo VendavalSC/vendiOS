@@ -107,6 +107,7 @@ wl-clipboard
 cliphist
 tesseract
 tesseract-data-eng
+wtype
 polkit-kde-agent
 qt5-wayland
 qt6-wayland

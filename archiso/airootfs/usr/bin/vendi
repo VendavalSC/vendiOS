@@ -1217,6 +1217,8 @@ cmd_help() {
     _cmd "clip"     "clipboard history — pick, list, delete, wipe"
     _cmd "font"     "switch the terminal monospace font (kitty/foot/alacritty)"
     _cmd "game"     "install the gaming stack; 'game run <cmd>' for gamemode+overlay"
+    _cmd "night"    "night light — on/off/toggle/warmer/cooler/<kelvin>"
+    _cmd "voice"    "local voice typing (whisper.cpp → types into focused field)"
     _cmd "fingerprint" "enroll a fingerprint to unlock (swipe at the lock)"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"
@@ -2004,6 +2006,95 @@ _game_status() {
     _info "GPUs:"; lspci 2>/dev/null | grep -iE "vga|3d controller" | sed 's/^/    /'
 }
 
+# ── night light (`vendi night`) ───────────────────────────────────────────────
+# vendiwm applies the colour-temperature gamma itself (DRM LUT) via vendi-ctl —
+# no external tool. The chosen temp persists so vendi-session can re-apply it on
+# login (gamma resets on the compositor restart).
+NIGHT_STATE="$HOME/.config/vendi/night"
+NIGHT_WARM=4000   # default "on" warmth
+
+_night_set() {
+    local k=$1
+    vendi-ctl night "$k" >/dev/null 2>&1 || {
+        _err "couldn't reach vendiwm (needs the current compositor — relogin if just updated)"; return 1; }
+    mkdir -p "$(dirname "$NIGHT_STATE")"; echo "$k" > "$NIGHT_STATE"
+    if [[ "$k" -ge 6500 ]]; then _ok "night light off (neutral 6500K)"
+    else _ok "night light on (${k}K)"; fi
+}
+
+cmd_night() {
+    local cur=6500; [[ -f "$NIGHT_STATE" ]] && cur=$(cat "$NIGHT_STATE" 2>/dev/null)
+    local sub=${1:-toggle}
+    case "$sub" in
+        on)     _night_set "$NIGHT_WARM" ;;
+        off)    _night_set 6500 ;;
+        toggle) if [[ "${cur:-6500}" -ge 6500 ]]; then _night_set "$NIGHT_WARM"; else _night_set 6500; fi ;;
+        status) if [[ "${cur:-6500}" -ge 6500 ]]; then _info "night light: off (6500K)"
+                else _ok "night light: on (${cur}K)"; fi ;;
+        warmer) _night_set $(( cur > 2500 ? cur - 500 : 2500 )) ;;
+        cooler) _night_set $(( cur < 6500 ? cur + 500 : 6500 )) ;;
+        *)      if [[ "$sub" =~ ^[0-9]+$ ]]; then _night_set "$sub"
+                else _err "unknown: vendi night ${sub}"
+                     _info "usage: vendi night [on|off|toggle|warmer|cooler|<kelvin>|status]"; return 1; fi ;;
+    esac
+}
+
+# ── voice typing (`vendi voice`) ──────────────────────────────────────────────
+# Local speech-to-text (whisper.cpp) typed into the focused field via wtype
+# (which drives vendiwm's virtual-keyboard). Toggle: first call records, second
+# stops + transcribes + types. Fully local, no cloud.
+VOICE_DIR="$HOME/.local/share/vendi/whisper"
+VOICE_MODEL="$VOICE_DIR/ggml-base.en.bin"
+VOICE_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+
+_voice_bin() { local b; for b in whisper-cli whisper.cpp whisper main; do _have "$b" && { echo "$b"; return; }; done; }
+
+cmd_voice() {
+    local pidf="${XDG_RUNTIME_DIR:-/tmp}/vendi-voice.pid"
+    local wav="${XDG_RUNTIME_DIR:-/tmp}/vendi-voice.wav"
+    local sub=${1:-toggle}
+    [[ "$sub" == status ]] && { if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then _ok "listening…"; else _info "idle"; fi; return; }
+
+    # ── stop + transcribe + type ──────────────────────────────
+    if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
+        kill -INT "$(cat "$pidf")" 2>/dev/null; rm -f "$pidf"
+        local wbin; wbin=$(_voice_bin)
+        [[ -z "$wbin" ]] && { _err "whisper.cpp not installed"; return 1; }
+        _step "transcribing…"; _toast "Voice" "Transcribing…"
+        local text; text=$("$wbin" -m "$VOICE_MODEL" -f "$wav" -nt 2>/dev/null \
+            | tr '\n' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/  */ /g')
+        rm -f "$wav"
+        [[ -z "${text//[[:space:]]/}" ]] && { _warn "nothing recognised"; _toast "Voice" "Nothing heard"; return 1; }
+        if _have wtype; then wtype -- "$text"; _ok "typed: ${text}"; _toast "Voice" "$text"
+        else printf '%s' "$text" | wl-copy; _warn "wtype missing — copied to clipboard"; fi
+        return 0
+    fi
+
+    # ── start: ensure deps + model, then record ───────────────
+    if ! _have wtype; then
+        _warn "installing wtype (types into the focused field)"
+        sudo pacman -S --needed --noconfirm wtype || { _err "wtype install failed"; return 1; }
+    fi
+    if [[ -z "$(_voice_bin)" ]]; then
+        local helper; helper=$(_dev_aur_helper)
+        [[ -z "$helper" ]] && { _err "whisper.cpp is in the AUR — install yay/paru first"; return 1; }
+        _warn "installing whisper.cpp via ${helper} (first run only)"
+        "$helper" -S --needed --noconfirm whisper.cpp || { _err "whisper.cpp install failed"; return 1; }
+    fi
+    if [[ ! -f "$VOICE_MODEL" ]]; then
+        mkdir -p "$VOICE_DIR"
+        _step "downloading whisper base.en model (~142 MB, first run only)…"
+        curl -fL# "$VOICE_MODEL_URL" -o "$VOICE_MODEL" || { _err "model download failed"; rm -f "$VOICE_MODEL"; return 1; }
+    fi
+    local rec
+    if _have parecord; then rec=(parecord --rate=16000 --channels=1 --format=s16le --file-format=wav "$wav")
+    elif _have pw-record; then rec=(pw-record --rate 16000 --channels 1 --format s16 "$wav")
+    else _err "no audio recorder (parecord/pw-record)"; return 1; fi
+    "${rec[@]}" >/dev/null 2>&1 & echo $! > "$pidf"
+    _ok "listening… run 'vendi voice' again to transcribe + type"
+    _toast "Voice" "Listening — repeat the key to type what you said"
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 case "${1:-help}" in
     update)   cmd_update   ;;
@@ -2028,6 +2119,8 @@ case "${1:-help}" in
     clip|clipboard) shift; cmd_clip "$@" ;;
     font)     shift; cmd_font "$@" ;;
     game|gaming) shift; cmd_game "$@" ;;
+    night|nightlight) shift; cmd_night "$@" ;;
+    voice|dictate) shift; cmd_voice "$@" ;;
     fingerprint|finger|fp) shift; cmd_fingerprint "$@" ;;
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;
