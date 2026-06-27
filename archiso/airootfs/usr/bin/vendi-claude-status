@@ -1,55 +1,102 @@
 #!/usr/bin/env bash
 # vendi-claude-status — feed Claude Code state to the vendiOS bar.
 #
-# Two modes:
-#   • poll (no args, run by the bar every few seconds): auto-detects a running
-#     Claude Code session from the most-recently-active transcript, computes the
-#     context-window usage %, and reports the model. Prints STATE/MODEL/USAGE/VERB.
-#   • hook (`vendi-claude-status hook working|idle [verb]`): records the
-#     working/idle state for the poller (Claude Code hooks call this — the only
-#     reliable "is it generating right now" signal). `vendi claude` wires these.
+# Modes:
+#   • poll (no args, run by the bar every few seconds): detects a running Claude
+#     Code session (its process), reports the 5h-block usage % (ccusage, cached +
+#     refreshed in the background so this never blocks) and the model. Prints
+#     STATE/MODEL/USAGE/VERB; STATE=off when no session → the gadget hides.
+#   • hook working|idle [verb]: records the live working/idle state (the one
+#     thing polling can't see). Claude Code hooks call this; `vendi claude` wires
+#     them and vendi-session installs them on login.
+#   • refresh-usage: run ccusage, cache the 5h-block %. Spawned by poll; detached.
 set -uo pipefail
-HOOK="${HOME}/.config/vendi/claude-hook"
+CFG="${HOME}/.config/vendi"
+HOOK="${CFG}/claude-hook"
+USAGE_CACHE="${CFG}/claude-usage"
+LIMIT_FILE="${CFG}/claude-limit"      # optional: a token number to measure % against
 PROJ="${HOME}/.claude/projects"
 
+# ── hook mode ─────────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "hook" ]]; then
-    mkdir -p "$(dirname "$HOOK")"
+    mkdir -p "$CFG"
     printf 'STATE=%s\nVERB=%s\nAT=%s\n' "${2:-idle}" "${3:-}" "$(date +%s)" > "$HOOK"
     exit 0
 fi
 
-# An active session = a transcript touched in the last 20 min (covers reading
-# gaps between turns; a closed/stale session drops off and the gadget hides).
-newest=$(find "$PROJ" -name '*.jsonl' -mmin -20 -printf '%T@ %p\n' 2>/dev/null \
-         | sort -rn | head -1 | cut -d' ' -f2-)
+# ── ccusage refresh (background) ──────────────────────────────────────────────
+if [[ "${1:-}" == "refresh-usage" ]]; then
+    runner=""
+    if command -v ccusage >/dev/null 2>&1; then runner="ccusage"
+    elif command -v npx >/dev/null 2>&1; then runner="npx -y ccusage@latest"
+    else exit 0; fi
+    out=$($runner blocks --json 2>/dev/null) || exit 0
+    lim=""; [[ -r "$LIMIT_FILE" ]] && lim=$(tr -dc 0-9 < "$LIMIT_FILE")
+    pct=$(printf '%s' "$out" | LIM="$lim" python3 -c '
+import json, sys, os
+try: blocks = json.load(sys.stdin).get("blocks", [])
+except Exception: sys.exit(0)
+active = next((b["totalTokens"] for b in blocks if b.get("isActive")), 0)
+lim = os.environ.get("LIM", "")
+limit = int(lim) if lim.isdigit() and int(lim) > 0 else \
+        max([b["totalTokens"] for b in blocks if not b.get("isGap")] or [1])
+print(min(100, active * 100 // max(1, limit)))
+') || exit 0
+    mkdir -p "$CFG"
+    printf 'PCT=%s\nAT=%s\n' "${pct:-}" "$(date +%s)" > "$USAGE_CACHE"
+    exit 0
+fi
+
+# ── poll mode ─────────────────────────────────────────────────────────────────
+# Session open = a live session-host process. Falls back to a very recent
+# transcript so a brief detection gap doesn't blink the gadget out.
+active=0
+if pgrep -f 'claude/versions/.*--session-id' >/dev/null 2>&1; then active=1
+elif [[ -n "$(find "$PROJ" -name '*.jsonl' -mmin -1 2>/dev/null | head -1)" ]]; then active=1; fi
+(( active )) || { echo "STATE=off"; exit 0; }
+
+newest=$(find "$PROJ" -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 [[ -z "$newest" ]] && { echo "STATE=off"; exit 0; }
 
 # Model → short name.
 mid=$(grep -o '"model":"[^"]*"' "$newest" | tail -1 | sed 's/.*:"//; s/"$//')
 case "$mid" in
-    *opus*)   model=Opus ;;   *sonnet*) model=Sonnet ;;
-    *haiku*)  model=Haiku ;;  *fable*)  model=Fable ;;
-    "")       model=Claude ;; *)        model=$mid ;;
+    *opus*) model=Opus ;; *sonnet*) model=Sonnet ;; *haiku*) model=Haiku ;;
+    *fable*) model=Fable ;; "") model=Claude ;; *) model=$mid ;;
 esac
 
-# Context usage %: last usage block → input + cache_creation + cache_read.
-# Window is 200k normally, 1M once a session crosses 200k (the long-context mode).
-u=$(grep -o '"usage":{[^}]*}' "$newest" | tail -1)
-_n() { printf '%s' "$u" | grep -o "\"$1\":[0-9]*" | head -1 | grep -o '[0-9]*$'; }
-it=$(_n input_tokens); cc=$(_n cache_creation_input_tokens); cr=$(_n cache_read_input_tokens)
-ctx=$(( ${it:-0} + ${cc:-0} + ${cr:-0} ))
-win=200000; (( ctx > 200000 )) && win=1000000
-pct=$(( win > 0 ? ctx * 100 / win : 0 )); (( pct > 100 )) && pct=100
+# Usage %: prefer the cached ccusage 5h-block %, refreshing it in the background
+# when stale (>120s). Fall back to the live context-window % until the cache fills.
+now=$(date +%s)
+cached_pct=""; cached_at=0
+if [[ -r "$USAGE_CACHE" ]]; then
+    cached_pct=$(grep -m1 '^PCT=' "$USAGE_CACHE" | cut -d= -f2)
+    cached_at=$(grep -m1 '^AT='  "$USAGE_CACHE" | cut -d= -f2)
+fi
+if (( now - ${cached_at:-0} > 120 )); then
+    setsid "$0" refresh-usage </dev/null >/dev/null 2>&1 &
+fi
+if [[ -n "$cached_pct" ]]; then
+    usage="${cached_pct}%"
+else
+    u=$(grep -o '"usage":{[^}]*}' "$newest" | tail -1)
+    _n() { printf '%s' "$u" | grep -o "\"$1\":[0-9]*" | head -1 | grep -o '[0-9]*$'; }
+    it=$(_n input_tokens); cc=$(_n cache_creation_input_tokens); cr=$(_n cache_read_input_tokens)
+    ctx=$(( ${it:-0} + ${cc:-0} + ${cr:-0} ))
+    win=200000; (( ctx > 200000 )) && win=1000000
+    p=$(( win > 0 ? ctx * 100 / win : 0 )); (( p > 100 )) && p=100
+    usage="${p}%"
+fi
 
-# Working/idle from the hook flag, if fresh (a hung "working" can't stick).
+# Working/idle from the hook flag, if fresh.
 state=idle; verb=""
 if [[ -r "$HOOK" ]]; then
     hs=$(grep -m1 '^STATE=' "$HOOK" | cut -d= -f2)
     hv=$(grep -m1 '^VERB='  "$HOOK" | cut -d= -f2)
     at=$(grep -m1 '^AT='    "$HOOK" | cut -d= -f2)
-    if [[ "$hs" == working ]] && (( $(date +%s) - ${at:-0} <= 180 )); then
+    if [[ "$hs" == working ]] && (( now - ${at:-0} <= 180 )); then
         state=working; verb=${hv:-Cooking}
     fi
 fi
 
-printf 'STATE=%s\nMODEL=%s\nUSAGE=%s%%\nVERB=%s\n' "$state" "$model" "$pct" "$verb"
+printf 'STATE=%s\nMODEL=%s\nUSAGE=%s\nVERB=%s\n' "$state" "$model" "$usage" "$verb"

@@ -2143,6 +2143,10 @@ import json, sys
 settings = sys.argv[1]
 try: d = json.load(open(settings))
 except Exception: d = {}
+# Drop a legacy statusLine that piped the poller into Claude's status bar.
+sl = d.get("statusLine")
+stripped = isinstance(sl, dict) and "vendi-claude-status" in (sl.get("command") or "")
+if stripped: d.pop("statusLine", None)
 h = d.setdefault("hooks", {})
 def ensure(evt, cmd):
     arr = h.setdefault(evt, [])
@@ -2151,7 +2155,7 @@ def ensure(evt, cmd):
 changed  = ensure("UserPromptSubmit", "vendi-claude-status hook working Clauding")
 changed |= ensure("PreToolUse",       "vendi-claude-status hook working Cooking")
 changed |= ensure("Stop",             "vendi-claude-status hook idle")
-if changed: json.dump(d, open(settings, "w"), indent=2)
+if changed or stripped: json.dump(d, open(settings, "w"), indent=2)
 PY
             [[ "$sub" == setup-quiet ]] && return 0
             _header "Claude Code bar gadget"
@@ -2166,6 +2170,9 @@ import json, sys
 p = sys.argv[1]
 try: d = json.load(open(p))
 except Exception: sys.exit(0)
+sl = d.get("statusLine")
+if isinstance(sl, dict) and "vendi-claude-status" in (sl.get("command") or ""):
+    d.pop("statusLine", None)
 h = d.get("hooks", {})
 for evt in ("UserPromptSubmit", "PreToolUse", "Stop"):
     if evt in h:
