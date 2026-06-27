@@ -177,26 +177,28 @@ ShellRoot {
         onFileChanged: reload()
     }
 
-    // Claude Code state (written by vendi-claude-status).
-    FileView {
-        id: claudeFile
-        path: Quickshell.env("HOME") + "/.config/vendi/claude"
-        watchChanges: true
-        onLoaded: {
-            const t = text();
+    // Claude Code state — polled (auto-detects a running session; no wiring).
+    Process {
+        id: claudeProc
+        command: ["vendi-claude-status"]
+        property string buf: ""
+        stdout: SplitParser { onRead: line => claudeProc.buf += line + "\n" }
+        onStarted: buf = ""
+        onExited: {
+            const t = claudeProc.buf;
+            if (((/STATE=(.*)/.exec(t) || [])[1] || "off") === "off") {
+                root.claudeActive = false; root.claudeWorking = false; return;
+            }
             root.claudeModel   = (/MODEL=(.*)/.exec(t)  || [])[1] || "";
             root.claudeUsage   = (/USAGE=(.*)/.exec(t)  || [])[1] || "";
             root.claudeVerb    = (/VERB=(.*)/.exec(t)   || [])[1] || "";
             root.claudeWorking = ((/STATE=(.*)/.exec(t) || [])[1] || "") === "working";
-            root.claudeActive  = root.claudeModel.length > 0;
+            root.claudeActive  = true;
         }
-        onFileChanged: reload()
     }
-    // FileView watchChanges can miss the file's first creation; re-poll until the
-    // gadget goes active, then stop (the watcher takes over).
     Timer {
-        interval: 4000; repeat: true; running: !root.claudeActive
-        onTriggered: claudeFile.reload()
+        interval: 3000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: claudeProc.running = true
     }
 
     // ── compositor state ─────────────────────────────────────────────────────
@@ -1030,52 +1032,6 @@ ShellRoot {
                     opacity: panelWin.sideHidden ? 0 : 1
                     Behavior on opacity { NumberAnimation { duration: 150 } }
                 }
-
-                // Claude Code gadget: usage · model while idle; pulses with the
-                // verb ("Clauding…"/"Cooking…") while Claude is working.
-                Sep {
-                    visible: root.claudeActive && !panelWin.centerExpanded
-                    opacity: panelWin.sideHidden ? 0 : 1
-                    Behavior on opacity { NumberAnimation { duration: 150 } }
-                }
-                Row {
-                    visible: root.claudeActive && !panelWin.centerExpanded
-                    spacing: 7
-                    opacity: panelWin.sideHidden ? 0 : 1
-                    Layout.alignment: Qt.AlignVCenter
-                    Behavior on opacity { NumberAnimation { duration: 150 } }
-                    Rectangle {   // pulse dot while working
-                        visible: root.claudeWorking
-                        width: 7; height: 7; radius: 3.5
-                        color: root.accent
-                        anchors.verticalCenter: parent.verticalCenter
-                        SequentialAnimation on opacity {
-                            running: root.claudeWorking; loops: Animation.Infinite
-                            NumberAnimation { to: 0.3; duration: 600; easing.type: Easing.InOutSine }
-                            NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutSine }
-                        }
-                    }
-                    Mono {   // working: the verb
-                        visible: root.claudeWorking
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: (root.claudeVerb || "Clauding") + "…"
-                        color: root.accent
-                        font.bold: true
-                    }
-                    Mono {   // idle, left: session usage
-                        visible: !root.claudeWorking && root.claudeUsage.length > 0
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.claudeUsage
-                        color: root.dim
-                    }
-                    Mono {   // idle, right: model
-                        visible: !root.claudeWorking
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.claudeModel
-                        color: root.fg
-                        font.bold: true
-                    }
-                }
             }
 
             // ── center notch collapsed row: clock · date · weather ──────────
@@ -1172,12 +1128,53 @@ ShellRoot {
                         }
                     }
                 }
+                // Claude Code gadget, left wing: session usage % (auto-detected
+                // when Claude Code is running). The model / "Cooking…" verb is on
+                // the right wing, so it flanks the clock like the battery island.
+                Row {
+                    visible: root.claudeActive && !panelWin.centerExpanded
+                    spacing: 4
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                    Mono {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "✦"; color: root.accent
+                    }
+                    Mono {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.claudeUsage; color: root.dim
+                    }
+                }
                 // date · time · weather — the bold clock sits in the middle,
                 // flanked by the dim date on the left and weather on the right.
                 Mono { id: dateT; color: root.dim }
                 Mono { id: clockT; font.bold: true; font.pixelSize: 14 }
                 Sep { visible: root.weather !== "" }
                 Mono { text: root.weather; visible: root.weather !== ""; color: root.dim }
+                // Claude Code gadget, right wing: the model, or a pulsing
+                // "Cooking…" while Claude is working.
+                Row {
+                    visible: root.claudeActive && !panelWin.centerExpanded
+                    spacing: 5
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                    Rectangle {
+                        visible: root.claudeWorking
+                        width: 6; height: 6; radius: 3; color: root.accent
+                        anchors.verticalCenter: parent.verticalCenter
+                        SequentialAnimation on opacity {
+                            running: root.claudeWorking; loops: Animation.Infinite
+                            NumberAnimation { to: 0.3; duration: 600; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Mono {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.claudeWorking ? ((root.claudeVerb || "Cooking") + "…") : root.claudeModel
+                        color: root.claudeWorking ? root.accent : root.fg
+                        font.bold: root.claudeWorking
+                    }
+                }
                 // media island, right wing: the album art, rounded.
                 ClippingRectangle {
                     visible: root.musicPlaying

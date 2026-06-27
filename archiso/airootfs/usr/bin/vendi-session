@@ -114,6 +114,9 @@ spawn_desktop() {
         wl-paste --type text  --watch cliphist store >>"$LOG" 2>&1 &
         wl-paste --type image --watch cliphist store >>"$LOG" 2>&1 &
     fi
+    # Claude Code gadget: install the working/idle hooks (idempotent, silent) so
+    # the bar's auto-detected Claude island also shows the live "Cooking" state.
+    command -v vendi >/dev/null && vendi claude setup-quiet >/dev/null 2>&1 || true
     # Night light: the CRTC gamma LUT resets on every compositor start, so
     # re-apply the saved colour temperature (vendi night) once the IPC is up.
     if [ -r "${HOME}/.config/vendi/night" ] && command -v vendi-ctl >/dev/null; then
