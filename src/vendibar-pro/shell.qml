@@ -1142,9 +1142,7 @@ ShellRoot {
                 // the right wing, so it flanks the clock like the battery island.
                 Row {
                     visible: root.claudeActive && !panelWin.centerExpanded
-                    spacing: 4
-                    Layout.leftMargin: -14
-                    Layout.rightMargin: 6
+                    spacing: 8
                     opacity: panelWin.sideHidden ? 0 : 1
                     Behavior on opacity { NumberAnimation { duration: 150 } }
                     Image {
