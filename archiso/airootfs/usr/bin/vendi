@@ -204,7 +204,7 @@ cmd_info() {
 declare -A P
 A=
 
-THEMES="mocha latte gruvbox mono think dynamic"
+THEMES="mocha latte gruvbox nord tokyonight everforest mono think dynamic"
 
 _palette() {
     case "$1" in
@@ -231,6 +231,30 @@ _palette() {
         [overlay1]=928374 [surface2]=665c54 [surface1]=504945 [surface0]=3c3836
         [blue]=83a598 [teal]=8ec07c [green]=b8bb26 [yellow]=fabd2f
         [red]=fb4934 [pink]=d3869b
+    ) ;;
+    # Nord — arctic, bluish dark with a frost accent.
+    nord) A=88c0d0; P=(
+        [base]=2e3440 [mantle]=2b303b [crust]=242933
+        [text]=eceff4 [subtext1]=e5e9f0 [subtext0]=d8dee9
+        [overlay1]=7b88a1 [surface2]=4c566a [surface1]=434c5e [surface0]=3b4252
+        [blue]=81a1c1 [teal]=8fbcbb [green]=a3be8c [yellow]=ebcb8b
+        [red]=bf616a [pink]=b48ead
+    ) ;;
+    # Tokyo Night — deep indigo night, blue accent.
+    tokyonight) A=7aa2f7; P=(
+        [base]=1a1b26 [mantle]=16161e [crust]=13131a
+        [text]=c0caf5 [subtext1]=a9b1d6 [subtext0]=9aa5ce
+        [overlay1]=565f89 [surface2]=414868 [surface1]=2f3549 [surface0]=24283b
+        [blue]=7aa2f7 [teal]=2ac3de [green]=9ece6a [yellow]=e0af68
+        [red]=f7768e [pink]=bb9af7
+    ) ;;
+    # Everforest — warm green forest, soft contrast.
+    everforest) A=a7c080; P=(
+        [base]=2d353b [mantle]=272e33 [crust]=232a2e
+        [text]=d3c6aa [subtext1]=9da9a0 [subtext0]=859289
+        [overlay1]=7a8478 [surface2]=4f585e [surface1]=414b50 [surface0]=343f44
+        [blue]=7fbbb3 [teal]=83c092 [green]=a7c080 [yellow]=dbbc7f
+        [red]=e67e80 [pink]=d699b6
     ) ;;
     # Monochrome — pure black and white, no color anywhere.
     mono) A=ffffff; P=(
@@ -775,6 +799,9 @@ _theme_desc() {
         mocha)   echo "catppuccin mocha — the signature dark look" ;;
         latte)   echo "catppuccin latte — light and clean" ;;
         gruvbox) echo "gruvbox dark — warm retro, orange accent" ;;
+        nord)    echo "nord — arctic blue, frost accent" ;;
+        tokyonight) echo "tokyo night — deep indigo, blue accent" ;;
+        everforest) echo "everforest — warm green forest" ;;
         mono)    echo "monochrome — pure black and white" ;;
         think)   echo "ThinkPad — matte black, TrackPoint red" ;;
         dynamic) echo "generated from your current wallpaper" ;;
