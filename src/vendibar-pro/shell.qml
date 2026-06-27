@@ -300,6 +300,22 @@ ShellRoot {
             && n.name && !n.name.includes("monitor")) : []
     // Keep the listed device nodes bound so their state stays live.
     PwObjectTracker { objects: root.audioSinks.concat(root.audioSources) }
+    // Mic in use: any app capturing audio (a recording stream exists).
+    property bool micInUse: Pipewire.nodes
+        ? Pipewire.nodes.values.some(n => n && n.properties
+            && n.properties["media.class"] === "Stream/Input/Audio") : false
+    // First connected Bluetooth audio device that reports a battery level.
+    property var btDevice: {
+        if (!UPower.devices) return null;
+        for (const d of UPower.devices.values) {
+            if (!d || !d.isPresent) continue;
+            if (d.type === UPowerDeviceType.Headset
+                || d.type === UPowerDeviceType.Headphones
+                || d.type === UPowerDeviceType.BluetoothGeneric)
+                return d;
+        }
+        return null;
+    }
     // Clamp the displayed volume at 100 — pipewire can report >1.0 if something
     // over-amplified the sink; the bar should never show 130%.
     property int volume: sinkAudio ? Math.min(100, Math.round(sinkAudio.volume * 100)) : -1
@@ -1244,6 +1260,33 @@ ShellRoot {
                         color: root.accent
                     }
                 }
+                // now-playing scrubber, right wing: thin seekable progress.
+                // Click anywhere on it to jump the track.
+                Item {
+                    visible: root.musicPlaying
+                    implicitWidth: 56
+                    implicitHeight: 18
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width; height: 3; radius: 1.5
+                        color: Qt.rgba(1, 1, 1, 0.18)
+                        Rectangle {
+                            width: Math.max(0, Math.min(1, root.musicProgress)) * parent.width
+                            height: parent.height; radius: 1.5
+                            color: root.accent
+                            Behavior on width { NumberAnimation { duration: 300 } }
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: mouse => {
+                            if (root.player && root.player.canSeek && root.player.length > 0)
+                                root.player.position =
+                                    Math.max(0, Math.min(1, mouse.x / width)) * root.player.length;
+                        }
+                    }
+                }
                 // recording, right wing: a red waveform so the notch stays
                 // symmetric with the timer pill on the left.
                 Item {
@@ -1473,6 +1516,29 @@ ShellRoot {
                         text: "󰖔"
                         color: root.nightTone
                         font.pixelSize: 14
+                    }
+                    // Mic in use — red, while any app is capturing audio.
+                    Glyph {
+                        visible: root.micInUse
+                        text: "󰍬"
+                        color: "#f25c5c"
+                        font.pixelSize: 14
+                    }
+                    // Bluetooth device battery (headset / earbuds…).
+                    Row {
+                        visible: root.btDevice !== null
+                        spacing: 3
+                        Layout.alignment: Qt.AlignVCenter
+                        Glyph {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "󰋋"; font.pixelSize: 14
+                            color: (root.btDevice && root.btDevice.percentage <= 20) ? root.alert : root.fg
+                        }
+                        Mono {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.btDevice ? Math.round(root.btDevice.percentage) + "%" : ""
+                            color: root.dim; font.pixelSize: 11
+                        }
                     }
                     Glyph {
                         text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
