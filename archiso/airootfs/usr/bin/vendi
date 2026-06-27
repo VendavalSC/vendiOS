@@ -2186,7 +2186,28 @@ PY
             _ok "removed the Claude gadget hooks (restart Claude Code)"
             ;;
         status) vendi-claude-status ;;
-        *) _err "usage: vendi claude [setup|off|status]"; return 1 ;;
+        calibrate)
+            # Pin the 5h usage % to what Claude's /usage shows: budget = current
+            # block tokens / (pct/100). Run it on the machine, when /usage shows pct.
+            local pct=${2:-}
+            [[ "$pct" =~ ^[0-9]+$ ]] && (( pct > 0 && pct <= 100 )) || {
+                _err "usage: vendi claude calibrate <current /usage %, 1-100>"; return 1; }
+            local runner=""
+            if command -v ccusage >/dev/null 2>&1; then runner="ccusage"
+            elif command -v npx >/dev/null 2>&1; then runner="npx -y ccusage@latest"
+            else _err "needs ccusage or npx"; return 1; fi
+            local tok
+            tok=$($runner blocks --active --json 2>/dev/null \
+                  | python3 -c "import json,sys;print(json.load(sys.stdin)['blocks'][0]['totalTokens'])" 2>/dev/null)
+            [[ -n "$tok" ]] || { _err "no active 5h block yet (use Claude a little first)"; return 1; }
+            local budget=$(( tok * 100 / pct ))
+            mkdir -p "$HOME/.config/vendi"
+            echo "$budget" > "$HOME/.config/vendi/claude-limit"
+            rm -f "$HOME/.config/vendi/claude-usage"   # force a fresh % next poll
+            _ok "calibrated: 5h budget ≈ ${budget} tokens (${tok} now = ${pct}%)"
+            _info "the bar usage % now tracks /usage; re-run if it drifts"
+            ;;
+        *) _err "usage: vendi claude [setup|off|status|calibrate <pct>]"; return 1 ;;
     esac
 }
 
