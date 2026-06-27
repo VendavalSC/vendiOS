@@ -287,6 +287,14 @@ ShellRoot {
     // ── audio (pipewire, live — no polling) ──────────────────────────────────
     PwObjectTracker { objects: [Pipewire.defaultAudioSink] }
     property var sinkAudio: Pipewire.defaultAudioSink?.audio ?? null
+    // Output / input device lists for the control-center audio picker.
+    property var audioSinks: Pipewire.nodes
+        ? Pipewire.nodes.values.filter(n => n && n.audio && n.isSink && !n.isStream) : []
+    property var audioSources: Pipewire.nodes
+        ? Pipewire.nodes.values.filter(n => n && n.audio && !n.isSink && !n.isStream
+            && n.name && !n.name.includes("monitor")) : []
+    // Keep the listed device nodes bound so their state stays live.
+    PwObjectTracker { objects: root.audioSinks.concat(root.audioSources) }
     // Clamp the displayed volume at 100 — pipewire can report >1.0 if something
     // over-amplified the sink; the bar should never show 130%.
     property int volume: sinkAudio ? Math.min(100, Math.round(sinkAudio.volume * 100)) : -1
@@ -1907,7 +1915,7 @@ ShellRoot {
                         }
                         QuickAction {
                             glyph: "󰕾"; label: "Audio"
-                            run: () => Quickshell.execDetached(["kitty", "--class", "vendi-float", "-e", "vendi", "audio"])
+                            run: () => control.ccPage = "audio"
                         }
                         QuickAction {
                             glyph: root.dnd ? "󰂛" : "󰂚"
@@ -2225,6 +2233,98 @@ ShellRoot {
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                     }
+                }
+
+                // ── Audio sub-page (output + input device pickers) ───────────
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 20
+                    spacing: 10
+                    opacity: control.ccPage === "audio" ? 1 : 0
+                    visible: opacity > 0
+                    transform: Translate {
+                        x: control.ccPage === "audio" ? 0 : 28
+                        Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 160 } }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Mono {
+                            text: "󰁍"; color: root.fg
+                            MouseArea { anchors.fill: parent; anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor; onClicked: control.ccPage = "main" }
+                        }
+                        Mono { text: "Audio"; font.bold: true; color: root.accent }
+                    }
+
+                    // device row used for both output and input lists.
+                    component AudioRow: Rectangle {
+                        id: arRoot
+                        required property var node
+                        property bool isInput: false
+                        readonly property bool active: isInput
+                            ? node === Pipewire.defaultAudioSource
+                            : node === Pipewire.defaultAudioSink
+                        readonly property string label: node
+                            ? (node.description || node.nickname || node.name || "device") : "device"
+                        Layout.fillWidth: true
+                        height: 34
+                        radius: 8
+                        color: arHov.hovered ? Qt.rgba(1,1,1,0.08) : "transparent"
+                        HoverHandler { id: arHov }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 8; anchors.rightMargin: 8
+                            spacing: 8
+                            Glyph {
+                                text: arRoot.isInput ? "󰍬"
+                                    : /headphone|airpod|bluetooth|buds|wh-|wf-/i.test(arRoot.label) ? "󰋋" : "󰓃"
+                                color: arRoot.active ? root.good : root.fg
+                            }
+                            Mono {
+                                Layout.fillWidth: true
+                                text: arRoot.label
+                                color: arRoot.active ? root.good : root.fg
+                                elide: Text.ElideRight
+                            }
+                            Glyph { visible: arRoot.active; text: "󰄬"; color: root.good }
+                        }
+                        TapHandler {
+                            onTapped: {
+                                if (arRoot.isInput) Pipewire.preferredDefaultAudioSource = arRoot.node;
+                                else Pipewire.preferredDefaultAudioSink = arRoot.node;
+                            }
+                        }
+                    }
+
+                    Mono { text: "OUTPUT"; color: root.dim; font.pixelSize: 10; font.bold: true }
+                    ColumnLayout {
+                        Layout.fillWidth: true; spacing: 2
+                        Repeater {
+                            model: root.audioSinks
+                            delegate: AudioRow { required property var modelData; node: modelData }
+                        }
+                        Mono {
+                            visible: root.audioSinks.length === 0
+                            text: "no output devices"; color: root.dim; font.pixelSize: 11
+                        }
+                    }
+
+                    Mono { text: "INPUT"; color: root.dim; font.pixelSize: 10; font.bold: true; Layout.topMargin: 6 }
+                    ColumnLayout {
+                        Layout.fillWidth: true; spacing: 2
+                        Repeater {
+                            model: root.audioSources
+                            delegate: AudioRow { required property var modelData; node: modelData; isInput: true }
+                        }
+                        Mono {
+                            visible: root.audioSources.length === 0
+                            text: "no input devices"; color: root.dim; font.pixelSize: 11
+                        }
+                    }
+                    Item { Layout.fillHeight: true }
                 }
 
                 // ── backing scanners (nmcli / bluetoothctl) ──────────────────
