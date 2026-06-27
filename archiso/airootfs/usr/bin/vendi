@@ -1220,6 +1220,7 @@ cmd_help() {
     _cmd "night"    "night light — on/off/toggle/warmer/cooler/<kelvin>"
     _cmd "voice"    "local voice typing (whisper.cpp → types into focused field)"
     _cmd "dnd"      "do not disturb — silence notifications (on/off/toggle)"
+    _cmd "claude"   "show Claude Code usage/model + working state in the bar"
     _cmd "fingerprint" "enroll a fingerprint to unlock (swipe at the lock)"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"
@@ -2124,6 +2125,71 @@ cmd_dnd() {
     fi
 }
 
+# ── Claude Code bar gadget (`vendi claude`) ───────────────────────────────────
+# Opt-in: wires a statusLine + hooks into ~/.claude/settings.json so Claude Code
+# feeds the vendibar-pro gadget (idle = usage · model; working = Clauding…). The
+# 5h rate-limit % is API-only, so "usage" is the locally-available session cost.
+cmd_claude() {
+    local sub=${1:-setup}
+    local settings="$HOME/.claude/settings.json"
+    local statefile="$HOME/.config/vendi/claude"
+    command -v python3 >/dev/null || { _err "needs python3"; return 1; }
+    case "$sub" in
+        setup|"")
+            _header "Claude Code bar gadget"
+            command -v vendi-claude-status >/dev/null || { _err "vendi-claude-status not installed"; return 1; }
+            mkdir -p "$HOME/.claude" "$HOME/.config/vendi"
+            [[ -f "$settings" ]] && cp "$settings" "${settings}.bak.$(date +%s)"
+            python3 - "$settings" "$statefile" <<'PY'
+import json, sys, os
+settings, statefile = sys.argv[1], sys.argv[2]
+try: d = json.load(open(settings))
+except Exception: d = {}
+d["statusLine"] = {"type": "command", "command": "vendi-claude-status"}
+h = d.setdefault("hooks", {})
+def ensure(evt, cmd):
+    arr = h.setdefault(evt, [])
+    if any(hk.get("command") == cmd for g in arr for hk in g.get("hooks", [])): return
+    arr.append({"hooks": [{"type": "command", "command": cmd}]})
+ensure("UserPromptSubmit", "vendi-claude-status hook working Clauding")
+ensure("PreToolUse",       "vendi-claude-status hook working Cooking")
+ensure("Stop",             "vendi-claude-status hook idle")
+json.dump(d, open(settings, "w"), indent=2)
+# seed the state file so the gadget appears right away
+model = (d.get("model") if isinstance(d.get("model"), str) else "Claude") or "Claude"
+open(statefile, "w").write("STATE=idle\nMODEL=%s\nUSAGE=\nVERB=\n" % model)
+PY
+            _ok "wired statusLine + hooks into ~/.claude/settings.json"
+            _info "restart Claude Code — new sessions feed the gadget"
+            _info "bar shows: idle = usage · model · working = Clauding…/Cooking…"
+            ;;
+        off|disable)
+            [[ -f "$settings" ]] || { _info "nothing to remove"; return 0; }
+            python3 - "$settings" <<'PY'
+import json, sys
+p = sys.argv[1]
+try: d = json.load(open(p))
+except Exception: sys.exit(0)
+d.pop("statusLine", None)
+h = d.get("hooks", {})
+for evt in ("UserPromptSubmit", "PreToolUse", "Stop"):
+    if evt in h:
+        h[evt] = [g for g in h[evt]
+                  if not any("vendi-claude-status" in hk.get("command", "")
+                             for hk in g.get("hooks", []))]
+        if not h[evt]: del h[evt]
+if not h: d.pop("hooks", None)
+json.dump(d, open(p, "w"), indent=2)
+PY
+            rm -f "$statefile"
+            _ok "removed the Claude gadget wiring (restart Claude Code)"
+            ;;
+        status)
+            [[ -f "$statefile" ]] && cat "$statefile" || _info "gadget not active (run: vendi claude setup)" ;;
+        *) _err "usage: vendi claude [setup|off|status]"; return 1 ;;
+    esac
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 case "${1:-help}" in
     update)   cmd_update   ;;
@@ -2151,6 +2217,7 @@ case "${1:-help}" in
     night|nightlight) shift; cmd_night "$@" ;;
     voice|dictate) shift; cmd_voice "$@" ;;
     dnd|donotdisturb) shift; cmd_dnd "$@" ;;
+    claude) shift; cmd_claude "$@" ;;
     fingerprint|finger|fp) shift; cmd_fingerprint "$@" ;;
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;

@@ -591,7 +591,8 @@ sys_install_vendi_cli() {
     # vendi-ctl IPC, vendi-demo test client). All shipped from the live ISO's
     # /usr/bin since the airootfs is built with them in place.
     for bin in vendi vendi-install vendi-boot vendi-welcome vendi-session \
-               vendiwm vendi-ctl vendi-demo vendibar vendi-menu vendi-launcher; do
+               vendiwm vendi-ctl vendi-demo vendibar vendi-menu vendi-launcher \
+               vendi-claude-status; do
         [[ -f /usr/bin/$bin ]] && install -m 755 /usr/bin/$bin /mnt/usr/bin/$bin
     done
     for lib in ui.sh disk.sh system.sh; do

@@ -177,6 +177,28 @@ ShellRoot {
         onFileChanged: reload()
     }
 
+    // Claude Code state (written by vendi-claude-status).
+    FileView {
+        id: claudeFile
+        path: Quickshell.env("HOME") + "/.config/vendi/claude"
+        watchChanges: true
+        onLoaded: {
+            const t = text();
+            root.claudeModel   = (/MODEL=(.*)/.exec(t)  || [])[1] || "";
+            root.claudeUsage   = (/USAGE=(.*)/.exec(t)  || [])[1] || "";
+            root.claudeVerb    = (/VERB=(.*)/.exec(t)   || [])[1] || "";
+            root.claudeWorking = ((/STATE=(.*)/.exec(t) || [])[1] || "") === "working";
+            root.claudeActive  = root.claudeModel.length > 0;
+        }
+        onFileChanged: reload()
+    }
+    // FileView watchChanges can miss the file's first creation; re-poll until the
+    // gadget goes active, then stop (the watcher takes over).
+    Timer {
+        interval: 4000; repeat: true; running: !root.claudeActive
+        onTriggered: claudeFile.reload()
+    }
+
     // ── compositor state ─────────────────────────────────────────────────────
     property int activeWs: 1
     property var wsList: [{ id: 1, windows: 0 }]
@@ -657,6 +679,15 @@ ShellRoot {
         nightOsd = true; nightOsdTimer.restart();
     }
 
+    // ── Claude Code gadget ──────────────────────────────────────────────────
+    // Fed by vendi-claude-status (Claude Code statusLine + hooks) writing
+    // ~/.config/vendi/claude. Idle: usage · model. Working: the verb pulses.
+    property bool   claudeActive:  false
+    property bool   claudeWorking: false
+    property string claudeModel:   ""
+    property string claudeUsage:   ""
+    property string claudeVerb:    ""
+
     // ── 1s heartbeat: clocks, media progress, active player ─────────────────
     Timer {
         interval: 1000; running: true; repeat: true; triggeredOnStart: true
@@ -998,6 +1029,52 @@ ShellRoot {
                     color: root.dim
                     opacity: panelWin.sideHidden ? 0 : 1
                     Behavior on opacity { NumberAnimation { duration: 150 } }
+                }
+
+                // Claude Code gadget: usage · model while idle; pulses with the
+                // verb ("Clauding…"/"Cooking…") while Claude is working.
+                Sep {
+                    visible: root.claudeActive && !panelWin.centerExpanded
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                }
+                Row {
+                    visible: root.claudeActive && !panelWin.centerExpanded
+                    spacing: 7
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Layout.alignment: Qt.AlignVCenter
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                    Rectangle {   // pulse dot while working
+                        visible: root.claudeWorking
+                        width: 7; height: 7; radius: 3.5
+                        color: root.accent
+                        anchors.verticalCenter: parent.verticalCenter
+                        SequentialAnimation on opacity {
+                            running: root.claudeWorking; loops: Animation.Infinite
+                            NumberAnimation { to: 0.3; duration: 600; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Mono {   // working: the verb
+                        visible: root.claudeWorking
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: (root.claudeVerb || "Clauding") + "…"
+                        color: root.accent
+                        font.bold: true
+                    }
+                    Mono {   // idle, left: session usage
+                        visible: !root.claudeWorking && root.claudeUsage.length > 0
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.claudeUsage
+                        color: root.dim
+                    }
+                    Mono {   // idle, right: model
+                        visible: !root.claudeWorking
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.claudeModel
+                        color: root.fg
+                        font.bold: true
+                    }
                 }
             }
 

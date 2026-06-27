@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# vendi-claude-status — bridge Claude Code state into the vendiOS bar.
+#
+# Used two ways, both writing ~/.config/vendi/claude (a tiny kv file the
+# vendibar-pro Claude gadget watches):
+#   • as Claude Code's statusLine command (JSON on stdin) → writes MODEL + USAGE
+#     and prints a one-line status; runs every render.
+#   • as a hook command: `vendi-claude-status hook <state> [verb]` → writes STATE
+#     (idle|working) + VERB, from UserPromptSubmit/PreToolUse/Stop hooks.
+set -euo pipefail
+STATE_FILE="${HOME}/.config/vendi/claude"
+mkdir -p "$(dirname "$STATE_FILE")"
+
+# Read current kv so each writer only touches its own fields.
+_get() { grep -m1 "^$1=" "$STATE_FILE" 2>/dev/null | cut -d= -f2- || true; }
+_put() { # _put STATE MODEL USAGE VERB
+    cat > "$STATE_FILE" <<EOF
+STATE=$1
+MODEL=$2
+USAGE=$3
+VERB=$4
+EOF
+}
+
+if [[ "${1:-}" == "hook" ]]; then
+    state=${2:-idle}; verb=${3:-}
+    _put "$state" "$(_get MODEL)" "$(_get USAGE)" "$verb"
+    exit 0
+fi
+
+# statusLine mode: JSON on stdin.
+json=$(cat)
+_field() { # extract a JSON value with jq if present, else a tolerant grep
+    if command -v jq >/dev/null 2>&1; then jq -r "$1 // empty" <<<"$json" 2>/dev/null || true
+    else sed -nE "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"?([^\",}]+)\"?.*/\1/p" <<<"$json" | head -1; fi
+}
+model=$(_field '.model.display_name' 'display_name'); model=${model:-Claude}
+cost=$(_field '.cost.total_cost_usd' 'total_cost_usd')
+added=$(_field '.cost.total_lines_added' 'total_lines_added')
+
+# "usage" = the best locally-available signal (the 5h rate-limit % is API-only).
+# Prefer session cost; fall back to lines changed.
+usage=""
+if [[ -n "$cost" ]]; then usage=$(printf '$%.2f' "$cost" 2>/dev/null || echo "\$$cost")
+elif [[ -n "$added" ]]; then usage="+${added}"; fi
+
+# A statusLine render means the turn finished rendering → treat as idle unless a
+# hook has flipped us to working more recently (hooks own STATE; we keep it).
+_put "$(_get STATE)" "$model" "$usage" "$(_get VERB)"
+
+# Print a compact real status line too (so it's a useful statusline on its own).
+printf '%s  %s' "$model" "${usage:-—}"

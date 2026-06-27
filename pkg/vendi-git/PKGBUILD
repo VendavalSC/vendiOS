@@ -89,6 +89,7 @@ package() {
     install -Dm755 archiso/airootfs/usr/bin/vendi-welcome  "${pkgdir}/usr/bin/vendi-welcome"
     install -Dm755 archiso/airootfs/usr/bin/vendi-session  "${pkgdir}/usr/bin/vendi-session"
     install -Dm755 archiso/airootfs/usr/bin/vendi-launcher "${pkgdir}/usr/bin/vendi-launcher"
+    install -Dm755 archiso/airootfs/usr/bin/vendi-claude-status "${pkgdir}/usr/bin/vendi-claude-status"
 
     # Rust binaries (compositor + control plane + bar)
     install -Dm755 src/target/release/vendiwm     "${pkgdir}/usr/bin/vendiwm"
