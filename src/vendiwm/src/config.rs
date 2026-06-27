@@ -91,11 +91,15 @@ binds {
     bind "super+shift+8"       "move-to-workspace 8"
     bind "super+shift+9"       "move-to-workspace 9"
 
-    // ── screenshots ────────────────────────────────────────────
-    // Print = full-screen shot to ~/Pictures, also copied to the clipboard, with
-    // a toast so you know it fired. Super+Shift+S = pick a region to the clipboard.
-    bind "print"               "spawn sh -c 'mkdir -p ~/Pictures; f=~/Pictures/screenshot-$(date +%Y%m%d-%H%M%S).png; grim $f && wl-copy < $f && notify-send -a Screenshot Screenshot \"Saved $f\"'"
-    bind "super+shift+s"       "spawn sh -c 'grim -g \"$(slurp)\" - | wl-copy && notify-send -a Screenshot Screenshot \"Region copied to clipboard\"'"
+    // ── capture suite + clipboard (vendi shot/record/ocr/clip) ──
+    // Print = full-screen shot (saved + copied + toast). Super+Shift+S = pick a
+    // region to the clipboard. Super+Shift+R toggles a screen recording,
+    // Super+Shift+T OCRs a region, Super+V opens clipboard history.
+    bind "print"               "spawn vendi shot full"
+    bind "super+shift+s"       "spawn vendi shot area --copy"
+    bind "super+shift+r"       "spawn vendi record"
+    bind "super+shift+t"       "spawn vendi ocr"
+    bind "super+v"             "spawn vendi clip"
 
     // ── media keys ─────────────────────────────────────────────
     bind "XF86AudioRaiseVolume" "spawn wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"

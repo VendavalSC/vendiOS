@@ -36,12 +36,15 @@ Make notch cards pluggable (a gadget registry), then ship:
   calendar peek + countdown, inline calculator, download/file-transfer island,
   quick-note scratchpad.
 
-### 2. Dev environment — `vendi dev` + vendiVim  ← STARTING HERE
+### 2. Dev environment — `vendi dev` + vendiVim  ← SHIPPED
 - **vendiVim** = LazyVim base (don't reinvent) + vendiOS theme integration (follows
   `vendi theme`), curated language extras (rust/ts/python/go/lua/qml/c), sane keymaps.
-- **`vendi dev`** installer: mise (runtimes), lazygit/lazydocker, starship,
-  zellij/tmux, ripgrep/fd/fzf/bat/eza/zoxide; optional zed/vscode/helix. kitty stays
-  default terminal.
+  ✅ Config at `/usr/share/vendios/vendivim`; a generated `vendi` colorscheme reads
+  `~/.config/vendi/nvim.lua` (written by `vendi theme`, incl. the dynamic theme) and an
+  fs-watcher recolors open editors live.
+- **`vendi dev`** installer: mise (runtimes), lazygit, starship, zellij/tmux,
+  ripgrep/fd/fzf/bat/eza/zoxide; optional zed/vscode/helix (`vendi dev editors`). kitty
+  stays default terminal. ✅ subcommands: `setup`/`tools`/`vim`/`editors`/`status`.
 
 ### 3. Compositor / WM (vendiwm)
 Tearing + VRR path for fullscreen games (FPS, esp. NVIDIA); tasteful snappy animation
@@ -54,11 +57,16 @@ gamemode, gamescope, mangohud, vkBasalt, Steam + Proton-GE, lutris/heroic, moonl
 on launch, per-game gamescope profiles, NVIDIA env.
 
 ### 5. Productivity / utilities (Omarchy parity)
-`vendi shot|record|ocr` (grim/slurp/wf-recorder/tesseract); `vendi voice` (whisper.cpp
-local → types into focused field); `vendi clip` (cliphist + notch popover); `vendi
-webapp` (theme-aware PWAs); `vendi night` (color-temp + schedule); idle daemon
-(dim→lock→dpms→suspend) wired to vendilock; OSD popups (vol/brightness/caps); `vendi
-font`; DND/notification-silencing toggle.
+✅ `vendi shot|record|ocr` (grim/slurp/wf-recorder/tesseract) + `vendi clip` (cliphist,
+fzf/wofi picker, self-starting watcher) + `vendi font` (mono font cascade across
+kitty/foot/alacritty, persists across theme switches) — SHIPPED, verified on HW; binds
+wired in config.rs (Print / Super+Shift+S / Super+Shift+R / Super+Shift+T / Super+V).
+Remaining: `vendi voice` (whisper.cpp local → types into focused field — BLOCKED: needs
+virtual-keyboard-unstable-v1 in vendiwm); `vendi night` (color-temp + schedule — BLOCKED:
+needs wlr-gamma-control-unstable-v1 in vendiwm); `vendi webapp` (theme-aware PWAs); idle
+daemon (compositor already does lock+dpms; add dim→suspend stages); OSD popups (notch
+already bulges for vol/brightness — extend to caps/mic); DND/notification toggle (talk to
+vendiwm's island notification server).
 
 ### 6. Theming depth
 Cascade themes into nvim (vendiVim), btop, kitty, GTK, web apps; more shipped themes;
@@ -74,7 +82,9 @@ default app set for an instantly-usable first-run.
 
 ## Sequencing
 1. Gadget framework + Claude gadget + indicators
-2. **`vendi dev` + vendiVim**  ← chosen start
+2. ~~**`vendi dev` + vendiVim**~~ ✅ SHIPPED (2026-06-27)
+3. capture + clipboard ✅ SHIPPED (`vendi shot|record|ocr|clip`, 2026-06-27); voice +
+   OSD + night light still TODO
 3. Capture + voice + clipboard + OSD + night light
 4. `vendi game` + compositor tearing/VRR
 5. Theming depth + hardware profiles + curated apps
