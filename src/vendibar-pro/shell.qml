@@ -123,6 +123,12 @@ ShellRoot {
         // Night light changed (vendi night) — pulse the bar pill. temp in Kelvin,
         // 6500 = off.
         function night(temp: int): void { root.nightNotch(temp); }
+        // Do Not Disturb: "on" / "off" / "" (toggle). A confirming toast slips
+        // through before the silence (notify() bypasses the gate).
+        function dnd(mode: string): void {
+            root.dnd = (mode === "on") ? true : (mode === "off") ? false : !root.dnd;
+            root.notify(root.dnd ? "Do Not Disturb" : "Notifications on", "");
+        }
     }
 
     // ── theme ────────────────────────────────────────────────────────────────
@@ -1358,8 +1364,10 @@ ShellRoot {
                         Layout.alignment: Qt.AlignVCenter
                     }
                     Glyph {
-                        text: root.notifHistory.length > 0 ? "󰂚" : "󰂜"
-                        color: root.notifHistory.length > 0 ? root.fg : root.dim
+                        // bell-off while Do Not Disturb is on, else bell / bell-outline.
+                        text: root.dnd ? "󰂛" : (root.notifHistory.length > 0 ? "󰂚" : "󰂜")
+                        color: root.dnd ? root.accent
+                             : (root.notifHistory.length > 0 ? root.fg : root.dim)
                         font.pixelSize: 14
                     }
                     TapHandler { onTapped: panelWin.toggleRight() }

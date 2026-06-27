@@ -1219,6 +1219,7 @@ cmd_help() {
     _cmd "game"     "install the gaming stack; 'game run <cmd>' for gamemode+overlay"
     _cmd "night"    "night light — on/off/toggle/warmer/cooler/<kelvin>"
     _cmd "voice"    "local voice typing (whisper.cpp → types into focused field)"
+    _cmd "dnd"      "do not disturb — silence notifications (on/off/toggle)"
     _cmd "fingerprint" "enroll a fingerprint to unlock (swipe at the lock)"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"
@@ -2110,6 +2111,19 @@ cmd_voice() {
     _toast "Voice" "Listening — repeat the key to type what you said"
 }
 
+# ── do not disturb (`vendi dnd`) ──────────────────────────────────────────────
+# Toggles the bar's notification silencing (it runs its own server). on|off|"".
+cmd_dnd() {
+    local mode=${1:-}
+    case "$mode" in on|off|"") ;; toggle) mode="" ;;
+        *) _err "usage: vendi dnd [on|off|toggle]"; return 1 ;; esac
+    if quickshell -c vendibar-pro ipc call panel dnd "$mode" >/dev/null 2>&1; then
+        _ok "do not disturb: ${mode:-toggled}"
+    else
+        _err "couldn't reach the bar (pro bar only)"; return 1
+    fi
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 case "${1:-help}" in
     update)   cmd_update   ;;
@@ -2136,6 +2150,7 @@ case "${1:-help}" in
     game|gaming) shift; cmd_game "$@" ;;
     night|nightlight) shift; cmd_night "$@" ;;
     voice|dictate) shift; cmd_voice "$@" ;;
+    dnd|donotdisturb) shift; cmd_dnd "$@" ;;
     fingerprint|finger|fp) shift; cmd_fingerprint "$@" ;;
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;
