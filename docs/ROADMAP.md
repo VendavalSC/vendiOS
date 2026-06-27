@@ -72,8 +72,10 @@ already bulges for vol/brightness — extend to caps/mic); DND/notification togg
 vendiwm's island notification server).
 
 ### 6. Theming depth
-Cascade themes into nvim (vendiVim), btop, kitty, GTK, web apps; more shipped themes;
-per-theme wallpapers. (Accent/theme-state plumbing already exists.)
+Cascade `vendi theme` into: nvim (vendiVim ✅), kitty ✅, GTK/libadwaita ✅ (@define-color
+in gtk-4.0/gtk-3.0 → file pickers, nautilus, nwg-look follow). TODO: btop (needs btop
+shipped), web apps, more shipped themes, per-theme wallpapers. (Accent/theme-state
+plumbing already exists.)
 
 ### 7. Hardware / system
 Hardware profiles (`vendi hw nvidia|intel|amd|laptop-*`) for GPU/touchpad/power;
