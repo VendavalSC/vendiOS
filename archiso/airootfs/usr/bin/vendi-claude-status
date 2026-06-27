@@ -45,16 +45,28 @@ print(u("five_hour"), u("seven_day"))
 fi
 
 # ── poll mode ─────────────────────────────────────────────────────────────────
-# Session open = a claude process — either the bare `claude` binary (comm=claude)
-# or a versioned session host — or, as a fallback, a transcript written in the
-# last minute.
-if ! pgrep -x claude >/dev/null 2>&1 \
-   && ! pgrep -f 'claude/versions' >/dev/null 2>&1 \
+# Session open = an INTERACTIVE claude process (the bare `claude` binary or a
+# versioned session host) — explicitly NOT the background daemon / spare host,
+# which linger after you quit (that's why it "didn't close" before).
+_claude_running() {
+    local cmd
+    while read -r _ cmd; do
+        case "$cmd" in
+            *vendi-claude*|*claude-status*) continue ;;     # our own scripts
+            *"daemon run"*|*"daemon "*|*--bg-spare*) continue ;;  # daemon / spare
+        esac
+        case "$cmd" in
+            claude|claude\ *|*/claude|*/claude\ *|*--session-id*) return 0 ;;
+        esac
+    done < <(pgrep -af claude 2>/dev/null)
+    return 1
+}
+if ! _claude_running \
    && [[ -z "$(find "$HOME/.claude/projects" -name '*.jsonl' -mmin -1 2>/dev/null | head -1)" ]]; then
     echo "STATE=off"; exit 0
 fi
 # A cmdline carrying --model (versioned launch) lets us read the model directly.
-pcmd=$(pgrep -af 'claude' 2>/dev/null | grep -viE 'vendi-claude|claude-status|pgrep' | grep -- '--model' | head -1 || true)
+pcmd=$(pgrep -af 'claude' 2>/dev/null | grep -viE 'vendi-claude|claude-status|pgrep|daemon' | grep -- '--model' | head -1 || true)
 
 # Model: from the running process's --model flag; else the newest transcript.
 model=$(printf '%s' "$pcmd" | grep -oE -- '--model[= ]+[A-Za-z0-9._-]+' | head -1 | sed -E 's/--model[= ]+//')

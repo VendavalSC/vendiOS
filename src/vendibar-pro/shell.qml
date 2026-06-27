@@ -1145,9 +1145,11 @@ ShellRoot {
                     spacing: 4
                     opacity: panelWin.sideHidden ? 0 : 1
                     Behavior on opacity { NumberAnimation { duration: 150 } }
-                    Mono {
+                    Image {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "✦"; color: root.accent
+                        source: Qt.resolvedUrl("claude.svg")
+                        sourceSize.width: 14; sourceSize.height: 14
+                        smooth: true
                     }
                     Mono {
                         anchors.verticalCenter: parent.verticalCenter
