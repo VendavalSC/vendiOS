@@ -1143,12 +1143,14 @@ ShellRoot {
                 Row {
                     visible: root.claudeActive && !panelWin.centerExpanded
                     spacing: 4
+                    Layout.leftMargin: -14
+                    Layout.rightMargin: 6
                     opacity: panelWin.sideHidden ? 0 : 1
                     Behavior on opacity { NumberAnimation { duration: 150 } }
                     Image {
                         anchors.verticalCenter: parent.verticalCenter
                         source: Qt.resolvedUrl("claude.svg")
-                        sourceSize.width: 14; sourceSize.height: 14
+                        sourceSize.width: 11; sourceSize.height: 11
                         smooth: true
                     }
                     Mono {
