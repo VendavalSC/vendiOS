@@ -57,6 +57,7 @@ ShellRoot {
     readonly property int introWindow: 1200
     readonly property bool instant: Quickshell.env("VENDILOCK_INSTANT") === "1"
     readonly property string readyFile: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/vendilock.ready"
+    readonly property string unlockedFile: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/vendilock.unlocked"
 
     SystemClock { id: sysClock; precision: SystemClock.Seconds }
 
@@ -90,6 +91,16 @@ ShellRoot {
     // password path stays fully independent. Only armed when an enrolled
     // reader exists (fprintCheck), so machines without one never loop.
     property bool fingerReady: false
+    // An attempt that fails almost at once never saw a finger — fprintd
+    // couldn't claim the reader (usually the previous transaction hasn't
+    // released it yet). Re-arming every 500ms then spins against the device;
+    // back off instead (0.5s doubling to 8s), and reset after a real attempt.
+    property double fprintStartedAt: 0
+    property int fprintBackoff: 500
+    function startFprint() {
+        root.fprintStartedAt = Date.now();
+        fprint.start();
+    }
     Process {
         id: fprintCheck
         command: ["sh", "-c",
@@ -99,7 +110,7 @@ ShellRoot {
         stdout: StdioCollector {
             onStreamFinished: {
                 root.fingerReady = (text.trim() === "yes");
-                if (root.fingerReady && lock.locked) fprint.start();
+                if (root.fingerReady && lock.locked) root.startFprint();
             }
         }
     }
@@ -112,6 +123,9 @@ ShellRoot {
             if (result === PamResult.Success) {
                 root.unlocking = true;
             } else if (root.fingerReady && lock.locked && !root.unlocking) {
+                const instant = Date.now() - root.fprintStartedAt < 2000;
+                root.fprintBackoff = instant ? Math.min(root.fprintBackoff * 2, 8000) : 500;
+                fprintRearm.interval = root.fprintBackoff;
                 fprintRearm.restart();   // missed/timed out — listen again
             }
         }
@@ -119,7 +133,7 @@ ShellRoot {
     Timer {
         id: fprintRearm
         interval: 500
-        onTriggered: if (root.fingerReady && lock.locked && !root.unlocking) fprint.start();
+        onTriggered: if (root.fingerReady && lock.locked && !root.unlocking) root.startFprint();
     }
 
     function barCall(fn) {
@@ -152,7 +166,7 @@ ShellRoot {
         }
         lockTimer.start();
     }
-    Timer { id: lockTimer; interval: 400; onTriggered: { root.lockedAt = Date.now(); lock.locked = true; vanishTimer.start(); if (root.fingerReady) fprint.start(); } }
+    Timer { id: lockTimer; interval: 400; onTriggered: { root.lockedAt = Date.now(); lock.locked = true; vanishTimer.start(); if (root.fingerReady) root.startFprint(); } }
     Timer { id: vanishTimer; interval: 350; onTriggered: barCall("vanish") }
     Timer {
         id: readyTimer
@@ -478,7 +492,9 @@ ShellRoot {
                         NumberAnimation { target: stretch; property: "xScale"; to: 0.84; duration: 320; easing.type: Easing.InQuad }
                     }
                 }
-                ScriptAction { script: { lock.locked = false; root.barCall("restore"); } }
+                // The marker tells vendi-ctl's lock supervisor this exit is a
+                // real unlock, not a crash it should relaunch the lock after.
+                ScriptAction { script: { Quickshell.execDetached(["touch", root.unlockedFile]); lock.locked = false; root.barCall("restore"); } }
             }
 
             Connections {

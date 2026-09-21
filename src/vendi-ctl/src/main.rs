@@ -32,6 +32,7 @@ fn main() -> Result<()> {
         "list-windows"     => ipc_call(json!({"cmd": "list-windows"})),
         "list-workspaces"  => ipc_call(json!({"cmd": "list-workspaces"})),
         "lock"             => lock_cmd(),
+        "__lock-supervise" => lock_supervise(),
         "screensaver"      => ipc_call(json!({"cmd": "screensaver"})),
         "reload"           => ipc_call(json!({"cmd": "reload-config"})),
         "workspace"        => workspace_cmd(&args[1..]),
@@ -486,6 +487,11 @@ fn palette_cmd(args: &[String]) -> Result<()> {
 
 /// Prefer the quickshell lock screen (vendilock, ext-session-lock); fall
 /// back to the compositor-native vendi-lock when quickshell is missing.
+///
+/// One vendilock at a time: a second one stacked a second blob (and replayed
+/// the intro) on top of the first. The actual process is owned by a detached
+/// supervisor (`__lock-supervise`, below) so this returns at once — the
+/// before-sleep hook in vendi-session calls it synchronously.
 fn lock_cmd() -> Result<()> {
     let has_vendilock = std::process::Command::new("sh")
         .arg("-c")
@@ -493,14 +499,74 @@ fn lock_cmd() -> Result<()> {
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if has_vendilock {
-        std::process::Command::new("quickshell")
-            .args(["-c", "vendilock"])
-            .spawn()
-            .context("spawn vendilock")?;
-        Ok(())
-    } else {
-        ipc_call(json!({"cmd": "lock"}))
+    if !has_vendilock {
+        return ipc_call(json!({"cmd": "lock"}));
+    }
+    if vendilock_running() {
+        return Ok(());
+    }
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new(std::env::current_exe().context("current exe")?)
+        .arg("__lock-supervise")
+        .stdin(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .context("spawn lock supervisor")?;
+    Ok(())
+}
+
+/// Is a `quickshell -c vendilock` already alive? (/proc scan, own uid only.)
+fn vendilock_running() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let me = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(u32::MAX);
+    let Ok(rd) = std::fs::read_dir("/proc") else { return false };
+    rd.flatten().any(|e| {
+        let pid_dir = e.path();
+        if pid_dir.metadata().map(|m| m.uid()).unwrap_or(u32::MAX - 1) != me {
+            return false;
+        }
+        let Ok(cmd) = std::fs::read(pid_dir.join("cmdline")) else { return false };
+        let argv: Vec<&[u8]> = cmd.split(|&b| b == 0).collect();
+        argv.first().map(|a| a.ends_with(b"quickshell")).unwrap_or(false)
+            && argv.windows(2).any(|w| w[0] == b"-c" && w[1] == b"vendilock")
+    })
+}
+
+/// Runs vendilock and brings it back if it dies while still locked. vendiwm
+/// keeps the session locked when the locker vanishes (ext-session-lock), so a
+/// crashed vendilock used to leave a black screen with no way in but a TTY.
+/// vendilock touches $XDG_RUNTIME_DIR/vendilock.unlocked just before it drops
+/// the lock; no marker + non-zero exit = crashed mid-lock → relaunch it
+/// already settled (VENDILOCK_INSTANT, no intro). Gives up after 5 fast
+/// crashes so a broken config can't spin forever.
+fn lock_supervise() -> Result<()> {
+    let rt = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let unlocked = rt.join("vendilock.unlocked");
+    let _ = std::fs::remove_file(&unlocked);
+    let mut crashes = 0;
+    let mut instant = false;
+    loop {
+        let mut cmd = std::process::Command::new("quickshell");
+        cmd.args(["-n", "-c", "vendilock"]);
+        if instant { cmd.env("VENDILOCK_INSTANT", "1"); }
+        let started = std::time::Instant::now();
+        let status = cmd.status().context("run vendilock")?;
+        if status.success() || unlocked.exists() {
+            let _ = std::fs::remove_file(&unlocked);
+            return Ok(());
+        }
+        if vendilock_running() {
+            return Ok(()); // -n bowed out to another instance
+        }
+        if started.elapsed() > std::time::Duration::from_secs(30) { crashes = 0; }
+        crashes += 1;
+        eprintln!("vendi-ctl: vendilock exited ({status}) while locked — relaunching ({crashes}/5)");
+        if crashes >= 5 {
+            bail!("vendilock keeps crashing; giving up");
+        }
+        instant = true;
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
