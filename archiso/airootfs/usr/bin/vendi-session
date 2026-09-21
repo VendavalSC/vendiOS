@@ -127,13 +127,42 @@ spawn_desktop() {
     fi
     # Security: lock before the machine sleeps (lid close / suspend / hibernate)
     # so it always resumes to the lock screen — never a live desktop. Watches
-    # logind's PrepareForSleep(true) signal on the system bus.
-    if command -v dbus-monitor >/dev/null; then
+    # logind's PrepareForSleep signal on the system bus.
+    #
+    # A logind *delay* inhibitor holds the sleep until vendilock reports the
+    # lock is really up ($XDG_RUNTIME_DIR/vendilock.ready). Without one the
+    # machine froze before vendilock's lock timer ever fired: every lid-open
+    # flashed the live desktop, then played the whole intro as a brand-new
+    # lock. VENDILOCK_INSTANT makes it lock at once and appear already
+    # settled. If you're already locked (super+escape, then lid), nothing is
+    # spawned — a second vendilock used to replay the intro on top on resume.
+    # The inhibitor is released by killing its `sleep` child (systemd-inhibit
+    # then exits) and re-taken on PrepareForSleep(false), i.e. after resume.
+    if command -v dbus-monitor >/dev/null && command -v systemd-inhibit >/dev/null; then
         (
+            _ready="${XDG_RUNTIME_DIR:-/tmp}/vendilock.ready"
+            _inh=""
+            _arm() {
+                systemd-inhibit --what=sleep --mode=delay --who=vendilock \
+                    --why="Lock the screen before sleeping" sleep infinity &
+                _inh=$!
+            }
+            _release() { [ -n "$_inh" ] && pkill -P "$_inh" sleep 2>/dev/null; _inh=""; }
+            _arm
             dbus-monitor --system \
                 "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" 2>/dev/null \
             | while read -r l; do
-                case "$l" in *"boolean true"*) vendi-ctl lock >>"$LOG" 2>&1 || true ;; esac
+                case "$l" in
+                    *"boolean true"*)
+                        if ! pgrep -u "$UID" -f 'quickshell -c vendilock' >/dev/null; then
+                            rm -f "$_ready"
+                            VENDILOCK_INSTANT=1 vendi-ctl lock >>"$LOG" 2>&1 || true
+                            for _ in $(seq 40); do [ -e "$_ready" ] && break; sleep 0.05; done
+                        fi
+                        _release ;;
+                    *"boolean false"*)
+                        _release; _arm ;;
+                esac
             done
         ) &
     fi
