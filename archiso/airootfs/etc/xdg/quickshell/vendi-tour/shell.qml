@@ -1,4 +1,3 @@
-//@ pragma Env QSG_USE_SIMPLE_ANIMATION_DRIVER=1
 // vendi-tour — first-login quickstart + hands-on tour.
 //
 // One floating card over the desktop. Explaining steps show the keys; doing
@@ -12,7 +11,9 @@
 // Runs on first login (vendi-session, marker ~/.config/vendi/welcomed) and
 // any time via `vendi welcome`.   Run: quickshell -n -c vendi-tour
 //
-// The pragma: wall-clock animation timing, same reason as vendilock.
+// Motion is vsync-driven (Qt's default driver) — it relies on vendiwm pacing
+// frame callbacks to the refresh (e326fe2). Without that, callbacks flooded
+// in at ~300/s and Qt's per-frame animation stepping ran everything fast.
 
 import Quickshell
 import Quickshell.Io
@@ -265,8 +266,7 @@ ShellRoot {
         Rectangle {
             anchors.fill: parent
             color: "#000000"
-            opacity: root.collapsed ? 0 : 0.32
-            Behavior on opacity { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
+            opacity: 0.32 * Math.max(0, 1 - win.m)
         }
 
         // ── the shape: card ⇄ pill, one surface morphing ───────────────────
@@ -275,30 +275,49 @@ ShellRoot {
         readonly property real pillW: Math.min(width - 48, pillRow.implicitWidth + 44)
         readonly property real pillH: 62
 
+        // The card⇄pill morph is ONE value on ONE spring: 0 = card, 1 = pill.
+        // Position, size, corners, the dim and both contents' fades are all
+        // derived from it, so it reads as a single fluid motion — separate
+        // Behaviors per property each settled on their own clock and the
+        // morph came apart into steps (drop, then reshape, then fade).
+        property real m: root.collapsed ? 1 : 0
+        Behavior on m { SpringAnimation { spring: 4.2; damping: 0.52; mass: 1.0; epsilon: 0.0005 } }
+        function lerp(a, b) { return a + (b - a) * m; }
+        // 0→1 as m runs lo→hi (clamped), eased — for the content crossfades.
+        function ramp(lo, hi) {
+            const t = Math.max(0, Math.min(1, (m - lo) / (hi - lo)));
+            return t * t * (3 - 2 * t);
+        }
+        // The pill's width changes with its text (e.g. "Nice."); glide it.
+        property real pillWs: pillW
+        Behavior on pillWs { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
+
+        // The shadow is its own SDF item riding the shape's geometry. It used
+        // to be a layer.effect (MultiEffect) on the shape itself — which made
+        // Qt reallocate an offscreen texture and re-blur it on every frame of
+        // the morph, since the size changes each frame: the morph stuttered.
+        RectangularShadow {
+            x: shape.x; y: shape.y; width: shape.width; height: shape.height
+            radius: shape.radius
+            scale: shape.scale
+            opacity: shape.opacity * 0.9
+            offset: Qt.vector2d(0, 10)
+            blur: 36
+            color: Qt.rgba(0, 0, 0, 0.55)
+        }
+
         Rectangle {
             id: shape
             x: (win.width - width) / 2
-            y: root.collapsed ? win.height - height - 36 : (win.height - height) / 2
-            width: root.collapsed ? win.pillW : win.cardW
-            height: root.collapsed ? win.pillH : win.cardH
-            radius: root.collapsed ? height / 2 : 28
+            width: win.lerp(win.cardW, win.pillWs)
+            height: Math.max(24, win.lerp(win.cardH, win.pillH))
+            y: win.lerp((win.height - win.cardH) / 2, win.height - win.pillH - 36)
+            // 28px corners on the card become a full capsule on the pill.
+            radius: Math.min(height / 2, win.lerp(28, win.pillH / 2))
             color: root.panel
             border.width: 1
             border.color: root.celebrating ? Qt.rgba(root.good.r, root.good.g, root.good.b, 0.6) : root.faint
-            Behavior on y      { SpringAnimation { spring: 6.5; damping: 0.62; mass: 0.8; epsilon: 0.3 } }
-            Behavior on width  { SpringAnimation { spring: 7;   damping: 0.62; mass: 0.8; epsilon: 0.3 } }
-            Behavior on height { SpringAnimation { spring: 7;   damping: 0.64; mass: 0.8; epsilon: 0.3 } }
-            Behavior on radius { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
             Behavior on border.color { ColorAnimation { duration: 200 } }
-
-            layer.enabled: true
-            layer.effect: MultiEffect {
-                shadowEnabled: true
-                shadowColor: "#000000"
-                shadowOpacity: 0.55
-                shadowBlur: 1.0
-                shadowVerticalOffset: 10
-            }
 
             // Pop-in on launch.
             scale: 0.92
@@ -326,9 +345,12 @@ ShellRoot {
             Item {
                 id: card
                 anchors.fill: parent
-                opacity: root.collapsed ? 0 : 1
+                // Rides the morph: fades over its first third, sinking and
+                // shrinking a little toward the pill instead of popping out.
+                opacity: 1 - win.ramp(0.0, 0.35)
                 visible: opacity > 0.01
-                Behavior on opacity { NumberAnimation { duration: root.collapsed ? 120 : 260 } }
+                scale: 1 - 0.06 * win.ramp(0.0, 0.5)
+                transformOrigin: Item.Bottom
 
                 // Page content — re-keyed per step so each page fades/slides in.
                 Item {
@@ -597,9 +619,8 @@ ShellRoot {
             // ═══ pill ═══════════════════════════════════════════════════════
             Item {
                 anchors.fill: parent
-                opacity: root.collapsed ? 1 : 0
+                opacity: win.ramp(0.6, 0.95)
                 visible: opacity > 0.01
-                Behavior on opacity { NumberAnimation { duration: root.collapsed ? 300 : 100 } }
 
                 Row {
                     id: pillRow
