@@ -1224,6 +1224,7 @@ cmd_help() {
     _cmd "fingerprint" "enroll a fingerprint to unlock (swipe at the lock)"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"
+    _cmd "report"   "bundle logs + system info into a tarball for bug reports"
     _cmd "help"     "show this message"
 
     printf "\n  ${OVERLAY}run with sudo for snapshot, rollback, update${R}\n\n"
@@ -2198,6 +2199,85 @@ PY
 }
 
 # ── dispatch ──────────────────────────────────────────────────────────────────
+# ── bug report bundle (`vendi report`) ────────────────────────────────────────
+# Everything a bug report needs in one tarball: versions, hardware, both session
+# logs, recent quickshell logs, warnings from this boot, crash dumps. Logs are
+# tailed so it stays small enough to attach. Nothing leaves the machine — the
+# user reviews and shares it themselves (logs can contain wifi names/paths).
+cmd_report() (
+    # Best-effort collector: a missing battery, log or env var must never
+    # abort the report, so opt out of the script-wide `set -euo pipefail`.
+    set +euo pipefail
+    _header "bug report"
+    local ts dir out rt
+    ts=$(date +%Y%m%d-%H%M%S)
+    dir=$(mktemp -d)/vendi-report-$ts
+    out="$HOME/vendi-report-$ts.tar.gz"
+    rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    mkdir -p "$dir"
+
+    _step "system + versions…"
+    {
+        echo "# vendi report $ts"
+        echo; echo "## os";      cat /etc/os-release 2>/dev/null
+        echo; echo "## kernel";  uname -a
+        echo; echo "## vendiOS packages"
+        pacman -Q 2>/dev/null | grep -E '^(vendi|quickshell|smithay|mesa|nvidia|linux )' || true
+        echo; echo "## binaries (mtime + sha256)"
+        local b
+        for b in /usr/bin/vendiwm /usr/bin/vendi-ctl /usr/bin/vendi-session /usr/bin/vendi; do
+            [ -e "$b" ] && printf '%s  %s  %s\n' "$(stat -c %y "$b" | cut -d. -f1)" \
+                "$(sha256sum "$b" | cut -c1-16)" "$b"
+        done
+        echo; echo "## session";  echo "XDG_SESSION_TYPE=$XDG_SESSION_TYPE WAYLAND_DISPLAY=$WAYLAND_DISPLAY VENDI_SESSION=${VENDI_SESSION:-vendiwm}"
+        echo; echo "## uptime";   uptime
+    } > "$dir/system.txt" 2>&1
+
+    _step "hardware…"
+    {
+        echo "## cpu";    grep -m1 'model name' /proc/cpuinfo
+        echo; echo "## memory"; free -h
+        echo; echo "## gpu";    lspci -k 2>/dev/null | grep -A3 -Ei 'vga|3d|display'
+        echo; echo "## outputs"; vendi-ctl output list 2>&1
+        echo; echo "## drm connectors"
+        local c; for c in /sys/class/drm/card*-*/status; do printf '%s: %s\n' "${c%/status}" "$(cat "$c")"; done
+        echo; echo "## battery"; cat /sys/class/power_supply/BAT*/status /sys/class/power_supply/BAT*/capacity 2>/dev/null
+        echo; echo "## disks"; lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null
+    } > "$dir/hardware.txt" 2>&1
+
+    _step "logs…"
+    local l
+    for l in "$HOME/logs/vendi-session.log" "$HOME/logs/vendi-session.log.1"; do
+        # strip ANSI colour codes; the last 5000 lines is plenty
+        [ -f "$l" ] && tail -n 5000 "$l" | sed 's/\x1b\[[0-9;]*m//g' > "$dir/$(basename "$l").txt"
+    done
+    mkdir -p "$dir/quickshell"
+    if [ -d "$rt/quickshell/by-id" ]; then
+        local d n=0
+        for d in $(ls -1t "$rt/quickshell/by-id" 2>/dev/null); do
+            [ -f "$rt/quickshell/by-id/$d/log.qslog" ] || continue
+            quickshell log "$rt/quickshell/by-id/$d/log.qslog" 2>/dev/null \
+                | sed 's/\x1b\[[0-9;]*m//g' | tail -n 500 > "$dir/quickshell/$d.txt"
+            n=$((n + 1)); [ "$n" -ge 8 ] && break
+        done
+    fi
+    journalctl -b -p warning --no-pager 2>/dev/null | tail -n 1500 > "$dir/journal-warnings.txt"
+    journalctl -b -k -p warning --no-pager 2>/dev/null | tail -n 500 > "$dir/kernel-warnings.txt"
+    coredumpctl list --no-pager 2>/dev/null | tail -n 30 > "$dir/coredumps.txt"
+    ps -eo pid,ppid,stat,etime,rss,cmd --sort=-rss 2>/dev/null | head -40 > "$dir/processes.txt"
+
+    _step "config…"
+    mkdir -p "$dir/config"
+    local f
+    for f in "$HOME/.config/vendiwm/"*.kdl "$HOME/.config/vendi/"*; do
+        [ -f "$f" ] && cp "$f" "$dir/config/" 2>/dev/null
+    done
+
+    tar -C "$(dirname "$dir")" -czf "$out" "$(basename "$dir")" && rm -rf "$(dirname "$dir")"
+    _ok "saved $out ($(du -h "$out" | cut -f1))"
+    _info "review it before sharing — logs can include wifi names, paths and window titles"
+)
+
 case "${1:-help}" in
     update)   cmd_update   ;;
     clean)    cmd_clean    ;;
@@ -2228,6 +2308,7 @@ case "${1:-help}" in
     fingerprint|finger|fp) shift; cmd_fingerprint "$@" ;;
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;
+    report|bugreport) cmd_report ;;
     help|--help|-h) cmd_help ;;
     *)
         _err "unknown command: ${1}"
