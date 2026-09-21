@@ -257,7 +257,10 @@ ShellRoot {
         // it back so the desktop is fully yours. Compositor binds work either
         // way — vendiwm resolves them before focus routing.
         WlrLayershell.keyboardFocus: root.collapsed ? WlrKeyboardFocus.None : WlrKeyboardFocus.OnDemand
-        exclusiveZone: 0
+        // Span the whole screen, bar included: respecting the bar's reserved
+        // zone left the dim stopping in a hard line under it. Overlay sits
+        // above the bar's Top layer, so the bar dims along with the rest.
+        exclusionMode: ExclusionMode.Ignore
 
         // Only the card/pill takes input; everything around it clicks through.
         mask: Region { x: shape.x; y: shape.y; width: shape.width; height: shape.height }
