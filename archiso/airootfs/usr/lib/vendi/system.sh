@@ -32,6 +32,7 @@ BASE_PKGS=(
     # native-Wayland gbm scanout path) under the Xserver. vendiwm starts it.
     xorg-xwayland
     brightnessctl playerctl grim slurp wl-clipboard swaylock
+    libnotify   # notify-send: vendi/vendiwm toasts are silent without it
     polkit-kde-agent qt5-wayland qt6-wayland
     gtk3 gtk4 gtk4-layer-shell
     # default browser

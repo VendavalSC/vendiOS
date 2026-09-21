@@ -100,6 +100,7 @@ brightnessctl
 fprintd
 playerctl
 grim
+libnotify
 slurp
 wf-recorder
 swaylock
