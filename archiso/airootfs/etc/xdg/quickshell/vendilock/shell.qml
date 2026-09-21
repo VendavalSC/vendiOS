@@ -1,3 +1,4 @@
+//@ pragma Env QSG_USE_SIMPLE_ANIMATION_DRIVER=1
 // vendilock — the vendiOS lock screen (quickshell + ext-session-lock).
 //
 // The desktop never disappears: the compositor freezes it and blurs it in
@@ -11,6 +12,18 @@
 //
 // Typing pulses the blob; wrong passwords shake it. `vendi-ctl lock`,
 // bound to super+escape.
+//
+// The pragma above: Qt's threaded render loop advances animations by a fixed
+// vsync step per rendered frame, not by elapsed time. While vendiwm's lock
+// blur-in forces redraws, its tick path hands us frame callbacks far faster
+// than the panel refreshes — so the intro, which plays right then, ran 5–8x
+// fast (measured: an 800ms fall landing in ~110ms). The simple driver is
+// wall-clock based, so frame pacing can't change animation speed.
+//
+// VENDILOCK_INSTANT=1 (set by vendi-session's before-sleep hook): lock at
+// once and appear already settled — no bar dance, no intro — then drop
+// $XDG_RUNTIME_DIR/vendilock.ready so the hook can release its sleep
+// inhibitor. The machine sleeps locked and wakes to the resting blob.
 
 import Quickshell
 import Quickshell.Io
@@ -33,6 +46,17 @@ ShellRoot {
     property bool authenticating: false
     property bool failed: false
     property bool unlocking: false
+
+    // When the lock surfaces were born. Outputs come and go while locked —
+    // closing the lid removes the panel's output and destroys its surface,
+    // and the one rebuilt on lid-open must NOT replay the entrance. Only
+    // surfaces created in the first beat of the lock get the choreography;
+    // later arrivals (lid-open, monitor hotplug) just appear, already
+    // settled.
+    property double lockedAt: 0
+    readonly property int introWindow: 1200
+    readonly property bool instant: Quickshell.env("VENDILOCK_INSTANT") === "1"
+    readonly property string readyFile: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/vendilock.ready"
 
     SystemClock { id: sysClock; precision: SystemClock.Seconds }
 
@@ -118,16 +142,40 @@ ShellRoot {
     // Lock FIRST (the blob maps docked over the live notch — the snapshot
     // the compositor freezes excludes the bar layer, so no ghost and no
     // gap); the bar's chrome vanish happens invisibly behind the lock.
-    Component.onCompleted: { barCall("hide"); widthProbe.running = true; lockTimer.start(); }
-    Timer { id: lockTimer; interval: 400; onTriggered: { lock.locked = true; vanishTimer.start(); if (root.fingerReady) fprint.start(); } }
+    Component.onCompleted: {
+        barCall("hide");
+        widthProbe.running = true;
+        if (root.instant) {
+            // Racing a suspend: lock now; the bar's chrome vanishes behind it.
+            lockTimer.interval = 0;
+            vanishTimer.interval = 0;
+        }
+        lockTimer.start();
+    }
+    Timer { id: lockTimer; interval: 400; onTriggered: { root.lockedAt = Date.now(); lock.locked = true; vanishTimer.start(); if (root.fingerReady) fprint.start(); } }
     Timer { id: vanishTimer; interval: 350; onTriggered: barCall("vanish") }
+    Timer {
+        id: readyTimer
+        interval: 250
+        onTriggered: Quickshell.execDetached(["touch", root.readyFile])
+    }
     // Give the unlock request a beat to flush before exiting.
     Timer { id: quitTimer; interval: 150; onTriggered: Qt.quit() }
+    // Belt and braces. The fly-up's ScriptAction drops the lock and quitTimer
+    // takes us out 150ms later; if that path is ever missed (a surface torn
+    // down mid-flyup, say) the process would linger forever — and vendi-ctl
+    // spawns vendilock unconditionally, so every later lock stacks another
+    // instance on top of the leak.
+    Timer { id: quitGuard; interval: 2500; onTriggered: Qt.quit() }
+    onUnlockingChanged: if (unlocking) quitGuard.start()
 
     WlSessionLock {
         id: lock
         locked: false
         onLockedChanged: if (!locked) { quitTimer.start(); }
+        // Compositor confirmed the lock; give Qt a beat to put the settled
+        // blob on screen, then tell the sleep hook it may let the machine go.
+        onSecureChanged: if (secure && root.instant) readyTimer.start()
 
         WlSessionLockSurface {
             id: surf
@@ -136,6 +184,69 @@ ShellRoot {
             readonly property real notchX: (width - root.notchW) / 2
             readonly property real circleX: (width - root.circleD) / 2
             readonly property real circleY: (height - root.circleD) / 2
+
+            // Entrance, decided once per surface.
+            property bool introStarted: false
+            // Was this surface born with the lock, or later (lid-open,
+            // monitor hotplug)? Latched at birth. Sleep locks (instant) are
+            // never fresh: they wake straight into the resting blob.
+            property bool fresh: false
+
+            // The surface's first size can be a placeholder that lands before
+            // vendiwm's real configure. The intro copes (it reads the centre
+            // late), but a settled blob placed on it sat at the top-left until
+            // the real size arrived, then jumped. So the settled path waits
+            // for the surface to match its screen, blob hidden until then.
+            readonly property bool fullSize: !screen
+                || (width === screen.width && height === screen.height)
+
+            function tryIntro() {
+                if (introStarted || width <= 0 || height <= 0) return;
+                if (root.unlocking) { introStarted = true; blob.visible = false; return; }
+                if (fresh) { introStarted = true; detachAnim.start(); return; }
+                if (!fullSize && !sizeGiveUp.fired) {
+                    blob.visible = false;
+                    sizeGiveUp.start();
+                    return;
+                }
+                introStarted = true;
+                settle();
+                blob.visible = true;
+            }
+
+            // If the sizes never match exactly (fractional-scale rounding),
+            // don't strand the blob hidden — settle on whatever we have.
+            Timer {
+                id: sizeGiveUp
+                interval: 700
+                property bool fired: false
+                onTriggered: { fired = true; surf.tryIntro(); }
+            }
+
+            // Straight to the living blob: no drip, no swell, no fly-in.
+            // Settled blobs also follow any later resize (see recenter).
+            property bool settled: false
+            function settle() {
+                settled = true;
+                blob.x = circleX;
+                blob.y = circleY;
+                blob.width = root.circleD;
+                blob.height = root.circleD;
+                blob.shapeRadius = root.circleD / 2;
+                blob.blobness = 1;
+                blob.scale = 1;
+                stretch.xScale = 1;
+                stretch.yScale = 1;
+            }
+
+            function recenter() {
+                if (!settled || root.unlocking) return;
+                blob.x = circleX;
+                blob.y = circleY;
+            }
+            onWidthChanged: { tryIntro(); recenter(); }
+            onHeightChanged: { tryIntro(); recenter(); }
+            onScreenChanged: tryIntro()
 
             // ── keys: invisible input ──────────────────────────────────────
             Item {
@@ -375,7 +486,10 @@ ShellRoot {
                 function onUnlockingChanged() { if (root.unlocking) { fprint.abort(); flyupAnim.start(); } }
             }
 
-            Component.onCompleted: detachAnim.start()
+            Component.onCompleted: {
+                fresh = !root.instant && (Date.now() - root.lockedAt <= root.introWindow);
+                tryIntro();
+            }
         }
     }
 }
