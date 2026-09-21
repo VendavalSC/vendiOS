@@ -2,7 +2,7 @@
 
 iso_name="vendios"
 iso_label="VENDIOS_$(date +%Y%m)"
-iso_publisher="vendiOS <https://github.com/vendi/vendiOS>"
+iso_publisher="vendiOS <https://github.com/VendavalSC/vendiOS>"
 iso_application="vendiOS"
 iso_version="$(date +%Y.%m.%d)"
 install_dir="arch"

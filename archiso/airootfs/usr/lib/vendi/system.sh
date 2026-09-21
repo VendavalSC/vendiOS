@@ -548,9 +548,9 @@ ID_LIKE=arch
 BUILD_ID=rolling
 VERSION_CODENAME="zero"
 ANSI_COLOR="38;2;203;166;247"
-HOME_URL="https://github.com/vendi/vendiOS"
-SUPPORT_URL="https://github.com/vendi/vendiOS/issues"
-BUG_REPORT_URL="https://github.com/vendi/vendiOS/issues"
+HOME_URL="https://github.com/VendavalSC/vendiOS"
+SUPPORT_URL="https://github.com/VendavalSC/vendiOS/issues"
+BUG_REPORT_URL="https://github.com/VendavalSC/vendiOS/issues"
 LOGO=vendios
 EOF
 }
