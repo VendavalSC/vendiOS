@@ -154,6 +154,11 @@ spawn_desktop() {
     # The inhibitor is released by killing its `sleep` child (systemd-inhibit
     # then exits) and re-taken on PrepareForSleep(false), i.e. after resume.
     if command -v dbus-monitor >/dev/null && command -v systemd-inhibit >/dev/null; then
+        # A previous session's watcher outlives logout (logind's
+        # KillUserProcesses=no) — clear it and its inhibitor, or every relogin
+        # stacks another one.
+        pkill -u "$UID" -f "member='PrepareForSleep'" 2>/dev/null || true
+        pkill -u "$UID" -f "systemd-inhibit --what=sleep --mode=delay --who=vendilock" 2>/dev/null || true
         (
             _ready="${XDG_RUNTIME_DIR:-/tmp}/vendilock.ready"
             _inh=""
