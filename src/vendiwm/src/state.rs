@@ -1521,7 +1521,7 @@ impl State {
                 "quickshell -c vendibar-pro ipc call dash toggle"
             };
             tracing::debug!(frac, %cmd, "touch edge-pull");
-            let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+            let _ = crate::spawn_reaped(std::process::Command::new("sh").arg("-c").arg(cmd));
             return;
         }
         match phase {
@@ -1693,7 +1693,7 @@ impl State {
             Spawn(cmd) => {
                 tracing::info!(%cmd, "spawn");
                 // Detach so vendiwm doesn't accumulate zombies.
-                if let Err(e) = std::process::Command::new("sh").arg("-c").arg(&cmd).spawn() {
+                if let Err(e) = crate::spawn_reaped(std::process::Command::new("sh").arg("-c").arg(&cmd)) {
                     tracing::warn!(?e, %cmd, "spawn failed");
                 }
             }
@@ -1731,8 +1731,8 @@ impl State {
                             .map(|creds| creds.pid as u32),
                     };
                     if let Some(pid) = pid {
-                        let _ = std::process::Command::new("kill")
-                            .arg("-9").arg(pid.to_string()).spawn();
+                        let _ = crate::spawn_reaped(std::process::Command::new("kill")
+                            .arg("-9").arg(pid.to_string()));
                     }
                     // Drop the tile immediately so the desktop unwedges even if
                     // the client's destroy callback is slow or never arrives.
@@ -1788,8 +1788,8 @@ impl State {
                 self.relayout();
                 self.update_keyboard_focus();
                 // brief toast so you know which layout you're in
-                let _ = std::process::Command::new("notify-send")
-                    .args(["-a", "Layout", "-t", "1200", "Layout", m.label()]).spawn();
+                let _ = crate::spawn_reaped(std::process::Command::new("notify-send")
+                    .args(["-a", "Layout", "-t", "1200", "Layout", m.label()]));
             }
             ToggleFloating      => self.toggle_floating(),
             ToggleFullscreen    => self.toggle_fullscreen(),

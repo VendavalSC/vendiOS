@@ -590,6 +590,7 @@ pub fn run() -> Result<()> {
                         if let Err(e) = surf.compositor.frame_submitted() {
                             tracing::warn!(?e, "frame_submitted");
                         }
+                        surf.flip_pending = None;
                     }
                 }
                 if let Err(e) = render_surface(app, primary_gpu_node, crtc) {
@@ -669,10 +670,10 @@ pub fn run() -> Result<()> {
                                     // DISPLAY into the dbus/systemd activation env so
                                     // bar- and dbus-launched apps pick it up too.
                                     unsafe { std::env::set_var("DISPLAY", &disp); }
-                                    let _ = std::process::Command::new("dbus-update-activation-environment")
-                                        .args(["--systemd", &format!("DISPLAY={disp}")]).spawn();
-                                    let _ = std::process::Command::new("systemctl")
-                                        .args(["--user", "import-environment", "DISPLAY"]).spawn();
+                                    let _ = crate::spawn_reaped(std::process::Command::new("dbus-update-activation-environment")
+                                        .args(["--systemd", &format!("DISPLAY={disp}")]));
+                                    let _ = crate::spawn_reaped(std::process::Command::new("systemctl")
+                                        .args(["--user", "import-environment", "DISPLAY"]));
                                     tracing::info!(display = %disp, "XWayland ready");
                                 }
                                 Err(e) => tracing::error!(?e, "X11Wm::start_wm failed"),
@@ -723,8 +724,8 @@ pub fn run() -> Result<()> {
             {
                 app.auto_lock_fired = true;
                 tracing::info!(idle_secs = lock_secs, "idle auto-lock");
-                if let Err(e) = std::process::Command::new("sh")
-                    .arg("-c").arg("vendi-ctl lock").spawn()
+                if let Err(e) = crate::spawn_reaped(std::process::Command::new("sh")
+                    .arg("-c").arg("vendi-ctl lock"))
                 {
                     tracing::warn!(?e, "auto-lock spawn failed");
                 }
@@ -812,11 +813,31 @@ pub fn run() -> Result<()> {
         // Damage-driven render. VBlank already re-renders on its own, but the
         // first frame is empty (no clients yet) so no page-flip → no VBlank →
         // render loop stalls. This restarts it whenever a client commits.
+        //
+        // Only outputs with NO flip in flight, though. This tick runs on every
+        // loop wakeup — each client commit is one — and every render sends
+        // frame callbacks. Rendering here while a flip was still queued let a
+        // client that redraws on its callback go commit → render → callback →
+        // commit as fast as we could render, far above the refresh rate:
+        // Qt's threaded loop steps animations per frame, so they ran 5-8x
+        // fast (vendilock's intro, measured). A busy output is left to its
+        // VBlank, which renders once per refresh. A flip that's been pending
+        // too long (vblank lost to DPMS/suspend) no longer counts, so this
+        // can never wedge an output.
         if app.pending_redraw {
             app.pending_redraw = false;
             let primary_gpu = app.udev.as_ref().unwrap().primary_gpu;
+            let now = std::time::Instant::now();
             let crtcs: Vec<_> = app.udev.as_ref().unwrap().drm_devices.get(&primary_gpu)
-                .map(|d| d.surfaces.keys().copied().collect())
+                .map(|d| d.surfaces.iter()
+                    .filter(|(_, s)| {
+                        let busy = s.flip_pending
+                            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(100));
+                        if busy { app.pending_redraw = true; }
+                        !busy
+                    })
+                    .map(|(c, _)| *c)
+                    .collect())
                 .unwrap_or_default();
             for crtc in crtcs {
                 if let Err(e) = render_surface(app, primary_gpu, crtc) {
@@ -1065,6 +1086,10 @@ pub struct SurfaceState {
     pub lock_backdrop: Option<(GlesTexture, GlesTexture, Option<std::time::Instant>)>,
     /// After unlock: the blurred backdrop melting away over the live desktop.
     pub lock_fade: Option<(GlesTexture, std::time::Instant)>,
+    /// When the last page flip was queued, cleared on its VBlank. While a flip
+    /// is in flight only the VBlank handler may render this output — see the
+    /// tick path in run_udev for why.
+    pub flip_pending: Option<std::time::Instant>,
     /// Session-start fade-in clock: set on this output's first rendered frame,
     /// then the desktop eases up from black over ~500ms so it doesn't snap in.
     pub start_fade: Option<std::time::Instant>,
@@ -1451,6 +1476,7 @@ fn connect_connector(
         wallpaper_src: config.theme.wallpaper.clone(),
         lock_backdrop: None,
         lock_fade: None,
+        flip_pending: None,
         start_fade: None,
         connector: connector.handle(),
         mode: drm_mode,
@@ -2599,6 +2625,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         if !res.is_empty {
             surface.compositor.queue_frame(())
                 .map_err(|e| anyhow::anyhow!("queue_frame: {e:?}"))?;
+            surface.flip_pending = Some(std::time::Instant::now());
         }
         if let Some(locker) = state.lock_pending.take() {
             locker.lock();
@@ -2916,6 +2943,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
     if !res.is_empty {
         surface.compositor.queue_frame(())
             .map_err(|e| anyhow::anyhow!("queue_frame: {e:?}"))?;
+        surface.flip_pending = Some(std::time::Instant::now());
     }
 
     // Frame callbacks — clients only redraw if we tell them this frame shipped.
@@ -3282,8 +3310,8 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
                         // Swipe up — Mission Control.
                         state.run_action(crate::input::Action::ToggleOverview);
                     } else {
-                        let _ = std::process::Command::new("sh")
-                            .arg("-c").arg("vendi-menu actions").spawn();
+                        let _ = crate::spawn_reaped(std::process::Command::new("sh")
+                            .arg("-c").arg("vendi-menu actions"));
                     }
                 }
                 _ => {}

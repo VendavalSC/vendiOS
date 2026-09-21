@@ -25,3 +25,17 @@ pub mod state;
 pub mod workspaces;
 #[cfg(feature = "xwayland")]
 pub mod xwayland;
+
+/// Spawn a fire-and-forget child and wait on it from a small parked thread,
+/// so it never lingers as a zombie once it exits (vendiwm used to collect
+/// dead `quickshell ipc`/`notify-send` processes all session). Deliberately
+/// NOT a global waitpid(-1) reaper: that would steal the exit status of
+/// children vendiwm tracks itself (the screensaver's try_wait).
+pub fn spawn_reaped(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    let mut child = cmd.spawn()?;
+    let _ = std::thread::Builder::new()
+        .name("reap".into())
+        .stack_size(64 * 1024)
+        .spawn(move || { let _ = child.wait(); });
+    Ok(())
+}

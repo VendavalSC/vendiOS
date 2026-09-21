@@ -269,7 +269,7 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
         Request::Spawn { args } => {
             let cmd = args.join(" ");
             tracing::info!(%cmd, "ipc spawn");
-            match std::process::Command::new("sh").arg("-c").arg(&cmd).spawn() {
+            match crate::spawn_reaped(std::process::Command::new("sh").arg("-c").arg(&cmd)) {
                 Ok(_)  => Response::Ok { ok: true },
                 Err(e) => Response::Error { error: e.to_string() },
             }
