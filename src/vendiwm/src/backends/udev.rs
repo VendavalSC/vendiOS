@@ -2069,7 +2069,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
     // lock snapshot renders elements[after_bar..] — bar-free desktop, so the
     // lock blob can replace the live center notch with no ghost behind it.
     elements.extend(bar_layer_elems.into_iter().map(OutputRenderElements::Layer));
-    let after_bar = elements.len();
+    let mut after_bar = elements.len();
     // Everything pushed from here down is "the desktop" — the blur pass at
     // the bottom of this function re-renders elements[blur_mark..] into an
     // offscreen target, and the frosted patches are inserted at this index
@@ -2623,33 +2623,6 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         return Ok(());
     }
 
-    // ── unlock: melt the blur away over the live desktop ────────────────────
-    if let Some((_, blurred, _)) = surface.lock_backdrop.take() {
-        surface.lock_fade = Some((blurred, std::time::Instant::now()));
-    }
-    if let Some((blurred, t0)) = &surface.lock_fade {
-        const FADE_MS: f32 = 450.0;
-        let t = (t0.elapsed().as_secs_f32() * 1000.0 / FADE_MS).min(1.0);
-        if t >= 1.0 {
-            surface.lock_fade = None;
-        } else {
-            state.pending_redraw = true;
-            let out_size = state.space.output_geometry(&surface.output)
-                .map(|g| g.size)
-                .unwrap_or_else(|| (1, 1).into());
-            let ctx = smithay::backend::renderer::Renderer::context_id(renderer);
-            let qsrc = smithay::utils::Rectangle::<f64, smithay::utils::Logical>::new(
-                (0.0, 0.0).into(),
-                (((out_size.w / 4).max(1)) as f64, ((out_size.h / 4).max(1)) as f64).into(),
-            );
-            let elem = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
-                smithay::backend::renderer::element::Id::new(), ctx.clone(), (0.0, 0.0),
-                blurred.clone(), 1, Transform::Normal, Some((1.0 - t).powi(2)), Some(qsrc), Some(out_size), None, Kind::Unspecified,
-            );
-            elements.insert(after_cursor, OutputRenderElements::Texture(elem));
-        }
-    }
-
     // ── frosted glass ────────────────────────────────────────────────────────
     // Only runs while something wants it (the menu is open). The desktop
     // part of the element stack (everything under the menu) is re-rendered
@@ -2826,6 +2799,39 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
                     elements.insert(blur_mark + i, OutputRenderElements::Blur(patch));
                 }
             }
+        }
+    }
+
+    // ── unlock: melt the blur away over the live desktop ────────────────────
+    // Spliced in AFTER the frost pass: blur_windows holds absolute indices
+    // ("just below this window"), and an insert above them shifts every one by
+    // a slot — each frost slab then lands in FRONT of its window's content but
+    // behind the border, so for the whole fade every window was an empty ring
+    // over frosted wallpaper. after_bar is bumped for the late inserts below.
+    if let Some((_, blurred, _)) = surface.lock_backdrop.take() {
+        surface.lock_fade = Some((blurred, std::time::Instant::now()));
+    }
+    if let Some((blurred, t0)) = &surface.lock_fade {
+        const FADE_MS: f32 = 450.0;
+        let t = (t0.elapsed().as_secs_f32() * 1000.0 / FADE_MS).min(1.0);
+        if t >= 1.0 {
+            surface.lock_fade = None;
+        } else {
+            state.pending_redraw = true;
+            let out_size = state.space.output_geometry(&surface.output)
+                .map(|g| g.size)
+                .unwrap_or_else(|| (1, 1).into());
+            let ctx = smithay::backend::renderer::Renderer::context_id(renderer);
+            let qsrc = smithay::utils::Rectangle::<f64, smithay::utils::Logical>::new(
+                (0.0, 0.0).into(),
+                (((out_size.w / 4).max(1)) as f64, ((out_size.h / 4).max(1)) as f64).into(),
+            );
+            let elem = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
+                smithay::backend::renderer::element::Id::new(), ctx.clone(), (0.0, 0.0),
+                blurred.clone(), 1, Transform::Normal, Some((1.0 - t).powi(2)), Some(qsrc), Some(out_size), None, Kind::Unspecified,
+            );
+            elements.insert(after_cursor, OutputRenderElements::Texture(elem));
+            after_bar += 1;
         }
     }
 
