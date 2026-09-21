@@ -1,4 +1,3 @@
-//@ pragma Env QSG_USE_SIMPLE_ANIMATION_DRIVER=1
 // vendilock — the vendiOS lock screen (quickshell + ext-session-lock).
 //
 // The desktop never disappears: the compositor freezes it and blurs it in
@@ -13,12 +12,10 @@
 // Typing pulses the blob; wrong passwords shake it. `vendi-ctl lock`,
 // bound to super+escape.
 //
-// The pragma above: Qt's threaded render loop advances animations by a fixed
-// vsync step per rendered frame, not by elapsed time. While vendiwm's lock
-// blur-in forces redraws, its tick path hands us frame callbacks far faster
-// than the panel refreshes — so the intro, which plays right then, ran 5–8x
-// fast (measured: an 800ms fall landing in ~110ms). The simple driver is
-// wall-clock based, so frame pacing can't change animation speed.
+// Motion is vsync-driven: the intro once ran 5-8x fast because vendiwm
+// flooded frame callbacks (~300/s) and Qt steps animations per frame. Fixed
+// at the source in vendiwm (e326fe2, frame callbacks paced to vblank —
+// measured 16.7ms/frame on HW), so no wall-clock driver workaround here.
 //
 // VENDILOCK_INSTANT=1 (set by vendi-session's before-sleep hook): lock at
 // once and appear already settled — no bar dance, no intro — then drop
