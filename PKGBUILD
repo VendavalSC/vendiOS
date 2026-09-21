@@ -102,6 +102,7 @@ package() {
     # build-synced duplicate); install straight from the source to avoid drift.
     cp -a src/vendibar-pro "${pkgdir}/etc/xdg/quickshell/vendibar-pro"
     cp -a archiso/airootfs/etc/xdg/quickshell/vendilock "${pkgdir}/etc/xdg/quickshell/vendilock"
+    cp -a archiso/airootfs/etc/xdg/quickshell/vendi-tour "${pkgdir}/etc/xdg/quickshell/vendi-tour"
     cp -a archiso/airootfs/etc/xdg/waybar     "${pkgdir}/etc/xdg/waybar"
     [ -d archiso/airootfs/etc/xdg/xdg-desktop-portal-wlr ] && \
         cp -a archiso/airootfs/etc/xdg/xdg-desktop-portal-wlr "${pkgdir}/etc/xdg/xdg-desktop-portal-wlr"

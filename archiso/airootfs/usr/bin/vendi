@@ -1224,6 +1224,7 @@ cmd_help() {
     _cmd "fingerprint" "enroll a fingerprint to unlock (swipe at the lock)"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"
+    _cmd "welcome"  "the hands-on quickstart tour (opens on first login)"
     _cmd "report"   "bundle logs + system info into a tarball for bug reports"
     _cmd "help"     "show this message"
 
@@ -2199,6 +2200,14 @@ PY
 }
 
 # ── dispatch ──────────────────────────────────────────────────────────────────
+# ── first-run tour (`vendi welcome`) ──────────────────────────────────────────
+# The hands-on quickstart (quickshell config vendi-tour). vendi-session
+# opens it on first login; this brings it back any time. -n: one at a time.
+cmd_welcome() {
+    command -v quickshell >/dev/null || { _err "quickshell not installed"; return 1; }
+    quickshell -n -d -c vendi-tour >/dev/null 2>&1 || true
+}
+
 # ── bug report bundle (`vendi report`) ────────────────────────────────────────
 # Everything a bug report needs in one tarball: versions, hardware, both session
 # logs, recent quickshell logs, warnings from this boot, crash dumps. Logs are
@@ -2309,6 +2318,7 @@ case "${1:-help}" in
     fetch)    cmd_fetch    ;;
     info)     cmd_info     ;;
     report|bugreport) cmd_report ;;
+    welcome|tour) cmd_welcome ;;
     help|--help|-h) cmd_help ;;
     *)
         _err "unknown command: ${1}"

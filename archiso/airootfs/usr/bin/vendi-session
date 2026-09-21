@@ -122,15 +122,20 @@ spawn_desktop() {
     # the bar's auto-detected Claude island also shows the live "Cooking" state.
     command -v vendi >/dev/null && vendi claude setup-quiet >/dev/null 2>&1 || true
     # Night light: the CRTC gamma LUT resets on every compositor start, so
-    # First login: one toast with the three keys that unlock everything else
-    # (the full cheatsheet is super+k). Waits for the bar — it's the
-    # notification server — then never shows again.
-    if [ ! -e "${HOME}/.config/vendi/welcomed" ] && command -v notify-send >/dev/null; then
+    # First login: the hands-on quickstart tour (quickshell config vendi-tour). It writes
+    # ~/.config/vendi/welcomed when finished or skipped, so an interrupted
+    # tour comes back next login. Waits a beat for the bar and wallpaper.
+    # No quickshell → a one-line toast with the keys that matter instead.
+    if [ ! -e "${HOME}/.config/vendi/welcomed" ]; then
         (
-            sleep 6
-            notify-send -a vendiOS -t 12000 "Welcome to vendiOS" \
-                "super+space  launcher · super+k  all shortcuts · super+escape  lock" \
-                >>"$LOG" 2>&1 && mkdir -p "${HOME}/.config/vendi" && touch "${HOME}/.config/vendi/welcomed"
+            sleep 4
+            if command -v quickshell >/dev/null && [ -f /etc/xdg/quickshell/vendi-tour/shell.qml ]; then
+                quickshell -n -c vendi-tour >>"$LOG" 2>&1
+            elif command -v notify-send >/dev/null; then
+                notify-send -a vendiOS -t 12000 "Welcome to vendiOS" \
+                    "super+space  launcher · super+k  all shortcuts · super+escape  lock" \
+                    >>"$LOG" 2>&1 && mkdir -p "${HOME}/.config/vendi" && touch "${HOME}/.config/vendi/welcomed"
+            fi
         ) &
     fi
     # re-apply the saved colour temperature (vendi night) once the IPC is up.
