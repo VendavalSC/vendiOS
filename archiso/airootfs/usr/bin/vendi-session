@@ -33,6 +33,10 @@ export XCURSOR_SIZE=24
 # off-disk than chasing it through greetd's journal.
 mkdir -p "${HOME}/logs"
 LOG="${HOME}/logs/vendi-session.log"
+# One file per session: this login's log, plus the previous session's as
+# .log.1 (what you want after a crash). It used to append forever — 88 MB
+# and counting on a daily driver.
+[ -f "$LOG" ] && mv -f "$LOG" "${LOG}.1"
 
 # Release Plymouth's hold on the GPU so the compositor can become DRM master.
 # NOTE: --retain-splash keeps plymouthd alive holding /dev/dri/cardN, which
@@ -118,6 +122,17 @@ spawn_desktop() {
     # the bar's auto-detected Claude island also shows the live "Cooking" state.
     command -v vendi >/dev/null && vendi claude setup-quiet >/dev/null 2>&1 || true
     # Night light: the CRTC gamma LUT resets on every compositor start, so
+    # First login: one toast with the three keys that unlock everything else
+    # (the full cheatsheet is super+k). Waits for the bar — it's the
+    # notification server — then never shows again.
+    if [ ! -e "${HOME}/.config/vendi/welcomed" ] && command -v notify-send >/dev/null; then
+        (
+            sleep 6
+            notify-send -a vendiOS -t 12000 "Welcome to vendiOS" \
+                "super+space  launcher · super+k  all shortcuts · super+escape  lock" \
+                >>"$LOG" 2>&1 && mkdir -p "${HOME}/.config/vendi" && touch "${HOME}/.config/vendi/welcomed"
+        ) &
+    fi
     # re-apply the saved colour temperature (vendi night) once the IPC is up.
     if [ -r "${HOME}/.config/vendi/night" ] && command -v vendi-ctl >/dev/null; then
         _nt="$(cat "${HOME}/.config/vendi/night" 2>/dev/null)"
@@ -154,7 +169,7 @@ spawn_desktop() {
             | while read -r l; do
                 case "$l" in
                     *"boolean true"*)
-                        if ! pgrep -u "$UID" -f 'quickshell -c vendilock' >/dev/null; then
+                        if ! pgrep -u "$UID" -f 'quickshell( -n)? -c vendilock' >/dev/null; then
                             rm -f "$_ready"
                             VENDILOCK_INSTANT=1 vendi-ctl lock >>"$LOG" 2>&1 || true
                             for _ in $(seq 40); do [ -e "$_ready" ] && break; sleep 0.05; done
