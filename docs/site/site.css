@@ -248,7 +248,7 @@ h1, h2, h3, h4 { font-family: var(--font-display); color: var(--color-ink); font
 }
 .swatches button.dyn { background: conic-gradient(var(--theme-nord), var(--theme-latte), var(--theme-gruvbox), var(--theme-everforest), var(--theme-nord)); }
 .swatches button:hover, .swatches button[aria-pressed="true"] { transform: scale(1.25); box-shadow: 0 0 0 2px var(--color-paper-2), 0 0 0 3px var(--color-ink-2); }
-.swatches .tname { margin-left: var(--space-xs); color: var(--color-ink-3); font-size: var(--text-xs); }
+.swatches .tname { flex-basis: 100%; height: 1.4em; line-height: 1.4em; margin-top: 2px; color: var(--color-ink-3); font-size: var(--text-xs); }
 
 /* snapshots: dots appear, the last one breaks, the marker rolls back */
 .snaps { width: 100%; max-width: 22rem; height: auto; overflow: visible; }
