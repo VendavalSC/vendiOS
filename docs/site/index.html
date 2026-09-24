@@ -26,7 +26,7 @@
       vendiOS
     </a>
     <nav class="nav-links" aria-label="Site">
-      <a class="hide-sm" href="#highlights">Highlights</a>
+      <a class="hide-sm" href="#features">Features</a>
       <a href="docs.html">Docs</a>
       <a class="hide-sm" href="https://github.com/VendavalSC/vendiOS">GitHub</a>
       <a class="btn btn-primary" href="#get">Download</a>
@@ -47,7 +47,7 @@
     <p class="sub rise" style="--d:640ms"><b>A Linux desktop that’s ready the moment you log in.</b> Windows find their own place, and everything moves like it’s alive.</p>
     <div class="cta rise" style="--d:800ms">
       <a class="btn btn-primary btn-lg" href="#get">Download the beta</a>
-      <a class="link-arrow" href="#highlights">Get the highlights <span class="arrow" aria-hidden="true">›</span></a>
+      <a class="link-arrow" href="#features">See what’s inside <span class="arrow" aria-hidden="true">›</span></a>
     </div>
   </div>
 </section>
@@ -60,44 +60,13 @@
   </div>
 </section>
 
-<section class="sec" id="highlights">
-  <div class="wrap">
-    <h2 class="sec-title reveal">Get the highlights.</h2>
-  </div>
-  <div class="gallery reveal">
-    <div class="g-track" tabindex="0" aria-label="Highlights, scroll sideways">
-      <figure class="g-card">
-        <img src="img/hero.webp" width="1920" height="1080" loading="lazy" alt="Three windows tiled side by side.">
-        <p><b>Windows find their own place.</b> Open three and they share the screen. No dragging, no overlapping.</p>
-      </figure>
-      <figure class="g-card">
-        <img src="img/scratchpad.webp" width="1920" height="1080" loading="lazy" alt="A shelf of live miniature windows at the left edge of the screen.">
-        <p><b>A shelf for everything else.</b> Windows you’re not using keep running at the side.</p>
-      </figure>
-      <figure class="g-card">
-        <img src="img/dashboard.webp" width="1120" height="800" loading="lazy" alt="The dashboard with calendar, clock, music and quick settings.">
-        <p><b>One key for everything.</b> Calendar, weather, music and quick settings.</p>
-      </figure>
-      <figure class="g-card">
-        <img src="img/launcher.webp" width="1000" height="560" loading="lazy" alt="The launcher listing apps that match what was typed.">
-        <p><b>Type. Enter. Done.</b> Apps as you type, and the web when nothing matches.</p>
-      </figure>
-    </div>
-    <div class="g-controls">
-      <button class="g-arrow" type="button" data-dir="-1" aria-label="Previous highlight">‹</button>
-      <div class="g-dots" role="group" aria-label="Choose a highlight"></div>
-      <button class="g-arrow" type="button" data-dir="1" aria-label="Next highlight">›</button>
-    </div>
-  </div>
-</section>
-
 <section class="statement" aria-label="In short">
   <div class="wrap">
     <p data-words>Windows tile themselves. Every motion runs on springs. Every setting is <span class="hl">one key away.</span> And you never have to touch a config file.</p>
   </div>
 </section>
 
-<section class="feature">
+<section class="feature" id="features">
   <div class="wrap">
     <div class="head">
       <h2 class="reveal">Scratchpad. <span class="dim">A shelf for everything else.</span></h2>
@@ -144,22 +113,15 @@
   <div class="wrap">
     <svg class="mark-big reveal" viewBox="0 0 100 100" aria-hidden="true"><polygon points="50,4 90,50 50,96 10,50"/></svg>
     <h2 class="reveal">Get vendiOS.</h2>
-    <p class="lead reveal">Free and open source. The first public beta is ready to try.<sup><a href="#fn1">1</a></sup></p>
+    <p class="lead reveal">Free and open source. The first public beta is ready to try.</p>
     <div class="cta reveal">
       <a class="btn btn-primary btn-lg" href="https://github.com/VendavalSC/vendiOS/releases/latest">Download ISO · 1.9 GB</a>
       <a class="link-arrow" href="docs.html#install">How to install <span class="arrow" aria-hidden="true">›</span></a>
     </div>
-  </div>
-</section>
-
-<section class="fineprint" aria-label="Notes">
-  <div class="wrap">
-    <ol>
-      <li id="fn1"><span class="warn">Turn off Secure Boot before booting the installer.</span> It isn’t supported yet. Nothing is written to your disk until you confirm on the installer’s last screen. It’s a beta and mostly one person’s work, so keep a backup of anything you care about, and <a href="https://github.com/VendavalSC/vendiOS/issues">report what breaks</a>.</li>
-      <li>Tested so far on AMD and Intel CPUs, AMD and NVIDIA graphics, two monitors, and an Intel Chromebook.</li>
-      <li>v0.1.0-beta, x86_64. sha256 <code>48a6fd8ad4e7cee783f4552d64ad32d4f9a5d5297eece4a4a5db03310b26a985</code></li>
-      <li>The wallpaper in these screenshots was made for vendiOS. <a href="img/vendios-shards-4k.jpg" download>Download it in 4K</a>.</li>
-    </ol>
+    <p class="fine reveal"><span class="warn">Turn off Secure Boot first</span>, it isn’t supported yet. Nothing touches your disk until you say yes on the installer’s last screen.</p>
+    <p class="fine reveal">It’s a beta, so found a rough edge? <a href="https://github.com/VendavalSC/vendiOS/issues">Tell me about it</a>.</p>
+    <p class="fine reveal">Like the wallpaper? It was made for vendiOS. <a href="img/vendios-shards-4k.jpg" download>Grab it in 4K</a>.</p>
+    <p class="sum reveal">v0.1.0-beta · sha256 48a6fd8ad4e7cee783f4552d64ad32d4f9a5d5297eece4a4a5db03310b26a985</p>
   </div>
 </section>
 
