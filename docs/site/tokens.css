@@ -17,6 +17,15 @@
   --color-blush:   oklch(84% 0.09 350);        /* mauve drifting pink, for the hero sheen */
   --color-accent-deep: oklch(32% 0.1 305);
   --color-scrim:   oklch(8% 0.02 290 / 0.7);
+  /* the real vendi theme accents (vendi theme <name>) */
+  --theme-mocha:      #cba6f7;
+  --theme-latte:      #8839ef;
+  --theme-gruvbox:    #fe8019;
+  --theme-nord:       #88c0d0;
+  --theme-tokyonight: #7aa2f7;
+  --theme-everforest: #a7c080;
+  --theme-mono:       #ffffff;
+  --theme-think:      #e2231a;
   --color-focus:   oklch(88% 0.12 305);
   --color-warn:    oklch(84% 0.12 80);
   --color-glass:   oklch(11% 0.012 295 / 0.72);

@@ -95,16 +95,72 @@
   <div class="wrap">
     <h2 class="sec-title reveal">Everything else, <span class="dim">already done.</span></h2>
     <div class="bento">
-      <div class="b b-4 accent reveal"><div class="num tint" data-count="0">0</div><p><b>config files to write.</b> Everything works on a fresh install. The config file is there when you want it, never before.</p></div>
-      <div class="b b-2 reveal" style="--d:80ms"><div class="num" data-count="85">85</div><p><b>keyboard shortcuts,</b> all on screen with <kbd>super</kbd> <kbd>K</kbd>.</p></div>
-      <div class="b b-2 reveal"><div class="num" data-count="1.9" data-dec="1" data-unit="GB">1.9<small>GB</small></div><p><b>installs offline,</b> with AMD, Intel and NVIDIA drivers on the image.</p></div>
-      <div class="b b-2 reveal" style="--d:80ms"><div class="num" data-count="30" data-unit="+">30<small>+</small></div><p><b><code>vendi</code> commands</b> for Wi‑Fi, Bluetooth, displays, updates and more.</p></div>
-      <div class="b b-2 reveal" style="--d:160ms"><div class="num" data-count="9">9</div><p><b>themes</b> that recolour the bar, terminal and apps at once, live.</p></div>
-      <div class="b b-3 reveal"><h3>A snapshot before every update.</h3><p>If an update breaks something, <b><code>vendi rollback</code></b> and a reboot put you back. Your files stay untouched.</p></div>
-      <div class="b b-3 reveal" style="--d:80ms"><h3>Encrypted by default.</h3><p>LUKS2 with argon2id. <b>One passphrase at boot,</b> and that’s it.</p></div>
-      <div class="b b-2 reveal"><h3>Games in one command.</h3><p><code>vendi game</code> sets up Steam, Lutris, gamemode and MangoHud.</p></div>
-      <div class="b b-2 reveal" style="--d:80ms"><h3>Your phone, on your desktop.</h3><p>Mirror an iPhone over AirPlay, or Android over USB.</p></div>
-      <div class="b b-2 reveal" style="--d:160ms"><h3>Still Arch, underneath.</h3><p><code>pacman</code> and the AUR, exactly as you’d expect.</p></div>
+      <div class="b b-4 accent reveal">
+        <div class="num tint" data-count="0">0</div>
+        <div class="viz term" aria-hidden="true"><span class="p">$</span> <span data-type='["ls ~/.config/vendi/vendiwm.kdl"]' data-after="No such file. Everything still works."></span><span class="caret"></span><div class="out"></div></div>
+        <p><b>config files to write.</b> Everything works on a fresh install. The config file is there when you want it, never before.</p>
+      </div>
+      <div class="b b-2 reveal" style="--d:80ms">
+        <div class="num" data-count="85">85</div>
+        <div class="viz keys-demo" aria-hidden="true"><kbd>super</kbd><span class="plus">+</span><kbd class="k">D</kbd><span class="act">dashboard</span></div>
+        <p><b>keyboard shortcuts,</b> all on screen with <kbd>super</kbd> <kbd>K</kbd>.</p>
+      </div>
+      <div class="b b-2 reveal">
+        <div class="num" data-count="1.9" data-dec="1" data-unit="GB">1.9<small>GB</small></div>
+        <div class="viz install" aria-hidden="true"><div class="bar"><span></span></div><div class="lbl"><span class="a">Installing, no internet</span><span class="b2">Done. Reboot.</span></div></div>
+        <p><b>installs offline,</b> with AMD, Intel and NVIDIA drivers on the image.</p>
+      </div>
+      <div class="b b-2 reveal" style="--d:80ms">
+        <div class="num" data-count="30" data-unit="+">30<small>+</small></div>
+        <div class="viz term" aria-hidden="true"><span class="p">$</span> <span data-type='["vendi wifi","vendi bt","vendi display","vendi update","vendi theme nord","vendi shot area"]'></span><span class="caret"></span></div>
+        <p><b><code>vendi</code> commands</b> for Wi‑Fi, Bluetooth, displays, updates and more.</p>
+      </div>
+      <div class="b b-2 reveal themes-tile" style="--d:160ms">
+        <div class="num" data-count="9">9</div>
+        <div class="viz swatches" role="group" aria-label="Theme colours">
+          <button type="button" style="--c: var(--theme-mocha)" aria-label="mocha"></button>
+          <button type="button" style="--c: var(--theme-latte)" aria-label="latte"></button>
+          <button type="button" style="--c: var(--theme-gruvbox)" aria-label="gruvbox"></button>
+          <button type="button" style="--c: var(--theme-nord)" aria-label="nord"></button>
+          <button type="button" style="--c: var(--theme-tokyonight)" aria-label="tokyonight"></button>
+          <button type="button" style="--c: var(--theme-everforest)" aria-label="everforest"></button>
+          <button type="button" style="--c: var(--theme-mono)" aria-label="mono"></button>
+          <button type="button" style="--c: var(--theme-think)" aria-label="think"></button>
+          <button type="button" class="dyn" aria-label="dynamic, from your wallpaper"></button>
+          <span class="tname">mocha</span>
+        </div>
+        <p><b>themes</b> that recolour the bar, terminal and apps at once, live.</p>
+      </div>
+      <div class="b b-3 reveal">
+        <h3>A snapshot before every update.</h3>
+        <svg class="viz snaps" viewBox="0 0 320 60" aria-hidden="true">
+          <line x1="16" y1="30" x2="304" y2="30" class="rail"/>
+          <circle cx="40" cy="30" r="7" class="s s1"/><circle cx="104" cy="30" r="7" class="s s2"/><circle cx="168" cy="30" r="7" class="s s3"/><circle cx="232" cy="30" r="7" class="s s4"/><circle cx="296" cy="30" r="7" class="s s5 bad"/>
+          <path d="M292 18 C 270 -4, 250 -4, 236 18" class="back"/>
+          <circle cx="232" cy="30" r="13" class="here"/>
+        </svg>
+        <p>If an update breaks something, <b><code>vendi rollback</code></b> and a reboot put you back. Your files stay untouched.</p>
+      </div>
+      <div class="b b-3 reveal" style="--d:80ms">
+        <h3>Encrypted by default.</h3>
+        <div class="viz unlock" aria-hidden="true"><div class="field"><span class="dots"></span><span class="caret"></span></div><svg class="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path class="shackle" d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+        <p>LUKS2 with argon2id. <b>One passphrase at boot,</b> and that’s it.</p>
+      </div>
+      <div class="b b-2 reveal">
+        <h3>Games in one command.</h3>
+        <div class="viz hud" aria-hidden="true"><span class="fps"><b data-fps>144</b> FPS</span><span class="graph"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div>
+        <p><code>vendi game</code> sets up Steam, Lutris, gamemode and MangoHud.</p>
+      </div>
+      <div class="b b-2 reveal" style="--d:80ms">
+        <h3>Your phone, on your desktop.</h3>
+        <div class="viz mirror" aria-hidden="true"><span class="phone"></span><span class="waves"><i></i><i></i><i></i></span><span class="screen"><span class="phone mini"></span></span></div>
+        <p>Mirror an iPhone over AirPlay, or Android over USB.</p>
+      </div>
+      <div class="b b-2 reveal" style="--d:160ms">
+        <h3>Still Arch, underneath.</h3>
+        <div class="viz term" aria-hidden="true"><span class="p">$</span> <span data-type='["sudo pacman -Syu","yay -S spotify"]'></span><span class="caret"></span></div>
+        <p><code>pacman</code> and the AUR, exactly as you’d expect.</p>
+      </div>
     </div>
   </div>
 </section>

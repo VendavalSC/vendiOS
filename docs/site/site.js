@@ -92,6 +92,97 @@ const counter = new IntersectionObserver((entries) => {
 document.querySelectorAll('[data-count]').forEach((el) => counter.observe(el));
 document.querySelectorAll('.get .mark-big').forEach((el) => io.observe(el));
 
+// ── Bento tiles: cursor spotlight + tilt, and a live detail in each ──
+const tiles = [...document.querySelectorAll('.b')];
+const fine = matchMedia('(hover: hover) and (pointer: fine)').matches;
+tiles.forEach((t) => {
+  t.addEventListener('pointermove', (e) => {
+    const r = t.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+    t.style.setProperty('--mx', `${x * 100}%`);
+    t.style.setProperty('--my', `${y * 100}%`);
+    if (fine && !calm) {
+      t.style.setProperty('--rx', `${(0.5 - y) * 5}deg`);
+      t.style.setProperty('--ry', `${(x - 0.5) * 5}deg`);
+    }
+    t.classList.add('is-hot');
+  });
+  t.addEventListener('pointerleave', () => {
+    t.classList.remove('is-hot');
+    t.style.setProperty('--rx', '0deg'); t.style.setProperty('--ry', '0deg');
+  });
+});
+
+// Tiles only animate while they're on screen.
+const live = new IntersectionObserver((entries) => {
+  for (const e of entries) e.target.classList.toggle('is-live', e.isIntersecting);
+}, { threshold: 0.2 });
+tiles.forEach((t) => live.observe(t));
+const isLive = (el) => el.closest('.b')?.classList.contains('is-live');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const whenLive = async (el) => { while (!isLive(el)) await sleep(300); };
+
+// Typed terminal lines that cycle through their commands.
+document.querySelectorAll('[data-type]').forEach(async (el) => {
+  const lines = JSON.parse(el.dataset.type);
+  const out = el.parentElement.querySelector('.out');
+  if (calm) { el.textContent = lines[0]; if (out) out.textContent = el.dataset.after || ''; return; }
+  for (let i = 0; ; i = (i + 1) % lines.length) {
+    await whenLive(el);
+    for (const ch of lines[i]) { el.textContent += ch; await sleep(55 + Math.random() * 60); }
+    if (out && el.dataset.after) { await sleep(350); out.textContent = el.dataset.after; }
+    await sleep(2200);
+    while (el.textContent) { el.textContent = el.textContent.slice(0, -1); await sleep(22); }
+    if (out) out.textContent = '';
+    await sleep(400);
+  }
+});
+
+// 85 shortcuts: super + <key> presses, with what it does.
+document.querySelectorAll('.keys-demo').forEach(async (box) => {
+  const key = box.querySelector('.k'), act = box.querySelector('.act'), sup = box.querySelector('kbd');
+  const binds = [['D', 'dashboard'], ['space', 'launcher'], ['E', 'files'], ['K', 'all shortcuts'], ['Q', 'close'], ['F', 'fullscreen'], ['G', 'tabs']];
+  if (calm) return;
+  for (let i = 0; ; i = (i + 1) % binds.length) {
+    await whenLive(box);
+    act.style.opacity = 0; await sleep(250);
+    key.textContent = binds[i][0]; act.textContent = binds[i][1];
+    sup.classList.add('down'); await sleep(160); key.classList.add('down'); act.style.opacity = 1;
+    await sleep(380); key.classList.remove('down'); sup.classList.remove('down');
+    await sleep(1600);
+  }
+});
+
+// 9 themes: hover or tap a swatch to recolour the tile.
+document.querySelectorAll('.themes-tile').forEach((tile) => {
+  const btns = [...tile.querySelectorAll('.swatches button')], name = tile.querySelector('.tname');
+  const pick = (b) => {
+    btns.forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+    tile.style.setProperty('--tile-accent', b.classList.contains('dyn') ? 'var(--theme-nord)' : getComputedStyle(b).getPropertyValue('--c'));
+    name.textContent = b.getAttribute('aria-label').split(',')[0];
+  };
+  btns.forEach((b) => { b.addEventListener('pointerenter', () => pick(b)); b.addEventListener('focus', () => pick(b)); b.addEventListener('click', () => pick(b)); });
+  pick(btns[0]);
+});
+
+// Encrypted: the passphrase types in, the lock opens.
+document.querySelectorAll('.unlock').forEach(async (box) => {
+  const dots = box.querySelector('.dots');
+  if (calm) { dots.textContent = '••••••••••'; return; }
+  for (;;) {
+    await whenLive(box);
+    dots.textContent = ''; box.classList.remove('open'); await sleep(700);
+    for (let i = 0; i < 10; i++) { dots.textContent += '•'; await sleep(90 + Math.random() * 80); }
+    await sleep(400); box.classList.add('open'); await sleep(2600);
+  }
+});
+
+// Games: a frame counter that wobbles like a real one.
+document.querySelectorAll('[data-fps]').forEach(async (el) => {
+  if (calm) return;
+  for (;;) { await whenLive(el); el.textContent = 138 + Math.round(Math.random() * 9); await sleep(450); }
+});
+
 // Docs: sliding marker in the index + highlight the section you're reading.
 const rail = document.querySelector('.rail');
 if (rail) {
