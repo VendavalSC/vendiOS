@@ -10,15 +10,16 @@
 <link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="tokens.css">
 <style>
-/* Hallmark · macrostructure: Long Document · tone: technical, first-person · anchor hue: mauve 305
+/* Hallmark · macrostructure: Long Document (docs variant) · tone: technical, first-person · anchor hue: mauve 305
  * genre: atmospheric (dark docs) · theme: custom (brand-preserved: shard mauve on mocha night)
  * display: Schibsted Grotesk 700 · body: IBM Plex Sans · mono: JetBrains Mono
- * nav: N6 masthead · footer: Ft1 single line · enrichment: none (typography only) · reveal: none
+ * nav: N3 side-rail (collapses to a Contents disclosure < 1000px) · footer: Ft1 single line
+ * enrichment: none (typography only) · reveal: none
  * pre-emit critique: P4 H4 E4 S5 R5 V4
  */
 *, *::before, *::after { box-sizing: border-box; }
 html, body { overflow-x: clip; }
-html { -webkit-text-size-adjust: 100%; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: var(--space-lg); }
 body {
   margin: 0;
   background: var(--color-paper);
@@ -32,7 +33,7 @@ body {
 
 a { color: var(--color-ink); text-decoration: underline; text-decoration-color: var(--color-accent); text-underline-offset: 0.2em; text-decoration-thickness: 1px; }
 a:hover { color: var(--color-accent); }
-a:focus-visible, .get:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; border-radius: var(--radius-sm); }
+a:focus-visible, .get:focus-visible, summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; border-radius: var(--radius-sm); }
 
 code, kbd, pre { font-family: var(--font-mono); font-size: 0.88em; }
 code { color: var(--color-ink); }
@@ -54,12 +55,11 @@ pre {
   color: var(--color-ink);
 }
 pre .c { color: var(--color-ink-3); }
-
 strong { color: var(--color-ink); font-weight: 600; }
 
 /* ── masthead ─────────────────────────────── */
 .mast {
-  max-width: calc(var(--measure) + 2 * var(--space-lg));
+  max-width: var(--page-max);
   margin: 0 auto;
   padding: var(--space-lg) var(--space-lg) 0;
   display: flex; align-items: center; justify-content: space-between; gap: var(--space-md);
@@ -70,12 +70,60 @@ strong { color: var(--color-ink); font-weight: 600; }
 .mast nav a { text-decoration: none; color: var(--color-ink-2); }
 .mast nav a:hover { color: var(--color-ink); }
 
-/* ── document ─────────────────────────────── */
-main {
-  max-width: calc(var(--measure) + 2 * var(--space-lg));
+/* ── page: index rail + document ──────────── */
+.page {
+  max-width: var(--page-max);
   margin: 0 auto;
-  padding: 0 var(--space-lg) var(--space-4xl);
+  padding: 0 var(--space-lg);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
 }
+main { min-width: 0; padding-bottom: var(--space-4xl); max-width: var(--measure); }
+
+.index { font-size: var(--text-sm); line-height: 1.5; }
+.index h4 {
+  margin: var(--space-lg) 0 var(--space-xs);
+  font-family: var(--font-body); font-size: var(--text-xs); font-weight: 600;
+  color: var(--color-ink-3);
+}
+.index h4:first-child { margin-top: 0; }
+.index ul { list-style: none; margin: 0; padding: 0; }
+.index a {
+  display: block; padding: var(--space-2xs) 0 var(--space-2xs) var(--space-sm);
+  margin-left: calc(-1 * var(--space-sm) - var(--rule-1));
+  border-left: 2px solid transparent;
+  color: var(--color-ink-2); text-decoration: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.index a:hover { color: var(--color-ink); }
+.index a[aria-current="true"] { color: var(--color-ink); border-left-color: var(--color-accent); }
+
+/* phones + tablets: the index is a disclosure above the document */
+.index-wrap { margin-top: var(--space-xl); border: var(--rule-1) solid var(--color-rule); border-radius: var(--radius-md); }
+.index-wrap summary {
+  cursor: pointer; list-style: none;
+  padding: var(--space-sm) var(--space-md);
+  color: var(--color-ink); font-weight: 600; font-size: var(--text-sm);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.index-wrap summary::-webkit-details-marker { display: none; }
+.index-wrap summary::after { content: "+"; font-family: var(--font-mono); color: var(--color-accent); }
+.index-wrap[open] summary::after { content: "−"; }
+.index-wrap .index { padding: 0 var(--space-md) var(--space-md) calc(var(--space-md) + var(--space-sm)); }
+
+@media (min-width: 1000px) {
+  .page { grid-template-columns: 13rem minmax(0, 1fr); gap: var(--space-3xl); }
+  .index-wrap { border: 0; margin: 0; }
+  .index-wrap summary { display: none; }
+  .index-wrap .index {
+    position: sticky; top: 0;
+    max-height: 100vh; overflow-y: auto;
+    padding: var(--space-3xl) 0 var(--space-xl) var(--space-sm);
+    border-left: var(--rule-1) solid var(--color-rule);
+  }
+}
+
+/* ── document type ────────────────────────── */
 h1, h2, h3 { font-family: var(--font-display); color: var(--color-ink); font-style: normal; min-width: 0; overflow-wrap: anywhere; }
 h1 {
   font-size: var(--text-display); font-weight: 700; line-height: 0.95; letter-spacing: -0.035em;
@@ -86,10 +134,10 @@ h2 {
   margin: var(--space-3xl) 0 var(--space-md);
 }
 h3 { font-size: var(--text-lg); font-weight: 600; margin: var(--space-xl) 0 var(--space-xs); }
+h2 + h3 { margin-top: var(--space-md); }
 p { margin: 0 0 var(--space-md); }
 .lede { font-size: var(--text-lg); line-height: 1.6; color: var(--color-ink); }
 
-/* the release — the one boxed thing on the page */
 .release {
   margin: var(--space-2xl) 0 var(--space-lg);
   padding: var(--space-lg);
@@ -113,14 +161,17 @@ p { margin: 0 0 var(--space-md); }
 .release .sum { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-ink-3); overflow-wrap: anywhere; }
 .warn { color: var(--color-warn); }
 
-.contents { font-size: var(--text-sm); color: var(--color-ink-3); }
-.contents a { color: var(--color-ink-2); }
+.note {
+  margin: var(--space-lg) 0;
+  padding-left: var(--space-md);
+  border-left: 2px solid var(--color-warn);
+  font-size: var(--text-sm);
+}
 
 ol.steps { padding-left: var(--space-lg); margin: 0 0 var(--space-md); }
 ol.steps li { margin-bottom: var(--space-xs); padding-left: var(--space-2xs); }
 ol.steps li::marker { color: var(--color-accent); font-family: var(--font-mono); font-size: var(--text-sm); }
 
-/* reference tables: commands + keys */
 .ref { width: 100%; border-collapse: collapse; margin: var(--space-md) 0 var(--space-lg); font-size: var(--text-sm); }
 .ref td { padding: var(--space-xs) 0; border-top: var(--rule-1) solid var(--color-rule); vertical-align: baseline; }
 .ref td:first-child { width: 40%; padding-right: var(--space-md); color: var(--color-ink); }
@@ -134,7 +185,7 @@ dl.faq dt { color: var(--color-ink); font-weight: 600; margin-top: var(--space-l
 dl.faq dd { margin: var(--space-2xs) 0 0; }
 
 footer {
-  max-width: calc(var(--measure) + 2 * var(--space-lg));
+  max-width: var(--page-max);
   margin: 0 auto; padding: var(--space-lg) var(--space-lg) var(--space-2xl);
   border-top: var(--rule-1) solid var(--color-rule);
   font-size: var(--text-xs); color: var(--color-ink-3);
@@ -142,7 +193,7 @@ footer {
 footer a { color: var(--color-ink-3); }
 
 @media (max-width: 480px) {
-  .mast, main, footer { padding-left: var(--space-md); padding-right: var(--space-md); }
+  .mast, .page, footer { padding-left: var(--space-md); padding-right: var(--space-md); }
   .mast nav { gap: var(--space-md); }
   h1 { margin-top: var(--space-2xl); }
   h2 { margin-top: var(--space-2xl); }
@@ -167,6 +218,51 @@ footer a { color: var(--color-ink-3); }
   </nav>
 </header>
 
+<div class="page">
+
+<details class="index-wrap" id="index-wrap" open>
+  <summary>Contents</summary>
+  <nav class="index" aria-label="Documentation">
+    <h4>Start here</h4>
+    <ul>
+      <li><a href="#top">Overview</a></li>
+      <li><a href="#download">Download</a></li>
+      <li><a href="#install">Installing</a></li>
+      <li><a href="#first-login">First login</a></li>
+    </ul>
+    <h4>Using it</h4>
+    <ul>
+      <li><a href="#windows">Windows and tiling</a></li>
+      <li><a href="#keys">Keys</a></li>
+      <li><a href="#monitors">Workspaces and monitors</a></li>
+      <li><a href="#bar">The bar</a></li>
+      <li><a href="#vendi">The vendi command</a></li>
+      <li><a href="#capture">Screenshots and recording</a></li>
+      <li><a href="#themes">Themes and wallpapers</a></li>
+      <li><a href="#lock">Lock screen and idle</a></li>
+    </ul>
+    <h4>System</h4>
+    <ul>
+      <li><a href="#updates">Updates and snapshots</a></li>
+      <li><a href="#config">The config file</a></li>
+      <li><a href="#rules">Window rules</a></li>
+    </ul>
+    <h4>Extras</h4>
+    <ul>
+      <li><a href="#webapps">Web apps</a></li>
+      <li><a href="#phone">Phone mirroring</a></li>
+      <li><a href="#gaming">Gaming</a></li>
+      <li><a href="#dev">Dev setup</a></li>
+    </ul>
+    <h4>Help</h4>
+    <ul>
+      <li><a href="#trouble">When something breaks</a></li>
+      <li><a href="#not-done">What isn’t done</a></li>
+      <li><a href="#questions">Questions</a></li>
+    </ul>
+  </nav>
+</details>
+
 <main id="top">
 
 <h1>vendiOS</h1>
@@ -182,19 +278,9 @@ footer a { color: var(--color-ink-3); }
   <p class="sum">sha256 48a6fd8ad4e7cee783f4552d64ad32d4f9a5d5297eece4a4a5db03310b26a985</p>
 </div>
 
-<p class="contents">On this page: <a href="#whats-in-it">what’s in it</a> · <a href="#install">installing</a> · <a href="#vendi">the vendi command</a> · <a href="#keys">keys</a> · <a href="#themes">themes</a> · <a href="#not-done">what isn’t done</a> · <a href="#questions">questions</a></p>
+<p><strong>vendiWM</strong> is the window manager, written in Rust on Smithay. Windows tile on their own, but you can still grab one with the mouse and drop it somewhere else, and the layout rearranges around it. <strong>Two bars</strong> come with it: a notch that opens into media controls and a dashboard, or plain text and icons. <strong>The disk is btrfs</strong> with a snapshot before and after every update. And <strong>the <code>vendi</code> command</strong> does most of what you’d otherwise go looking for a settings app to do.</p>
 
-<h2 id="whats-in-it">What’s in it</h2>
-
-<p><strong>vendiWM</strong> is the window manager, written in Rust on Smithay. Windows tile on their own, but you can still grab one with the mouse and drop it somewhere else, and the layout rearranges around it. It does tab groups, a scratchpad, pinned windows, more than one monitor, and XWayland for apps that still need X11. Animations run on springs.</p>
-
-<p><strong>Two bars</strong> come with it and you pick one in the installer. Pro is a notch at the top of the screen that opens up into media controls, weather and a dashboard. Classic is just text and icons. <code>vendi bar</code> switches between them later.</p>
-
-<p><strong>The disk is btrfs.</strong> A snapshot is taken before and after every package update, so if an update breaks something, <code>vendi rollback</code> puts you back where you were.</p>
-
-<p><strong>The <code>vendi</code> command</strong> handles most of what you’d otherwise go looking for a settings app to do: Wi‑Fi, Bluetooth, audio, themes, screenshots, updates. It’s listed <a href="#vendi">further down</a>.</p>
-
-<p>On first login a short tour opens and walks you through the basic moves by having you actually do them. You can reopen it any time with <code>vendi welcome</code>.</p>
+<!-- ───────────────────────── start here ───────────────────────── -->
 
 <h2 id="install">Installing</h2>
 
@@ -206,7 +292,7 @@ footer a { color: var(--color-ink-3); }
   <li>Reboot, log in, and you’re at the desktop.</li>
 </ol>
 
-<p>Encryption is on by default: LUKS2 with argon2id. You type the passphrase once at boot.</p>
+<p>Encryption is on by default: LUKS2 with argon2id. You type the passphrase once at boot. Pick btrfs if you want the automatic snapshots; on ext4 you don’t get them.</p>
 
 <p>To check the download: <code>sha256sum -c vendios-2026.09.24-x86_64.iso.sha256</code>, with the <code>.sha256</code> file from the release page next to the ISO.</p>
 
@@ -217,9 +303,108 @@ cd vendiOS
 sudo ./build.sh --clean --offline   <span class="c"># ends up in out/</span></code></pre>
 <p>Leave out <code>--offline</code> for a much smaller ISO that downloads packages while it installs.</p>
 
+<h2 id="first-login">First login</h2>
+
+<p>A short tour opens the first time you log in. It doesn’t just show you slides: it asks you to open a window, switch workspace, open the overview, and waits until you’ve actually done it. Skip it if you like; <code>vendi welcome</code> brings it back.</p>
+
+<p>After that, three keys get you most of the way:</p>
+<table class="ref">
+  <tr><td><kbd>super</kbd> <kbd>space</kbd></td><td>Launch an app by typing its name</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>return</kbd></td><td>Open a terminal</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>K</kbd></td><td>Show every shortcut on screen</td></tr>
+</table>
+<p>Then connect to Wi‑Fi with <code>vendi wifi</code> (or from the bar) and run <code>sudo vendi update</code> once.</p>
+
+<!-- ───────────────────────── using it ───────────────────────── -->
+
+<h2 id="windows">Windows and tiling</h2>
+
+<p>New windows split the space with the ones already open, so nothing overlaps and nothing hides behind anything else. <kbd>super</kbd> <kbd>H</kbd> and <kbd>super</kbd> <kbd>ctrl</kbd> <kbd>V</kbd> decide whether the next one opens beside or below, and <kbd>super</kbd> <kbd>T</kbd> cycles through the other layouts.</p>
+
+<p>The mouse works too. Hold <kbd>super</kbd> and drag a window with the left button to pick it up; the other tiles show where it’ll land and move out of the way when you let go. Drop it on the middle of another window and they become tabs. <kbd>super</kbd> and the right button resizes. If you want a window to float on top like on a normal desktop, <kbd>super</kbd> <kbd>shift</kbd> <kbd>space</kbd> lets it go, and the same keys put it back.</p>
+
+<h3>Tabs, scratchpad, pinning</h3>
+<ul class="plain">
+  <li><strong>Tabs.</strong> <kbd>super</kbd> <kbd>G</kbd> groups windows into one tile with tabs across the top, like a browser. <kbd>super</kbd> <kbd>shift</kbd> <kbd>G</kbd> splits them up again.</li>
+  <li><strong>Scratchpad.</strong> <kbd>super</kbd> <kbd>shift</kbd> <kbd>−</kbd> tucks a window away; <kbd>super</kbd> <kbd>−</kbd> brings it back over whatever you’re doing. Good for a terminal or a music player.</li>
+  <li><strong>Pin.</strong> <kbd>super</kbd> <kbd>P</kbd> keeps a window on every workspace.</li>
+  <li><strong>Blur and opacity.</strong> <kbd>super</kbd> <kbd>shift</kbd> <kbd>B</kbd> toggles blur behind a window, <kbd>super</kbd> <kbd>shift</kbd> <kbd>O</kbd> steps through opacity levels.</li>
+</ul>
+
+<p>Touchscreens work as a mouse: tap to click, drag to move, long-press for right-click.</p>
+
+<h2 id="keys">Keys</h2>
+
+<p><kbd>super</kbd> is the Windows key. <kbd>super</kbd> <kbd>K</kbd> shows all of these on screen, so you don’t need to memorise this list. To change one, see <a href="#config">the config file</a>.</p>
+
+<h3>Opening things</h3>
+<table class="ref">
+  <tr><td><kbd>super</kbd> <kbd>space</kbd></td><td>App launcher</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>return</kbd></td><td>Terminal</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>B</kbd></td><td>Firefox</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>E</kbd></td><td>Files</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>D</kbd></td><td>Dashboard</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>alt</kbd> <kbd>space</kbd></td><td>Actions menu</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>esc</kbd></td><td>Lock the screen</td></tr>
+</table>
+
+<h3>Windows</h3>
+<table class="ref">
+  <tr><td><kbd>super</kbd> <kbd>Q</kbd></td><td>Close (<kbd>shift</kbd> force-kills)</td></tr>
+  <tr><td><kbd>super</kbd> arrows</td><td>Move focus</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>tab</kbd></td><td>Next window</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> arrows</td><td>Move the window</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>ctrl</kbd> arrows</td><td>Resize</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>H</kbd> / <kbd>super</kbd> <kbd>ctrl</kbd> <kbd>V</kbd></td><td>Next window opens beside / below</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>T</kbd></td><td>Next layout</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>F</kbd></td><td>Fullscreen</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>space</kbd></td><td>Float or tile</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>C</kbd></td><td>Centre a floating window</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>G</kbd></td><td>Group into tabs (<kbd>shift</kbd> to ungroup)</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>P</kbd></td><td>Pin to every workspace</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>−</kbd></td><td>Scratchpad (<kbd>shift</kbd> sends a window there)</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>O</kbd></td><td>Overview of all workspaces</td></tr>
+</table>
+
+<h3>Workspaces and monitors</h3>
+<table class="ref">
+  <tr><td><kbd>super</kbd> <kbd>1</kbd>–<kbd>9</kbd></td><td>Go to a workspace</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>1</kbd>–<kbd>9</kbd></td><td>Send the window there</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>.</kbd> / <kbd>,</kbd></td><td>Next / previous</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>`</kbd></td><td>The last one you were on</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>alt</kbd> arrows</td><td>Focus the monitor on that side</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>alt</kbd> <kbd>shift</kbd> arrows</td><td>Move the window to that monitor</td></tr>
+</table>
+
+<h3>Screen and clipboard</h3>
+<table class="ref">
+  <tr><td><kbd>print</kbd></td><td>Screenshot</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>S</kbd></td><td>Screenshot an area to the clipboard</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>R</kbd></td><td>Start / stop recording</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>T</kbd></td><td>Copy text from an area</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>V</kbd></td><td>Clipboard history</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>V</kbd></td><td>Voice typing</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>N</kbd></td><td>Night light</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>I</kbd></td><td>Next keyboard layout</td></tr>
+</table>
+
+<h2 id="monitors">Workspaces and monitors</h2>
+
+<p>Workspaces are made when you go to them, so there’s no fixed number to set up. <kbd>super</kbd> <kbd>O</kbd> zooms out to show all of them at once; click one to go there.</p>
+
+<p>Plug in a second monitor and it just turns on next to the first. To change which side it’s on, its scale or its resolution, run <code>vendi display</code>, pick the monitor, and pick what to change.</p>
+
+<h2 id="bar">The bar</h2>
+
+<p>You pick a bar in the installer and can swap at any time with <code>vendi bar pro</code> or <code>vendi bar classic</code>. Nothing else changes when you switch.</p>
+
+<p><strong>Pro</strong> sits at the top centre like a notch and grows when something happens: you change the volume or brightness, or the battery runs low. Click it while music is playing for the controls. <kbd>super</kbd> <kbd>D</kbd> opens the dashboard: Wi‑Fi and Bluetooth switches, volume, weather, and how hard the CPU and GPU are working and how hot they are.</p>
+
+<p><strong>Classic</strong> is a thin line of text and icons along the top. It’s the one to pick if you want the screen to stay out of your way.</p>
+
 <h2 id="vendi">The <code>vendi</code> command</h2>
 
-<p>Run <code>vendi</code> on its own to see everything. These are the ones you’ll use most.</p>
+<p>Run <code>vendi</code> on its own to see everything. Commands that change the system ask for your password or need <code>sudo</code> in front.</p>
 
 <table class="ref">
   <tr><td><code>vendi update</code></td><td>Refresh mirrors and upgrade everything</td></tr>
@@ -235,70 +420,145 @@ sudo ./build.sh --clean --offline   <span class="c"># ends up in out/</span></co
   <tr><td><code>vendi shot</code> · <code>record</code></td><td>Screenshots and screen recordings</td></tr>
   <tr><td><code>vendi ocr</code></td><td>Select part of the screen, copy the text in it</td></tr>
   <tr><td><code>vendi clip</code></td><td>Clipboard history</td></tr>
+  <tr><td><code>vendi voice</code></td><td>Type by talking, fully offline</td></tr>
   <tr><td><code>vendi night</code></td><td>Night light</td></tr>
+  <tr><td><code>vendi dnd</code></td><td>Do not disturb</td></tr>
   <tr><td><code>vendi power</code></td><td>Power profile</td></tr>
+  <tr><td><code>vendi font</code></td><td>Change the terminal font</td></tr>
+  <tr><td><code>vendi screensaver</code></td><td>Pick a video to play when idle</td></tr>
   <tr><td><code>vendi fingerprint</code></td><td>Enroll a finger to unlock the lock screen</td></tr>
-  <tr><td><code>vendi webapp</code></td><td>Turn a website into an app, e.g. <code>vendi webapp add whatsapp</code></td></tr>
-  <tr><td><code>vendi dev</code></td><td>Install a dev toolchain and a preconfigured Neovim</td></tr>
+  <tr><td><code>vendi webapp</code></td><td>Turn a website into an app</td></tr>
+  <tr><td><code>vendi phone</code></td><td>Mirror your phone’s screen</td></tr>
   <tr><td><code>vendi game</code></td><td>Install the gaming stack</td></tr>
+  <tr><td><code>vendi dev</code></td><td>Install a dev toolchain and a preconfigured Neovim</td></tr>
+  <tr><td><code>vendi info</code></td><td>Version and a hardware summary</td></tr>
   <tr><td><code>vendi report</code></td><td>Pack logs and system info into one file for a bug report</td></tr>
 </table>
 
-<h2 id="keys">Keys</h2>
+<h2 id="capture">Screenshots and recording</h2>
 
-<p><kbd>super</kbd> is the Windows key. <kbd>super</kbd> <kbd>K</kbd> shows all of these on screen, so you don’t need to memorise this list. To change a binding, edit <code>~/.config/vendi/vendiwm.kdl</code>.</p>
+<p><kbd>print</kbd> takes the whole screen. <kbd>super</kbd> <kbd>shift</kbd> <kbd>S</kbd> lets you drag a box and puts the picture on the clipboard, ready to paste. Screenshots are saved to <code>~/Pictures/Screenshots</code>.</p>
 
-<h3>Opening things</h3>
-<table class="ref">
-  <tr><td><kbd>super</kbd> <kbd>space</kbd></td><td>App launcher</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>return</kbd></td><td>Terminal</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>B</kbd></td><td>Firefox</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>E</kbd></td><td>Files</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>D</kbd></td><td>Dashboard</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>alt</kbd> <kbd>space</kbd></td><td>Actions menu</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>esc</kbd></td><td>Lock the screen</td></tr>
-</table>
+<p><kbd>super</kbd> <kbd>shift</kbd> <kbd>R</kbd> starts recording the screen and the same keys stop it. Use <code>vendi record area</code> for part of the screen, or add <code>--audio</code> to record sound. Recordings go to <code>~/Videos/Recordings</code>.</p>
 
-<h3>Windows</h3>
-<table class="ref">
-  <tr><td><kbd>super</kbd> <kbd>Q</kbd></td><td>Close</td></tr>
-  <tr><td><kbd>super</kbd> arrows</td><td>Move focus</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>shift</kbd> arrows</td><td>Move the window</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>ctrl</kbd> arrows</td><td>Resize</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>H</kbd> / <kbd>super</kbd> <kbd>ctrl</kbd> <kbd>V</kbd></td><td>Split side by side / top and bottom</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>T</kbd></td><td>Next layout</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>F</kbd></td><td>Fullscreen</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>space</kbd></td><td>Float or tile</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>G</kbd></td><td>Group into tabs (<kbd>shift</kbd> to ungroup)</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>P</kbd></td><td>Pin to every workspace</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>−</kbd></td><td>Scratchpad (<kbd>shift</kbd> sends a window there)</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>O</kbd></td><td>Overview of all workspaces</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>alt</kbd> arrows</td><td>Focus the next monitor (<kbd>shift</kbd> moves the window)</td></tr>
-</table>
-
-<h3>Workspaces</h3>
-<table class="ref">
-  <tr><td><kbd>super</kbd> <kbd>1</kbd>–<kbd>9</kbd></td><td>Go to a workspace</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>1</kbd>–<kbd>9</kbd></td><td>Send the window there</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>.</kbd> / <kbd>,</kbd></td><td>Next / previous</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>`</kbd></td><td>The last one you were on</td></tr>
-</table>
-
-<h3>Screen and clipboard</h3>
-<table class="ref">
-  <tr><td><kbd>print</kbd></td><td>Screenshot</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>S</kbd></td><td>Screenshot an area to the clipboard</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>R</kbd></td><td>Start / stop recording</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>T</kbd></td><td>Copy text from an area</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>V</kbd></td><td>Clipboard history</td></tr>
-  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>N</kbd></td><td>Night light</td></tr>
-</table>
+<p><kbd>super</kbd> <kbd>shift</kbd> <kbd>T</kbd> reads the text inside a box you drag, which is handy for error messages in screenshots or videos. <kbd>super</kbd> <kbd>V</kbd> opens everything you’ve copied recently.</p>
 
 <h2 id="themes">Themes and wallpapers</h2>
 
 <p><code>vendi theme</code> recolours the bar, the terminal and GTK apps together, with no restart. It ships with mocha, latte, gruvbox, nord, tokyonight, everforest, mono and think. There’s also <code>dynamic</code>, which picks the colours from your wallpaper.</p>
 
-<p>Wallpapers go in <code>~/Pictures/Wallpapers</code>. Give <code>vendi wallpaper dynamic set</code> a day picture and a night picture (and a dusk one if you want), and it swaps between them over the day.</p>
+<p>Wallpapers go in <code>~/Pictures/Wallpapers</code>, and the bar has a picker for them. Give <code>vendi wallpaper dynamic set</code> a day picture and a night picture (and a dusk one if you want), and it swaps between them over the day. With <code>vendi appearance auto</code>, apps go light or dark to match whichever wallpaper is showing.</p>
+
+<h2 id="lock">Lock screen and idle</h2>
+
+<p><kbd>super</kbd> <kbd>esc</kbd> locks. The screen also locks itself after 10 minutes of not being touched and turns off a minute later; any key or mouse movement wakes it. Closing the lid locks it before the laptop sleeps.</p>
+
+<p>If your laptop has a fingerprint reader, run <code>vendi fingerprint</code> once and you can unlock with a finger instead of typing.</p>
+
+<p>For something to look at while idle, put videos in <code>~/Videos/Screensavers</code> and choose one with <code>vendi screensaver</code>.</p>
+
+<!-- ───────────────────────── system ───────────────────────── -->
+
+<h2 id="updates">Updates and snapshots</h2>
+
+<p><code>sudo vendi update</code> finds the fastest mirrors and upgrades everything. It’s the same as <code>pacman -Syu</code> with the mirror step done for you. If the update included a new version of vendiWM, log out and back in to use it.</p>
+
+<p>On btrfs, every <code>pacman</code> run takes a snapshot before and after. If an update leaves you with something broken:</p>
+<pre><code>sudo vendi rollback       <span class="c"># lists snapshots, asks for a number</span>
+sudo vendi rollback 42    <span class="c"># or give it straight away</span></code></pre>
+<p>Reboot afterwards and you’re back to how things were at that snapshot. Your home folder isn’t rolled back, so your files stay as they are.</p>
+
+<p><code>vendi snapshot</code> takes one by hand, before you try something risky. <code>sudo vendi clean</code> clears old packages out of the cache when the disk gets full.</p>
+
+<h2 id="config">The config file</h2>
+
+<p>Everything works without one. When you want to change something, create <code>~/.config/vendi/vendiwm.kdl</code> and put in only what you want to change: anything you leave out keeps its default. <kbd>super</kbd> <kbd>ctrl</kbd> <kbd>R</kbd> reloads it.</p>
+
+<pre><code>binds {
+    bind "super+b" "spawn chromium"      <span class="c">// replaces the default super+b</span>
+    bind "super+m" "spawn spotify"       <span class="c">// adds a new one</span>
+}
+
+input {
+    keyboard-layout "us,es"              <span class="c">// super+i switches</span>
+    repeat-delay 200
+    repeat-rate 25
+    natural-scroll true
+    tap-to-click true
+    focus-follows-mouse false
+    mod-key "super"                      <span class="c">// or "alt", "ctrl", "caps"</span>
+}
+
+theme {
+    gap 10
+    margin 14
+    radius 12
+    blur true
+    smart-gaps false                     <span class="c">// true: no gaps with one window</span>
+}
+
+idle {
+    lock-after 600                       <span class="c">// seconds, 0 turns it off</span>
+    screen-off-after 660
+}
+
+output "DP-1" {
+    mode "2560x1440@165"
+    vrr "fullscreen"
+}</code></pre>
+
+<p><code>mod-key "caps"</code> turns Caps Lock into a second Super key, which helps on small keyboards where the real one is awkward to reach. Monitor names like <code>DP-1</code> are shown in <code>vendi display</code>.</p>
+
+<h2 id="rules">Window rules</h2>
+
+<p>Rules decide where a window opens and how it looks. Match by app id (exact), title (any part of it) or the program’s name, then say what to do with it:</p>
+<pre><code>rules {
+    rule app-id="firefox" workspace=2
+    rule app-id="pavucontrol" float=true
+    rule title="Picture-in-Picture" float=true opacity=0.95
+    rule process="mpv" fullscreen=true
+}</code></pre>
+<p>The actions are <code>workspace</code>, <code>float</code>, <code>opacity</code> (0 to 1) and <code>fullscreen</code>. Rules go in the same <code>vendiwm.kdl</code>.</p>
+
+<!-- ───────────────────────── extras ───────────────────────── -->
+
+<h2 id="webapps">Web apps</h2>
+
+<p>Some things only exist as websites. <code>vendi webapp add</code> gives one its own window, its own icon in the launcher and no browser toolbar:</p>
+<pre><code>vendi webapp add whatsapp
+vendi webapp add "Linear" https://linear.app
+vendi webapp list</code></pre>
+<p>WhatsApp, Telegram, Discord, ChatGPT, Claude, Gemini, Notion, Figma and Gmail are built in by name. For anything else, give it a name and a URL.</p>
+
+<h2 id="phone">Phone mirroring</h2>
+
+<p><code>vendi phone</code> shows your phone’s screen in a window on the desktop. Run <code>vendi phone setup</code> once first; the iPhone part comes from the AUR, so it needs <code>yay</code>.</p>
+<ul class="plain">
+  <li><strong>iPhone:</strong> run <code>vendi phone</code>, then on the phone open Control Center, tap Screen Mirroring and pick your computer. Both need to be on the same Wi‑Fi.</li>
+  <li><strong>Android:</strong> turn on USB debugging, plug in the cable, run <code>vendi phone</code>.</li>
+</ul>
+
+<h2 id="gaming">Gaming</h2>
+
+<p><code>vendi game</code> installs Steam, Lutris, gamemode, gamescope and MangoHud, and turns on the 32‑bit repository they need. With <code>yay</code> installed it also adds Heroic, ProtonUp-Qt and Moonlight.</p>
+<p>Start a game with <code>vendi game run &lt;command&gt;</code> to get gamemode and the performance overlay. For Windows games in Steam, turn on Steam Play for all titles, and install Proton-GE from ProtonUp-Qt if a game needs it.</p>
+
+<h2 id="dev">Dev setup</h2>
+
+<p><code>vendi dev</code> installs Neovim with a LazyVim setup that follows your theme, plus lazygit, mise (for Node, Python, Go and Rust versions), starship, zellij, zoxide, eza and bat. Run <code>nvim</code> once afterwards with internet on; it downloads its plugins the first time.</p>
+
+<!-- ───────────────────────── help ───────────────────────── -->
+
+<h2 id="trouble">When something breaks</h2>
+
+<ul class="plain">
+  <li><strong>After an update:</strong> <code>sudo vendi rollback</code>, pick the snapshot from before it, reboot.</li>
+  <li><strong>The desktop won’t start:</strong> press <kbd>ctrl</kbd> <kbd>alt</kbd> <kbd>F2</kbd> for a text login, and look at <code>~/logs/vendi-session.log</code>. The log from the previous login is next to it as <code>.log.1</code>.</li>
+  <li><strong>The bar vanished:</strong> it restarts itself; if it doesn’t, log out and back in.</li>
+  <li><strong>A key doesn’t work:</strong> <kbd>super</kbd> <kbd>K</kbd> shows what’s actually bound. If you’ve got a <code>vendiwm.kdl</code>, it might be overriding it.</li>
+</ul>
+
+<p>To report it, run <code>vendi report</code>. It packs the logs and a hardware summary into one file. Attach that to an <a href="https://github.com/VendavalSC/vendiOS/issues">issue on GitHub</a> and say what you were doing when it happened.</p>
 
 <h2 id="not-done">What isn’t done</h2>
 
@@ -317,17 +577,45 @@ sudo ./build.sh --clean --offline   <span class="c"># ends up in out/</span></co
   <dd>Yes. Pick “free space” or your own partitions in the installer instead of the whole disk.</dd>
 
   <dt>Is it still Arch underneath?</dt>
-  <dd>Yes. <code>pacman</code> and the AUR work as normal, and updates come straight from Arch.</dd>
+  <dd>Yes. <code>pacman</code> and the AUR work as normal, and updates come straight from Arch’s own repositories.</dd>
 
-  <dt>Something broke. What do I send you?</dt>
-  <dd>Run <code>vendi report</code> and attach the file it makes to an <a href="https://github.com/VendavalSC/vendiOS/issues">issue on GitHub</a>. Say what you were doing when it happened.</dd>
+  <dt>Can I use my own apps instead of Firefox and Files?</dt>
+  <dd>Install what you like with <code>pacman</code> or <code>yay</code>, then point the key at it in <a href="#config">the config file</a>.</dd>
+
+  <dt>Does it work with a normal mouse, not just the keyboard?</dt>
+  <dd>Yes. Hold <kbd>super</kbd> and drag to move or resize windows, and click anything in the bar. The keys are there for speed, not because you need them.</dd>
 </dl>
 
 </main>
+</div>
 
 <footer>
   vendiOS is MIT licensed. <a href="https://github.com/VendavalSC/vendiOS">Source on GitHub</a>.
 </footer>
+
+<script>
+// Index: open as a sidebar on wide screens, collapsed above the page on narrow ones.
+// Highlights the section you're reading.
+(() => {
+  const wrap = document.getElementById('index-wrap');
+  const wide = matchMedia('(min-width: 1000px)');
+  const sync = () => { wrap.open = wide.matches; };
+  sync(); wide.addEventListener('change', sync);
+
+  const links = [...wrap.querySelectorAll('.index a')];
+  links.forEach(a => a.addEventListener('click', () => { if (!wide.matches) wrap.open = false; }));
+
+  const byId = new Map(links.map(a => [a.getAttribute('href').slice(1), a]));
+  const heads = [...byId.keys()].map(id => document.getElementById(id)).filter(Boolean);
+  const mark = () => {
+    let cur = heads[0];
+    for (const h of heads) if (h.getBoundingClientRect().top < 120) cur = h;
+    links.forEach(a => a.removeAttribute('aria-current'));
+    byId.get(cur.id)?.setAttribute('aria-current', 'true');
+  };
+  addEventListener('scroll', mark, { passive: true }); mark();
+})();
+</script>
 
 </body>
 </html>
