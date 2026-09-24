@@ -2329,6 +2329,7 @@ cmd_dnd() {
 cmd_claude() {
     local sub=${1:-setup}
     local settings="$HOME/.claude/settings.json"
+    command -v vendi-claude-status >/dev/null || { [[ "$sub" == setup-quiet ]] && return 0; _err "Claude gadget not installed (local-only: extras/vendi-claude-status)"; return 1; }
     command -v python3 >/dev/null || { [[ "$sub" == setup-quiet ]] && return 0; _err "needs python3"; return 1; }
     case "$sub" in
         setup|setup-quiet|"")

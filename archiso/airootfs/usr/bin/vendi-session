@@ -120,7 +120,8 @@ spawn_desktop() {
     fi
     # Claude Code gadget: install the working/idle hooks (idempotent, silent) so
     # the bar's auto-detected Claude island also shows the live "Cooking" state.
-    command -v vendi >/dev/null && vendi claude setup-quiet >/dev/null 2>&1 || true
+    # Skipped when the gadget isn't installed (public ISOs strip it, see build.sh).
+    command -v vendi-claude-status >/dev/null && vendi claude setup-quiet >/dev/null 2>&1 || true
     # vendi-buds: watches for a connected Bluetooth headset (AirPods get full
     # noise-control + battery; anything else shows up generically) and writes
     # ~/.config/vendi/buds-state.json for the bar to poll. One instance per

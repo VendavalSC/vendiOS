@@ -86,6 +86,11 @@ if [[ -d "${RUST_SRC}/vendibar-pro" ]]; then
     # — its product photo isn't ours to redistribute, so strip it back out
     # even though the blanket copy above just brought it along.
     rm -f "${PROFILE}/airootfs/etc/xdg/quickshell/vendibar-pro/airpods.png"
+    # Same for the Claude Code gadget: it reads the user's Claude OAuth token to
+    # hit an undocumented usage endpoint and draws Anthropic's mark — fine on
+    # this machine, not something a public distro should ship. Without the
+    # poller the bar's island just never appears.
+    rm -f "${PROFILE}/airootfs/etc/xdg/quickshell/vendibar-pro/claude.svg"
     echo "  Synced src/vendibar-pro -> airootfs quickshell config."
 fi
 
