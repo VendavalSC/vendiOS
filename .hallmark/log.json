@@ -1,3 +1,20 @@
 [
-  { "date": "2026-09-25", "macrostructure": "Long Document", "theme": "custom", "theme_axes": "dark / grotesk-sans / chromatic-other", "vibe": "maker's notes, mauve shard on mocha night", "enrichment": "none", "brief": "vendiOS docs/site redesign: less AI-sounding copy, facts re-verified" }
+  {
+    "date": "2026-09-25",
+    "macrostructure": "Split Studio + docs rail",
+    "theme": "custom",
+    "theme_axes": "dark / grotesk-sans / cool",
+    "vibe": "real screenshots on the shard wallpaper, spring motion",
+    "enrichment": "real screenshots",
+    "brief": "vendiOS full site redesign: product page + docs.html"
+  },
+  {
+    "date": "2026-09-25",
+    "macrostructure": "Long Document",
+    "theme": "custom",
+    "theme_axes": "dark / grotesk-sans / chromatic-other",
+    "vibe": "maker's notes, mauve shard on mocha night",
+    "enrichment": "none",
+    "brief": "vendiOS docs/site redesign: less AI-sounding copy, facts re-verified"
+  }
 ]

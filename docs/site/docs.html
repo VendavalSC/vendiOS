@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vendiOS docs</title>
+<meta name="description" content="How to install and use vendiOS: tiling, keys, the bar, the vendi command, updates and snapshots, the config file, and what to do when something breaks.">
+<meta name="theme-color" content="#0d0c16">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='50,4 90,50 50,96 10,50' fill='%23c9a6f7'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@600;700&family=IBM+Plex+Sans:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+
+<header class="nav is-scrolled">
+  <div class="wrap">
+    <a class="mark" href="./" aria-label="vendiOS home">
+      <svg viewBox="0 0 100 100" aria-hidden="true"><polygon points="50,4 90,50 50,96 10,50"/></svg>
+      vendiOS
+    </a>
+    <nav class="nav-links" aria-label="Site">
+      <a class="hide-sm" href="./#features">Features</a>
+      <a href="docs.html" aria-current="page">Docs</a>
+      <a class="hide-sm" href="https://github.com/VendavalSC/vendiOS">GitHub</a>
+      <a class="btn btn-primary" href="./#download">Download</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap docs">
+
+<aside>
+  <button class="rail-toggle" type="button" aria-expanded="false" aria-controls="rail-box">Contents <span class="chev" aria-hidden="true">⌄</span></button>
+  <div class="rail-box" id="rail-box">
+    <nav class="rail" aria-label="Documentation">
+      <span class="track" aria-hidden="true"></span>
+      <span class="marker" aria-hidden="true"></span>
+      <h4>Start here</h4>
+      <ul>
+        <li><a href="#install">Installing</a></li>
+        <li><a href="#first-login">First login</a></li>
+      </ul>
+      <h4>Using it</h4>
+      <ul>
+        <li><a href="#windows">Windows and tiling</a></li>
+        <li><a href="#scratchpad">The scratchpad shelf</a></li>
+        <li><a href="#keys">Keys</a></li>
+        <li><a href="#monitors">Workspaces and monitors</a></li>
+        <li><a href="#bar">The bar and dashboard</a></li>
+        <li><a href="#vendi">The vendi command</a></li>
+        <li><a href="#capture">Screenshots and recording</a></li>
+        <li><a href="#themes">Themes and wallpapers</a></li>
+        <li><a href="#lock">Lock screen and idle</a></li>
+      </ul>
+      <h4>System</h4>
+      <ul>
+        <li><a href="#updates">Updates and snapshots</a></li>
+        <li><a href="#config">The config file</a></li>
+        <li><a href="#rules">Window rules</a></li>
+      </ul>
+      <h4>Extras</h4>
+      <ul>
+        <li><a href="#webapps">Web apps</a></li>
+        <li><a href="#phone">Phone mirroring</a></li>
+        <li><a href="#gaming">Gaming</a></li>
+        <li><a href="#dev">Dev setup</a></li>
+      </ul>
+      <h4>Help</h4>
+      <ul>
+        <li><a href="#trouble">When something breaks</a></li>
+        <li><a href="#not-done">What isn’t done</a></li>
+        <li><a href="#questions">Questions</a></li>
+      </ul>
+    </nav>
+  </div>
+</aside>
+
+<main>
+
+<h1>Documentation</h1>
+<p class="lede">Everything on this page works on a fresh install. None of it needs a config file unless you want to change something.</p>
+
+<section id="install">
+<h2>Installing</h2>
+<ol>
+  <li>Download the ISO from the <a href="https://github.com/VendavalSC/vendiOS/releases/latest">release page</a>, along with the <code>.sha256</code> file. To check it: <code>sha256sum -c vendios-2026.09.24-x86_64.iso.sha256</code>.</li>
+  <li>Write it to a USB stick. On Linux: <code>sudo dd if=vendios-2026.09.24-x86_64.iso of=/dev/sdX bs=4M status=progress oflag=sync</code>. On Windows or macOS, Fedora Media Writer or balenaEtcher will do it.</li>
+  <li>Turn off Secure Boot in your firmware settings and boot from the stick.</li>
+  <li>The installer starts on its own. It asks for language, timezone and keyboard; which disk to use (the whole disk, free space, or your own partitions); btrfs or ext4; whether to encrypt; your user and hostname; which bar; and optional extras like swap and the <code>yay</code> AUR helper.</li>
+  <li>Nothing is written to the disk until the last screen, where you confirm. Then reboot, log in, and you’re at the desktop.</li>
+</ol>
+<p>Encryption is on by default: LUKS2 with argon2id. You type the passphrase once at boot. Pick btrfs if you want the automatic snapshots; on ext4 you don’t get them.</p>
+
+<h3>Building the ISO yourself</h3>
+<pre><code>sudo pacman -S archiso limine xorriso
+git clone https://github.com/VendavalSC/vendiOS
+cd vendiOS
+sudo ./build.sh --clean --offline   <span class="c"># ends up in out/</span></code></pre>
+<p>Leave out <code>--offline</code> for a much smaller ISO that downloads packages while it installs.</p>
+</section>
+
+<section id="first-login">
+<h2>First login</h2>
+<p>A short tour opens the first time you log in. It doesn’t just show slides: it asks you to open a window, switch workspace and open the overview, and waits until you’ve actually done it. Skip it if you like; <code>vendi welcome</code> brings it back.</p>
+<p>Three keys get you most of the way:</p>
+<table class="ref">
+  <tr><td><kbd>super</kbd> <kbd>space</kbd></td><td>Launch an app by typing its name</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>return</kbd></td><td>Open a terminal</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>K</kbd></td><td>Show every shortcut on screen</td></tr>
+</table>
+<p>Then connect to Wi‑Fi with <code>vendi wifi</code> (or from the dashboard) and run <code>sudo vendi update</code> once.</p>
+</section>
+
+<section id="windows">
+<h2>Windows and tiling</h2>
+<p>New windows split the space with the ones already open, so nothing overlaps and nothing hides behind anything else. <kbd>super</kbd> <kbd>H</kbd> and <kbd>super</kbd> <kbd>ctrl</kbd> <kbd>V</kbd> decide whether the next one opens beside or below, and <kbd>super</kbd> <kbd>T</kbd> cycles through the other layouts.</p>
+<p>The mouse works too. Hold <kbd>super</kbd> and drag a window with the left button to pick it up; the other tiles show where it’ll land and move out of the way when you let go. Drop it on the middle of another window and they become tabs. <kbd>super</kbd> and the right button resizes. <kbd>super</kbd> <kbd>shift</kbd> <kbd>space</kbd> lets a window float on top like on a normal desktop, and the same keys put it back.</p>
+<ul>
+  <li><strong>Tabs.</strong> <kbd>super</kbd> <kbd>G</kbd> groups windows into one tile with tabs across the top, like a browser. Press it again to move to the next tab; <kbd>super</kbd> <kbd>shift</kbd> <kbd>G</kbd> splits them up.</li>
+  <li><strong>Pin.</strong> <kbd>super</kbd> <kbd>P</kbd> keeps a window on every workspace.</li>
+  <li><strong>Blur and opacity.</strong> <kbd>super</kbd> <kbd>shift</kbd> <kbd>B</kbd> toggles blur behind a window, <kbd>super</kbd> <kbd>shift</kbd> <kbd>O</kbd> steps through opacity levels.</li>
+</ul>
+<p>Touchscreens work as a mouse: tap to click, drag to move, long-press for right-click.</p>
+</section>
+
+<section id="scratchpad">
+<h2>The scratchpad shelf</h2>
+<p>The scratchpad isn’t a hidden drawer. <kbd>super</kbd> <kbd>shift</kbd> <kbd>−</kbd> sends the window you’re in flying into a card on a shelf at the left of the screen, and it keeps running there as a live miniature.</p>
+<figure class="shot"><img src="img/scratchpad.webp" width="1920" height="1080" loading="lazy" alt="A large terminal with two live miniature terminals on a shelf at the left edge of the screen."></figure>
+<ul>
+  <li><strong>Click a card</strong> to swap that window back onto the screen in place of the one you’re using.</li>
+  <li><strong>Shift-click a card</strong> to bring it back next to what you’re doing instead.</li>
+  <li><strong>Drag a card</strong> out of the shelf and drop it where you want it.</li>
+  <li><kbd>super</kbd> <kbd>=</kbd> swaps in the top card; <kbd>super</kbd> <kbd>−</kbd> hides or shows the shelf.</li>
+</ul>
+</section>
+
+<section id="keys">
+<h2>Keys</h2>
+<p><kbd>super</kbd> is the Windows key. <kbd>super</kbd> <kbd>K</kbd> shows all of these on screen, so you don’t need to memorise this list. To change one, see <a href="#config">the config file</a>.</p>
+
+<h3>Opening things</h3>
+<table class="ref">
+  <tr><td><kbd>super</kbd> <kbd>space</kbd></td><td>App launcher</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>return</kbd></td><td>Terminal</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>B</kbd></td><td>Firefox</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>E</kbd></td><td>Files</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>D</kbd></td><td>Dashboard</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>alt</kbd> <kbd>space</kbd></td><td>Actions menu</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>esc</kbd></td><td>Lock the screen</td></tr>
+</table>
+
+<h3>Windows</h3>
+<table class="ref">
+  <tr><td><kbd>super</kbd> <kbd>Q</kbd></td><td>Close (<kbd>shift</kbd> force-kills)</td></tr>
+  <tr><td><kbd>super</kbd> arrows</td><td>Move focus</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>tab</kbd></td><td>Next window</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> arrows</td><td>Move the window</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>ctrl</kbd> arrows</td><td>Resize</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>H</kbd> / <kbd>super</kbd> <kbd>ctrl</kbd> <kbd>V</kbd></td><td>Next window opens beside / below</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>T</kbd></td><td>Next layout</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>F</kbd></td><td>Fullscreen</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>space</kbd></td><td>Float or tile</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>C</kbd></td><td>Centre a floating window</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>G</kbd></td><td>Group into tabs (<kbd>shift</kbd> to ungroup)</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>P</kbd></td><td>Pin to every workspace</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>−</kbd></td><td>Send to the scratchpad shelf</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>−</kbd> / <kbd>super</kbd> <kbd>=</kbd></td><td>Show or hide the shelf / swap in the top card</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>O</kbd></td><td>Overview of all workspaces</td></tr>
+</table>
+
+<h3>Workspaces and monitors</h3>
+<table class="ref">
+  <tr><td><kbd>super</kbd> <kbd>1</kbd>–<kbd>9</kbd></td><td>Go to a workspace</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>1</kbd>–<kbd>9</kbd></td><td>Send the window there</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>.</kbd> / <kbd>,</kbd></td><td>Next / previous</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>`</kbd></td><td>The last one you were on</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>alt</kbd> arrows</td><td>Focus the monitor on that side</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>alt</kbd> <kbd>shift</kbd> arrows</td><td>Move the window to that monitor</td></tr>
+</table>
+
+<h3>Screen and clipboard</h3>
+<table class="ref">
+  <tr><td><kbd>print</kbd></td><td>Screenshot</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>S</kbd></td><td>Screenshot an area to the clipboard</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>R</kbd></td><td>Start / stop recording</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>T</kbd></td><td>Copy text from an area</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>V</kbd></td><td>Clipboard history</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>V</kbd></td><td>Voice typing</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>shift</kbd> <kbd>N</kbd></td><td>Night light</td></tr>
+  <tr><td><kbd>super</kbd> <kbd>I</kbd></td><td>Next keyboard layout</td></tr>
+</table>
+</section>
+
+<section id="monitors">
+<h2>Workspaces and monitors</h2>
+<p>Workspaces are made when you go to them, so there’s no fixed number to set up. <kbd>super</kbd> <kbd>O</kbd> zooms out to show all of them at once; click one to go there.</p>
+<p>Plug in a second monitor and it turns on next to the first. To change which side it’s on, its scale or its resolution, run <code>vendi display</code>, pick the monitor, and pick what to change.</p>
+</section>
+
+<section id="bar">
+<h2>The bar and dashboard</h2>
+<p>You pick a bar in the installer and can swap at any time with <code>vendi bar pro</code> or <code>vendi bar classic</code>. Nothing else changes when you switch.</p>
+<p><strong>Pro</strong> sits at the top centre like a notch and grows when something happens: you change the volume or brightness, or the battery runs low. Click it while music is playing for the controls.</p>
+<p><strong>Classic</strong> is a thin line of text and icons along the top, for when you want the screen to stay out of your way.</p>
+<figure class="shot"><img src="img/dashboard.webp" width="1920" height="1080" loading="lazy" alt="The dashboard with calendar, clock, weather, music and quick settings."></figure>
+<p><kbd>super</kbd> <kbd>D</kbd> opens the dashboard: a calendar, the weather, what’s playing, and quick switches for do not disturb, recording, Wi‑Fi, Bluetooth, audio, screenshots, a colour picker and the lock screen. The tabs along the top hold system stats, tools, wallpapers, config, monitors and the screensaver.</p>
+</section>
+
+<section id="vendi">
+<h2>The <code>vendi</code> command</h2>
+<p>Run <code>vendi</code> on its own to see everything. Commands that change the system ask for your password or need <code>sudo</code> in front.</p>
+<table class="ref">
+  <tr><td><code>vendi update</code></td><td>Refresh mirrors and upgrade everything</td></tr>
+  <tr><td><code>vendi snapshot</code></td><td>Take or manage btrfs snapshots</td></tr>
+  <tr><td><code>vendi rollback</code></td><td>Go back to an earlier snapshot</td></tr>
+  <tr><td><code>vendi clean</code></td><td>Clear the package cache and trim the journal</td></tr>
+  <tr><td><code>vendi wifi</code> · <code>bt</code> · <code>audio</code></td><td>Networks, Bluetooth devices, speakers and mics</td></tr>
+  <tr><td><code>vendi display</code></td><td>Arrange monitors: scale, position, resolution</td></tr>
+  <tr><td><code>vendi theme</code></td><td>Recolour the whole desktop</td></tr>
+  <tr><td><code>vendi appearance</code></td><td>Light, dark, or whichever suits the wallpaper</td></tr>
+  <tr><td><code>vendi wallpaper</code></td><td>Set a wallpaper, or a day/night pair</td></tr>
+  <tr><td><code>vendi bar</code></td><td>Switch between the Pro and Classic bars</td></tr>
+  <tr><td><code>vendi shot</code> · <code>record</code></td><td>Screenshots and screen recordings</td></tr>
+  <tr><td><code>vendi ocr</code></td><td>Select part of the screen, copy the text in it</td></tr>
+  <tr><td><code>vendi clip</code></td><td>Clipboard history</td></tr>
+  <tr><td><code>vendi voice</code></td><td>Type by talking, fully offline</td></tr>
+  <tr><td><code>vendi night</code></td><td>Night light</td></tr>
+  <tr><td><code>vendi dnd</code></td><td>Do not disturb</td></tr>
+  <tr><td><code>vendi power</code></td><td>Power profile</td></tr>
+  <tr><td><code>vendi font</code></td><td>Change the terminal font</td></tr>
+  <tr><td><code>vendi screensaver</code></td><td>Pick a video to play when idle</td></tr>
+  <tr><td><code>vendi fingerprint</code></td><td>Enroll a finger to unlock the lock screen</td></tr>
+  <tr><td><code>vendi webapp</code></td><td>Turn a website into an app</td></tr>
+  <tr><td><code>vendi phone</code></td><td>Mirror your phone’s screen</td></tr>
+  <tr><td><code>vendi game</code></td><td>Install the gaming stack</td></tr>
+  <tr><td><code>vendi dev</code></td><td>Install a dev toolchain and a preconfigured Neovim</td></tr>
+  <tr><td><code>vendi info</code></td><td>Version and a hardware summary</td></tr>
+  <tr><td><code>vendi report</code></td><td>Pack logs and system info into one file for a bug report</td></tr>
+</table>
+</section>
+
+<section id="capture">
+<h2>Screenshots and recording</h2>
+<p><kbd>print</kbd> takes the whole screen. <kbd>super</kbd> <kbd>shift</kbd> <kbd>S</kbd> lets you drag a box and puts the picture on the clipboard, ready to paste. Screenshots are saved to <code>~/Pictures/Screenshots</code>.</p>
+<p><kbd>super</kbd> <kbd>shift</kbd> <kbd>R</kbd> starts recording the screen and the same keys stop it. Use <code>vendi record area</code> for part of the screen, or add <code>--audio</code> to record sound. Recordings go to <code>~/Videos/Recordings</code>.</p>
+<p><kbd>super</kbd> <kbd>shift</kbd> <kbd>T</kbd> reads the text inside a box you drag, which is handy for error messages in screenshots or videos. <kbd>super</kbd> <kbd>V</kbd> opens everything you’ve copied recently.</p>
+</section>
+
+<section id="themes">
+<h2>Themes and wallpapers</h2>
+<p><code>vendi theme</code> recolours the bar, the terminal and GTK apps together, with no restart. It ships with mocha, latte, gruvbox, nord, tokyonight, everforest, mono and think. There’s also <code>dynamic</code>, which picks the colours from your wallpaper.</p>
+<p>Wallpapers go in <code>~/Pictures/Wallpapers</code>, and the dashboard has a picker for them. Give <code>vendi wallpaper dynamic set</code> a day picture and a night picture (and a dusk one if you want), and it swaps between them over the day. With <code>vendi appearance auto</code>, apps go light or dark to match whichever wallpaper is showing.</p>
+</section>
+
+<section id="lock">
+<h2>Lock screen and idle</h2>
+<p><kbd>super</kbd> <kbd>esc</kbd> locks. The screen also locks itself after 10 minutes of not being touched and turns off a minute later; any key or mouse movement wakes it. Closing the lid locks it before the laptop sleeps.</p>
+<p>If your laptop has a fingerprint reader, run <code>vendi fingerprint</code> once and you can unlock with a finger instead of typing.</p>
+<p>For something to look at while idle, put videos in <code>~/Videos/Screensavers</code> and choose one with <code>vendi screensaver</code>.</p>
+</section>
+
+<section id="updates">
+<h2>Updates and snapshots</h2>
+<p><code>sudo vendi update</code> finds the fastest mirrors and upgrades everything. It’s <code>pacman -Syu</code> with the mirror step done for you. If the update included a new version of vendiWM, log out and back in to use it.</p>
+<p>On btrfs, every <code>pacman</code> run takes a snapshot before and after. If an update leaves you with something broken:</p>
+<pre><code>sudo vendi rollback       <span class="c"># lists snapshots, asks for a number</span>
+sudo vendi rollback 42    <span class="c"># or give it straight away</span></code></pre>
+<p>Reboot afterwards and the system is back to how it was at that snapshot. Your home folder isn’t rolled back, so your files stay as they are.</p>
+<p><code>vendi snapshot</code> takes one by hand, before you try something risky. <code>sudo vendi clean</code> clears old packages out of the cache when the disk gets full.</p>
+</section>
+
+<section id="config">
+<h2>The config file</h2>
+<p>Everything works without one. When you want to change something, create <code>~/.config/vendi/vendiwm.kdl</code> and put in only what you want to change: anything you leave out keeps its default. <kbd>super</kbd> <kbd>ctrl</kbd> <kbd>R</kbd> reloads it.</p>
+<pre><code>binds {
+    bind "super+b" "spawn chromium"      <span class="c">// replaces the default super+b</span>
+    bind "super+m" "spawn spotify"       <span class="c">// adds a new one</span>
+}
+
+input {
+    keyboard-layout "us,es"              <span class="c">// super+i switches</span>
+    repeat-delay 200
+    repeat-rate 25
+    natural-scroll true
+    tap-to-click true
+    focus-follows-mouse false
+    mod-key "super"                      <span class="c">// or "alt", "ctrl", "caps"</span>
+}
+
+theme {
+    gap 10
+    margin 14
+    radius 12
+    blur true
+    smart-gaps false                     <span class="c">// true: no gaps with one window</span>
+}
+
+idle {
+    lock-after 600                       <span class="c">// seconds, 0 turns it off</span>
+    screen-off-after 660
+}
+
+output "DP-1" {
+    mode "2560x1440@165"
+    vrr "fullscreen"
+}</code></pre>
+<p><code>mod-key "caps"</code> turns Caps Lock into a second Super key, which helps on small keyboards where the real one is awkward to reach. Monitor names like <code>DP-1</code> are shown in <code>vendi display</code>.</p>
+</section>
+
+<section id="rules">
+<h2>Window rules</h2>
+<p>Rules decide where a window opens and how it looks. Match by app id (exact), title (any part of it) or the program’s name, then say what to do with it:</p>
+<pre><code>rules {
+    rule app-id="firefox" workspace=2
+    rule app-id="pavucontrol" float=true
+    rule title="Picture-in-Picture" float=true opacity=0.95
+    rule process="mpv" fullscreen=true
+}</code></pre>
+<p>The actions are <code>workspace</code>, <code>float</code>, <code>opacity</code> (0 to 1) and <code>fullscreen</code>. Rules go in the same <code>vendiwm.kdl</code>.</p>
+</section>
+
+<section id="webapps">
+<h2>Web apps</h2>
+<p>Some things only exist as websites. <code>vendi webapp add</code> gives one its own window, its own icon in the launcher and no browser toolbar:</p>
+<pre><code>vendi webapp add whatsapp
+vendi webapp add "Linear" https://linear.app
+vendi webapp list</code></pre>
+<p>WhatsApp, Telegram, Discord, ChatGPT, Claude, Gemini, Notion, Figma and Gmail are built in by name. For anything else, give it a name and a URL.</p>
+</section>
+
+<section id="phone">
+<h2>Phone mirroring</h2>
+<p><code>vendi phone</code> shows your phone’s screen in a window on the desktop. Run <code>vendi phone setup</code> once first; the iPhone part comes from the AUR, so it needs <code>yay</code>.</p>
+<ul>
+  <li><strong>iPhone:</strong> run <code>vendi phone</code>, then on the phone open Control Center, tap Screen Mirroring and pick your computer. Both need to be on the same Wi‑Fi.</li>
+  <li><strong>Android:</strong> turn on USB debugging, plug in the cable, run <code>vendi phone</code>.</li>
+</ul>
+</section>
+
+<section id="gaming">
+<h2>Gaming</h2>
+<p><code>vendi game</code> installs Steam, Lutris, gamemode, gamescope and MangoHud, and turns on the 32‑bit repository they need. With <code>yay</code> installed it also adds Heroic, ProtonUp-Qt and Moonlight.</p>
+<p>Start a game with <code>vendi game run &lt;command&gt;</code> to get gamemode and the performance overlay. For Windows games in Steam, turn on Steam Play for all titles, and install Proton-GE from ProtonUp-Qt if a game needs it.</p>
+</section>
+
+<section id="dev">
+<h2>Dev setup</h2>
+<p><code>vendi dev</code> installs Neovim with a LazyVim setup that follows your theme, plus lazygit, mise (for Node, Python, Go and Rust versions), starship, zellij, zoxide, eza and bat. Run <code>nvim</code> once afterwards with internet on; it downloads its plugins the first time.</p>
+</section>
+
+<section id="trouble">
+<h2>When something breaks</h2>
+<ul>
+  <li><strong>After an update:</strong> <code>sudo vendi rollback</code>, pick the snapshot from before it, reboot.</li>
+  <li><strong>The desktop won’t start:</strong> press <kbd>ctrl</kbd> <kbd>alt</kbd> <kbd>F2</kbd> for a text login, and look at <code>~/logs/vendi-session.log</code>. The log from the previous login is next to it as <code>.log.1</code>.</li>
+  <li><strong>The bar vanished:</strong> it restarts itself; if it doesn’t, log out and back in.</li>
+  <li><strong>A key doesn’t work:</strong> <kbd>super</kbd> <kbd>K</kbd> shows what’s actually bound. If you’ve got a <code>vendiwm.kdl</code>, it might be overriding it.</li>
+</ul>
+<p>To report it, run <code>vendi report</code>. It packs the logs and a hardware summary into one file. Attach that to an <a href="https://github.com/VendavalSC/vendiOS/issues">issue on GitHub</a> and say what you were doing when it happened.</p>
+</section>
+
+<section id="not-done">
+<h2>What isn’t done</h2>
+<p>It’s a beta, and mostly one person’s work. What I know about:</p>
+<ul>
+  <li><strong>Secure Boot</strong> isn’t supported yet. It’s on the list.</li>
+  <li><strong>Fractional scaling</strong> (125%, 150%) on high-DPI screens hasn’t had much testing.</li>
+  <li>The <strong>local AI assistant</strong> you’ll see in the code isn’t on this ISO yet.</li>
+</ul>
+<p>So far it’s been tested on AMD and Intel CPUs, AMD and NVIDIA graphics, two monitors, and an Intel Chromebook. Keep a backup of anything you care about.</p>
+</section>
+
+<section id="questions">
+<h2>Questions</h2>
+<dl class="faq">
+  <dt>Can I install it next to Windows?</dt>
+  <dd>Yes. Pick “free space” or your own partitions in the installer instead of the whole disk.</dd>
+  <dt>Is it still Arch underneath?</dt>
+  <dd>Yes. <code>pacman</code> and the AUR work as normal, and updates come straight from Arch’s own repositories.</dd>
+  <dt>Can I use my own apps instead of Firefox and Files?</dt>
+  <dd>Install what you like with <code>pacman</code> or <code>yay</code>, then point the key at it in <a href="#config">the config file</a>.</dd>
+  <dt>Does it work with a normal mouse, not just the keyboard?</dt>
+  <dd>Yes. Hold <kbd>super</kbd> and drag to move or resize windows, and click anything in the bar. The keys are there for speed, not because you need them.</dd>
+</dl>
+</section>
+
+</main>
+</div>
+
+<footer class="foot">
+  <div class="wrap">
+    <span>vendiOS is MIT licensed.</span>
+    <span><a href="./">Home</a> · <a href="https://github.com/VendavalSC/vendiOS">GitHub</a> · <a href="https://github.com/VendavalSC/vendiOS/issues">Report a bug</a></span>
+  </div>
+</footer>
+
+<script src="site.js" defer></script>
+</body>
+</html>

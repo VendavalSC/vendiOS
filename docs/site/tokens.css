@@ -1,23 +1,28 @@
-/* Hallmark · tokens · theme: custom (vendiOS brand — mocha night + mauve)
- * axes: dark / grotesk-sans / chromatic-other (mauve, hue 300)
+/* Hallmark · tokens · theme: custom (vendiOS brand — shard mauve + wallpaper blues on night)
+ * axes: dark / grotesk-sans / cool (electric blue + mauve)
  */
 :root {
-  /* colour — cool near-black tinted toward the logo's mauve */
-  --color-paper:   oklch(17% 0.012 295);
-  --color-paper-2: oklch(20.5% 0.014 295);
-  --color-paper-3: oklch(24% 0.016 295);
-  --color-ink:     oklch(93% 0.010 295);
-  --color-ink-2:   oklch(76% 0.018 295);
-  --color-ink-3:   oklch(62% 0.020 295);
-  --color-rule:    oklch(30% 0.016 295);
-  --color-accent:  oklch(80% 0.11 305);   /* the shard / catppuccin mauve */
-  --color-accent-ink: oklch(20% 0.03 305); /* text on an accent fill */
-  --color-accent-soft: oklch(80% 0.11 305 / 0.14);
-  --color-focus:   oklch(86% 0.13 305);
+  /* colour */
+  --color-paper:   oklch(14.5% 0.018 280);
+  --color-paper-2: oklch(18% 0.022 280);
+  --color-paper-3: oklch(22% 0.026 280);
+  --color-ink:     oklch(96% 0.008 280);
+  --color-ink-2:   oklch(78% 0.02 280);
+  --color-ink-3:   oklch(62% 0.024 280);
+  --color-rule:    oklch(28% 0.024 280);
+  --color-rule-2:  oklch(36% 0.03 280);
+  --color-accent:  oklch(80% 0.11 305);        /* shard mauve */
+  --color-accent-ink: oklch(18% 0.04 300);
+  --color-blue:    oklch(56% 0.25 266);        /* wallpaper electric blue */
+  --color-cyan:    oklch(80% 0.14 220);        /* wallpaper cyan */
+  --color-peach:   oklch(85% 0.08 60);         /* wallpaper peach */
+  --color-focus:   oklch(88% 0.12 305);
   --color-warn:    oklch(84% 0.12 80);
+  --color-glass:   oklch(14.5% 0.018 280 / 0.72);
+  --color-shadow:  oklch(8% 0.03 270 / 0.55);
 
   /* type */
-  --font-display: "Schibsted Grotesk", "IBM Plex Sans", system-ui, sans-serif;
+  --font-display: "Schibsted Grotesk", system-ui, sans-serif;
   --font-body:    "IBM Plex Sans", system-ui, sans-serif;
   --font-mono:    "JetBrains Mono", ui-monospace, monospace;
 
@@ -26,8 +31,9 @@
   --text-base: 1.0625rem;
   --text-lg:   1.25rem;
   --text-xl:   1.6rem;
-  --text-2xl:  2rem;
-  --text-display: clamp(3rem, 2rem + 6vw, 5.5rem);
+  --text-2xl:  clamp(1.9rem, 1.4rem + 1.6vw, 2.6rem);
+  --text-3xl:  clamp(2.2rem, 1.5rem + 2.6vw, 3.4rem);
+  --text-display: clamp(2.6rem, 1.4rem + 5.2vw, 5.6rem);
 
   /* space — 4pt scale */
   --space-2xs: 0.25rem;
@@ -39,16 +45,21 @@
   --space-2xl: 3.5rem;
   --space-3xl: 5.5rem;
   --space-4xl: 8rem;
+  --space-5xl: 11rem;
 
   --measure: 64ch;
-  --page-max: 72rem;
+  --page-max: 76rem;
+  --nav-h: 64px;
   --rule-1: 1px;
-  --radius-sm: 4px;
-  --radius-md: 6px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
 
   --ease-out:    cubic-bezier(0.22, 1, 0.36, 1);
   --ease-in:     cubic-bezier(0.55, 0, 1, 0.45);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
-  --dur-fast: 120ms;
-  --dur-base: 200ms;
+  --dur-fast: 150ms;
+  --dur-base: 280ms;
+  --dur-slow: 800ms;
 }
