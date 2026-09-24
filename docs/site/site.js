@@ -72,6 +72,62 @@ document.querySelectorAll('[data-words]').forEach((el) => {
 // Feature screenshots settle into place as they arrive.
 document.querySelectorAll('.feature .shot').forEach((el) => io.observe(el));
 
+// Highlights gallery: snap scrolling with arrows, dots, and the centred card in focus.
+document.querySelectorAll('.gallery').forEach((g) => {
+  const track = g.querySelector('.g-track');
+  const cards = [...track.querySelectorAll('.g-card')];
+  const dotsBox = g.querySelector('.g-dots');
+  const [prev, next] = g.querySelectorAll('.g-arrow');
+  const dots = cards.map((c, i) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.setAttribute('aria-label', `Highlight ${i + 1}`);
+    b.addEventListener('click', () => go(i));
+    dotsBox.append(b); return b;
+  });
+  let cur = 0;
+  const go = (i) => {
+    const c = cards[Math.max(0, Math.min(cards.length - 1, i))];
+    track.scrollTo({ left: c.offsetLeft - (track.clientWidth - c.clientWidth) / 2, behavior: calm ? 'auto' : 'smooth' });
+  };
+  const sync = () => {
+    const mid = track.scrollLeft + track.clientWidth / 2;
+    let best = 0, bestD = Infinity;
+    cards.forEach((c, i) => { const d = Math.abs(c.offsetLeft + c.clientWidth / 2 - mid); if (d < bestD) { bestD = d; best = i; } });
+    cur = best;
+    cards.forEach((c, i) => c.classList.toggle('is-current', i === cur));
+    dots.forEach((d, i) => d.setAttribute('aria-current', String(i === cur)));
+    prev.disabled = cur === 0; next.disabled = cur === cards.length - 1;
+  };
+  prev.addEventListener('click', () => go(cur - 1));
+  next.addEventListener('click', () => go(cur + 1));
+  track.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight') { e.preventDefault(); go(cur + 1); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); go(cur - 1); }
+  });
+  let t; track.addEventListener('scroll', () => { cancelAnimationFrame(t); t = requestAnimationFrame(sync); }, { passive: true });
+  addEventListener('resize', sync); sync();
+});
+
+// Big numbers count up once when they come into view.
+const counter = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    counter.unobserve(e.target);
+    const el = e.target, to = parseFloat(el.dataset.count), dec = +(el.dataset.dec || 0);
+    const unit = el.dataset.unit ? `<small>${el.dataset.unit}</small>` : '';
+    if (calm || to === 0) continue;
+    const t0 = performance.now(), dur = 1400;
+    const step = (now) => {
+      const k = Math.min((now - t0) / dur, 1), v = to * (1 - Math.pow(1 - k, 4));
+      el.innerHTML = v.toFixed(dec) + unit;
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+}, { threshold: 0.6 });
+document.querySelectorAll('[data-count]').forEach((el) => counter.observe(el));
+document.querySelectorAll('.get .mark-big').forEach((el) => io.observe(el));
+
 // Docs: sliding marker in the index + highlight the section you're reading.
 const rail = document.querySelector('.rail');
 if (rail) {
