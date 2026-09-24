@@ -196,6 +196,43 @@ Item {
             }
         }
     }
+    // GPU (nvidia-smi) — util %, temp °C, vram. -1 = no nvidia GPU (hide it).
+    property real gpuUtil: -1
+    property real gpuTemp: -1
+    property real gpuMemUsed: 0
+    property real gpuMemTot: 0
+    readonly property bool hasGpu: gpuUtil >= 0
+    Process {
+        id: gpuInfo
+        command: ["sh", "-c",
+            "command -v nvidia-smi >/dev/null && nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo no"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const t = text.trim();
+                if (t === "no" || t === "") { dash.gpuUtil = -1; return; }
+                const f = t.split(",").map(s => parseFloat(s.trim()));
+                if (f.length >= 4 && !isNaN(f[0])) {
+                    dash.gpuUtil = f[0]; dash.gpuTemp = f[1];
+                    dash.gpuMemUsed = f[2] / 1024; dash.gpuMemTot = f[3] / 1024;
+                } else dash.gpuUtil = -1;
+            }
+        }
+    }
+
+    // CPU temperature from hwmon (k10temp/zenpower on Ryzen, coretemp on Intel).
+    property real cpuTemp: -1
+    Process {
+        id: cpuTempProc
+        command: ["sh", "-c",
+            "for h in /sys/class/hwmon/*; do n=$(cat \"$h/name\" 2>/dev/null); case \"$n\" in k10temp|zenpower|coretemp) for f in \"$h\"/temp*_input; do [ -f \"$f\" ] && { cat \"$f\"; exit 0; }; done;; esac; done; echo -1"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const v = parseInt(text.trim());
+                dash.cpuTemp = (isNaN(v) || v < 0) ? -1 : v / 1000;
+            }
+        }
+    }
+
     Timer {
         interval: 2000
         running: dash.visible && dash.tab === 1
@@ -205,6 +242,8 @@ Item {
             netSample.running = true;
             dfProc.running = true;
             sysInfo.running = true;
+            gpuInfo.running = true;
+            cpuTempProc.running = true;
             memDetail.reload();
         }
     }
@@ -387,16 +426,28 @@ Item {
                             anchors.fill: parent
                             anchors.margins: 16
                             spacing: 14
-                            Rectangle {
+                            ClippingRectangle {
                                 Layout.preferredWidth: 52
                                 Layout.preferredHeight: 52
                                 radius: 26
                                 color: Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.16)
+                                // profile picture from ~/.face — falls back to the
+                                // vendi mark when no avatar is present.
+                                Image {
+                                    id: faceImg
+                                    anchors.fill: parent
+                                    source: Qt.resolvedUrl("file://" + Quickshell.env("HOME") + "/.face")
+                                    fillMode: Image.PreserveAspectCrop
+                                    asynchronous: true
+                                    cache: false
+                                    visible: status === Image.Ready
+                                }
                                 VendiMark {
                                     anchors.centerIn: parent
                                     accent: dash.accent
                                     implicitWidth: 28
                                     implicitHeight: 28
+                                    visible: faceImg.status !== Image.Ready
                                 }
                             }
                             ColumnLayout {
@@ -856,49 +907,57 @@ Item {
                     property string sub: ""
                     property color gcolor: dash.accent
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 164
+                    Layout.preferredHeight: 168
                     onValueChanged: gCanvas.requestPaint()
                     onGcolorChanged: gCanvas.requestPaint()
                     CardTitle { text: gauge.title; x: 16; y: 14 }
-                    Canvas {
-                        id: gCanvas
+                    ColumnLayout {
                         anchors.centerIn: parent
-                        anchors.verticalCenterOffset: 8
-                        width: 102; height: 102
-                        onPaint: {
-                            const ctx = getContext("2d");
-                            const c = width / 2, r = c - 6;
-                            ctx.reset();
-                            ctx.lineWidth = 8;
-                            ctx.lineCap = "round";
-                            ctx.beginPath();
-                            ctx.arc(c, c, r, 0, Math.PI * 2);
-                            ctx.strokeStyle = "rgba(255,255,255,0.07)";
-                            ctx.stroke();
-                            const v = Math.max(0, Math.min(1, gauge.value / 100));
-                            if (v > 0.005) {
-                                ctx.beginPath();
-                                ctx.arc(c, c, r, -Math.PI / 2, -Math.PI / 2 + v * Math.PI * 2);
-                                ctx.strokeStyle = gauge.gcolor;
-                                ctx.stroke();
+                        anchors.verticalCenterOffset: 11
+                        spacing: 7
+                        // the ring — only the big value lives inside it now, so
+                        // long sub-labels (GHz · temp · VRAM) never spill the circle
+                        Item {
+                            Layout.alignment: Qt.AlignHCenter
+                            implicitWidth: 92; implicitHeight: 92
+                            Canvas {
+                                id: gCanvas
+                                anchors.fill: parent
+                                onPaint: {
+                                    const ctx = getContext("2d");
+                                    const c = width / 2, r = c - 6;
+                                    ctx.reset();
+                                    ctx.lineWidth = 8;
+                                    ctx.lineCap = "round";
+                                    ctx.beginPath();
+                                    ctx.arc(c, c, r, 0, Math.PI * 2);
+                                    ctx.strokeStyle = "rgba(255,255,255,0.07)";
+                                    ctx.stroke();
+                                    const v = Math.max(0, Math.min(1, gauge.value / 100));
+                                    if (v > 0.005) {
+                                        ctx.beginPath();
+                                        ctx.arc(c, c, r, -Math.PI / 2, -Math.PI / 2 + v * Math.PI * 2);
+                                        ctx.strokeStyle = gauge.gcolor;
+                                        ctx.stroke();
+                                    }
+                                }
+                                Mono {
+                                    anchors.centerIn: parent
+                                    text: gauge.big
+                                    font.bold: true
+                                    font.pixelSize: 19
+                                }
                             }
                         }
-                        ColumnLayout {
-                            anchors.centerIn: parent
-                            spacing: 0
-                            Mono {
-                                text: gauge.big
-                                font.bold: true
-                                font.pixelSize: 19
-                                Layout.alignment: Qt.AlignHCenter
-                            }
-                            Mono {
-                                text: gauge.sub
-                                color: dash.dim
-                                font.pixelSize: 9
-                                Layout.alignment: Qt.AlignHCenter
-                                visible: text !== ""
-                            }
+                        Mono {
+                            text: gauge.sub
+                            color: dash.dim
+                            font.pixelSize: 10
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            elide: Text.ElideRight
+                            visible: text !== ""
                         }
                     }
                 }
@@ -909,8 +968,19 @@ Item {
                     Gauge {
                         title: "CPU"
                         value: dash.bar?.cpu ?? 0
-                        sub: dash.cpuGhz > 0 ? dash.cpuGhz.toFixed(2) + " GHz" : ""
+                        sub: (dash.cpuGhz > 0 ? dash.cpuGhz.toFixed(2) + " GHz" : "")
+                             + (dash.cpuTemp >= 0
+                                ? (dash.cpuGhz > 0 ? "  ·  " : "") + Math.round(dash.cpuTemp) + "°C"
+                                : "")
                         gcolor: dash.accent
+                    }
+                    Gauge {
+                        title: "GPU"
+                        visible: dash.hasGpu
+                        value: dash.gpuUtil < 0 ? 0 : dash.gpuUtil
+                        sub: dash.gpuMemUsed.toFixed(1) + " / " + dash.gpuMemTot.toFixed(1) + " GB"
+                             + (dash.gpuTemp >= 0 ? "  ·  " + Math.round(dash.gpuTemp) + "°C" : "")
+                        gcolor: dash.good
                     }
                     Gauge {
                         title: "RAM"
@@ -1915,26 +1985,17 @@ Item {
                                 { k: "Super + B",              a: "Browser" },
                                 { k: "Super + E",              a: "Files" },
                                 { k: "Super + Q",              a: "Close window" },
-                                { k: "Super + Shift + Q",      a: "Force-kill window" },
                                 { k: "Super + F",              a: "Fullscreen" },
                                 { k: "Super + H / V",          a: "Split direction" },
                                 { k: "Super + Arrows",         a: "Focus direction" },
-                                { k: "Super + J / Tab",        a: "Focus next / prev" },
                                 { k: "Super + Shift + Arrows", a: "Move window" },
                                 { k: "Super + Ctrl + Arrows",  a: "Resize window" },
-                                { k: "Super + Shift + Space",  a: "Toggle floating" },
-                                { k: "Super + T",              a: "Cycle layout (tile/master/monocle)" },
-                                { k: "Super + C",              a: "Center floating window" },
                                 { k: "Super + 1–9",            a: "Go to workspace" },
                                 { k: "Super + Shift + 1–9",    a: "Move to workspace" },
-                                { k: "Super + . / ,",          a: "Next / previous workspace" },
-                                { k: "Super + `",              a: "Last workspace" },
+                                { k: "Super + Shift + Space",  a: "Toggle floating" },
                                 { k: "Super + O",              a: "Overview" },
                                 { k: "Super + Shift + O",      a: "Window opacity" },
                                 { k: "Super + Shift + B",      a: "Toggle blur" },
-                                { k: "Print",                  a: "Screenshot → file + clipboard" },
-                                { k: "Super + Shift + S",      a: "Screenshot region → clipboard" },
-                                { k: "Super + Shift + R",      a: "Reload config" },
                                 { k: "Super + Escape",         a: "Lock screen" },
                                 { k: "Super + K",              a: "All keybinds" },
                             ]

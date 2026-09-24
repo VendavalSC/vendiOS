@@ -204,6 +204,13 @@ fn chat_stream(
 
     let mut content = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
+    // Streaming gate: stop forwarding tokens to the panel the moment a Hermes
+    // `<tool_call>` tag appears (some models — non-English prompts, quirky
+    // templates — emit tool calls as TEXT instead of ollama's structured field).
+    // `fwd` = bytes already forwarded; `suppress` latches once we hit the tag.
+    const OPEN: &str = "<tool_call>";
+    let mut fwd = 0usize;
+    let mut suppress = false;
     let reader = std::io::BufReader::new(resp.into_reader());
     for line in reader.lines() {
         let line = line?;
@@ -221,7 +228,20 @@ fn chat_stream(
             if let Some(c) = msg.get("content").and_then(|c| c.as_str()) {
                 if !c.is_empty() {
                     content.push_str(c);
-                    on_chunk(c);
+                    if !suppress {
+                        if let Some(idx) = content.find(OPEN) {
+                            // Forward only the prose before the tag, then gate off.
+                            if idx > fwd { on_chunk(&content[fwd..idx]); }
+                            fwd = content.len();
+                            suppress = true;
+                        } else {
+                            // Hold back a tag-length tail so a partial "<tool_call"
+                            // straddling chunks never leaks; flush the rest.
+                            let safe = floor_boundary(&content,
+                                content.len().saturating_sub(OPEN.len()).max(fwd));
+                            if safe > fwd { on_chunk(&content[fwd..safe]); fwd = safe; }
+                        }
+                    }
                 }
             }
         }
@@ -229,7 +249,91 @@ fn chat_stream(
             break;
         }
     }
+    // No tool call seen → flush the held-back tail of prose.
+    if !suppress && fwd < content.len() {
+        on_chunk(&content[fwd..]);
+    }
+    // Parse any text-form `<tool_call>` blocks into structured calls + strip them.
+    tool_calls.extend(extract_text_tool_calls(&mut content));
     Ok((content, tool_calls))
+}
+
+/// Largest char boundary ≤ `i` (so we never slice a UTF-8 codepoint mid-byte).
+fn floor_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() { return s.len(); }
+    while i > 0 && !s.is_char_boundary(i) { i -= 1; }
+    i
+}
+
+/// Some models emit tool calls as TEXT in the content instead of ollama's
+/// structured `tool_calls` — common for non-English prompts / quirky templates.
+/// The shape varies wildly: proper `<tool_call>{…}</tool_call>`, a lone closing
+/// `</tool_call>`, garbage tokens, or just a bare `{"name":..,"arguments":..}`.
+/// So we scan for any balanced-brace JSON object carrying both `name` and
+/// `arguments`, lift each into a real tool-call value, and strip it (plus any
+/// stray tags) from `content` so the brain executes it instead of showing JSON.
+fn extract_text_tool_calls(content: &mut String) -> Vec<Value> {
+    let mut calls = Vec::new();
+    loop {
+        let bytes = content.as_bytes();
+        let mut hit = None;
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'{' {
+                if let Some(end) = match_braces(content, i) {
+                    let slice = &content[i..end];
+                    if slice.contains("\"name\"") && slice.contains("\"arguments\"") {
+                        if let Ok(v) = serde_json::from_str::<Value>(slice) {
+                            if v.get("name").and_then(|n| n.as_str()).is_some() {
+                                hit = Some((i, end, v));
+                                break;
+                            }
+                        }
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        let Some((start, end, v)) = hit else { break };
+        let name = v["name"].as_str().unwrap_or("").to_string();
+        let args = v.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        calls.push(json!({ "function": { "name": name, "arguments": args } }));
+        content.replace_range(start..end, "");
+    }
+    // Drop any orphan Hermes tags left behind.
+    if !calls.is_empty() {
+        *content = content.replace("<tool_call>", "").replace("</tool_call>", "");
+    }
+    calls
+}
+
+/// Index just past the `}` that closes the `{` at `start`, respecting JSON string
+/// literals (so braces inside quoted values don't throw off the depth count).
+/// `None` if unbalanced (a truncated stream). Brace/quote bytes are ASCII, so
+/// byte indexing is safe even with multibyte garbage tokens in the content.
+fn match_braces(s: &str, start: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let (mut depth, mut in_str, mut esc) = (0i32, false, false);
+    let mut i = start;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            if esc { esc = false; }
+            else if c == b'\\' { esc = true; }
+            else if c == b'"' { in_str = false; }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => { depth -= 1; if depth == 0 { return Some(i + 1); } }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Execute a tool call. Returns (text result fed back to the model, optional UI

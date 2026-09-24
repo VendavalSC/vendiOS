@@ -95,13 +95,20 @@ fi
 (( now - ${at:-0} > 60 )) && setsid "$0" refresh-usage </dev/null >/dev/null 2>&1 &
 usage=""; [[ -n "$pct" ]] && usage="${pct}%"
 
-# Working/idle from the hook flag, if fresh.
+# Working/idle from the hook flag — but only while Claude is actually active.
+# A Stop hook that never fired (e.g. a session started before the hooks were
+# wired, or one that was Ctrl-C'd) leaves "working" pinned, so the gadget used
+# to show "Clauding…" for the full 180s. Instead, require the hook to be fresh
+# OR the transcript to have just grown (Claude appends as it works); when the
+# turn truly ends both go quiet and the gadget drops to idle within seconds.
 state=idle; verb=""
 if [[ -r "$HOOK" ]]; then
     hs=$(grep -m1 '^STATE=' "$HOOK" | cut -d= -f2)
     hv=$(grep -m1 '^VERB='  "$HOOK" | cut -d= -f2)
     hat=$(grep -m1 '^AT='   "$HOOK" | cut -d= -f2)
-    if [[ "$hs" == working ]] && (( now - ${hat:-0} <= 180 )); then
+    tmt=$(find "$HOME/.claude/projects" -name '*.jsonl' -printf '%T@\n' 2>/dev/null \
+          | sort -rn | head -1 | cut -d. -f1)
+    if [[ "$hs" == working ]] && (( now - ${hat:-0} <= 20 || now - ${tmt:-0} <= 8 )); then
         state=working; verb=${hv:-Cooking}
     fi
 fi

@@ -47,10 +47,13 @@ ShellRoot {
         target: "launcher"
         function toggle(): void { root.searchToggle("search"); }
         function actions(): void { root.searchToggle("actions"); }
+        function clip(): void { root.searchToggle("clip"); }
     }
     // Dashboard (the expanded center notch) — super+d via vendi-launcher dash.
     signal dashToggle()
     signal dashOpen(int tab)
+    // Now-playing card (compact center notch) — album click, or a keybind.
+    signal mediaToggle()
     // Control center (right notch) — opened by the compositor's top-edge swipe.
     signal controlToggle()
     signal controlGoto(string page)
@@ -58,6 +61,7 @@ ShellRoot {
         target: "dash"
         function toggle(): void { root.dashToggle(); }
         function open(tab: int): void { root.dashOpen(tab); }
+        function media(): void { root.mediaToggle(); }
     }
     // vendi AI — super+a expands the center notch into the Siri panel.
     signal aiToggle()
@@ -129,6 +133,20 @@ ShellRoot {
             root.batteryNotch(pct, charging);
         }
         function batteryDemoOff(): void { root.batDemo = -1; }
+        // Night light changed (vendi night) — pulse the bar pill. temp in Kelvin,
+        // 6500 = off.
+        function night(temp: int): void { root.nightNotch(temp); }
+        // Do Not Disturb: "on" / "off" / "" (toggle). A confirming toast slips
+        // through before the silence (notify() bypasses the gate).
+        function dnd(mode: string): void {
+            root.dnd = (mode === "on") ? true : (mode === "off") ? false : !root.dnd;
+            root.notify(root.dnd ? "Do Not Disturb" : "Notifications on", "");
+        }
+        // Voice typing feedback: "listening" | "transcribing" | "off"/"".
+        function voice(state: string): void {
+            root.voiceState = (state === "off") ? "" : state;
+            if (root.voiceState !== "") voiceGuard.restart();
+        }
     }
 
     // ── theme ────────────────────────────────────────────────────────────────
@@ -163,6 +181,68 @@ ShellRoot {
             if (m) root.accent = "#" + m[1];
         }
         onFileChanged: reload()
+    }
+
+    // Night-light state (the saved colour temperature). Drives the persistent
+    // corner moon — set silently here; the transient pill comes from panel.night.
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/vendi/night"
+        watchChanges: true
+        onLoaded: {
+            const t = parseInt(text().trim());
+            if (!isNaN(t)) { root.nightTemp = t; root.nightOn = t < 6500; }
+        }
+        onFileChanged: reload()
+    }
+
+    // Active keyboard layout (short code, e.g. "US"/"ES"), published live by
+    // vendiwm to $XDG_RUNTIME_DIR/vendiwm-kblayout. Empty = single layout → the
+    // corner indicator hides. Cycle with the cycle-kb-layout keybind.
+    property string kbLayout: ""
+    property bool   kbLayoutInit: false   // skip the OSD on the first read
+    property bool   kbOsd: false
+    Timer { id: kbOsdTimer; interval: 1600; onTriggered: root.kbOsd = false }
+    // Short BCP-47-style tag for the popup; falls back to the raw code.
+    readonly property var kbNames: ({ "US": "en-US", "ES": "es-ES", "GB": "en-GB",
+        "FR": "fr-FR", "DE": "de-DE", "IT": "it-IT", "PT": "pt-PT", "LATAM": "es-419" })
+    function kbLayoutName(code) { return root.kbNames[code] || code; }
+    FileView {
+        path: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/vendiwm-kblayout"
+        watchChanges: true
+        onLoaded: {
+            const v = text().trim();
+            // Only flash the notch on an actual switch, not the initial load.
+            if (root.kbLayoutInit && v !== "" && v !== root.kbLayout) {
+                root.kbOsd = true; kbOsdTimer.restart();
+            }
+            root.kbLayout = v;
+            root.kbLayoutInit = true;
+        }
+        onFileChanged: reload()
+    }
+
+    // Claude Code state — polled (auto-detects a running session; no wiring).
+    Process {
+        id: claudeProc
+        command: ["vendi-claude-status"]
+        property string buf: ""
+        stdout: SplitParser { onRead: line => claudeProc.buf += line + "\n" }
+        onStarted: buf = ""
+        onExited: {
+            const t = claudeProc.buf;
+            if (((/STATE=(.*)/.exec(t) || [])[1] || "off") === "off") {
+                root.claudeActive = false; root.claudeWorking = false; return;
+            }
+            root.claudeModel   = (/MODEL=(.*)/.exec(t)  || [])[1] || "";
+            root.claudeUsage   = (/USAGE=(.*)/.exec(t)  || [])[1] || "";
+            root.claudeVerb    = (/VERB=(.*)/.exec(t)   || [])[1] || "";
+            root.claudeWorking = ((/STATE=(.*)/.exec(t) || [])[1] || "") === "working";
+            root.claudeActive  = true;
+        }
+    }
+    Timer {
+        interval: 3000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: claudeProc.running = true
     }
 
     // ── compositor state ─────────────────────────────────────────────────────
@@ -251,6 +331,30 @@ ShellRoot {
     // ── audio (pipewire, live — no polling) ──────────────────────────────────
     PwObjectTracker { objects: [Pipewire.defaultAudioSink] }
     property var sinkAudio: Pipewire.defaultAudioSink?.audio ?? null
+    // Output / input device lists for the control-center audio picker.
+    property var audioSinks: Pipewire.nodes
+        ? Pipewire.nodes.values.filter(n => n && n.audio && n.isSink && !n.isStream) : []
+    property var audioSources: Pipewire.nodes
+        ? Pipewire.nodes.values.filter(n => n && n.audio && !n.isSink && !n.isStream
+            && n.name && !n.name.includes("monitor")) : []
+    // Keep the listed device nodes bound so their state stays live.
+    PwObjectTracker { objects: root.audioSinks.concat(root.audioSources) }
+    // Mic in use: any app capturing audio (a recording stream exists).
+    property bool micInUse: Pipewire.nodes
+        ? Pipewire.nodes.values.some(n => n && n.properties
+            && n.properties["media.class"] === "Stream/Input/Audio") : false
+    // First connected Bluetooth audio device that reports a battery level.
+    property var btDevice: {
+        if (!UPower.devices) return null;
+        for (const d of UPower.devices.values) {
+            if (!d || !d.isPresent) continue;
+            if (d.type === UPowerDeviceType.Headset
+                || d.type === UPowerDeviceType.Headphones
+                || d.type === UPowerDeviceType.BluetoothGeneric)
+                return d;
+        }
+        return null;
+    }
     // Clamp the displayed volume at 100 — pipewire can report >1.0 if something
     // over-amplified the sink; the bar should never show 130%.
     property int volume: sinkAudio ? Math.min(100, Math.round(sinkAudio.volume * 100)) : -1
@@ -418,22 +522,33 @@ ShellRoot {
 
     // ── network ──────────────────────────────────────────────────────────────
     property string netIcon: "󰤭"
+    property bool   vpnUp: false      // a VPN / WireGuard tunnel is active
     Process {
         id: netProc
         // Note whether wifi / ethernet are actually connected, then pick the icon
         // on exit (wifi wins). A bare ":connected" substring match used to let the
         // "loopback:connected" line overwrite the wifi icon with the ethernet one.
+        // Also flags an active VPN (device type wireguard/tun, or an active vpn
+        // connection) so the corner can show a shield.
         property bool wifiUp: false
         property bool ethUp:  false
-        command: ["sh", "-c", "nmcli -t -f TYPE,STATE d 2>/dev/null | grep -v unmanaged"]
+        property bool vpn:    false
+        command: ["sh", "-c",
+            "nmcli -t -f TYPE,STATE d 2>/dev/null | grep -v unmanaged; " +
+            "nmcli -t -f TYPE,STATE c show --active 2>/dev/null"]
         stdout: SplitParser {
             onRead: line => {
                 if (line.startsWith("wifi:connected")) netProc.wifiUp = true;
                 else if (line.startsWith("ethernet:connected")) netProc.ethUp = true;
+                if (line.startsWith("vpn:") || line.startsWith("wireguard:") || line.startsWith("tun:"))
+                    netProc.vpn = true;
             }
         }
-        onStarted: { wifiUp = false; ethUp = false; }
-        onExited: root.netIcon = netProc.wifiUp ? "󰤨" : netProc.ethUp ? "󰈀" : "󰤭";
+        onStarted: { wifiUp = false; ethUp = false; vpn = false; }
+        onExited: {
+            root.netIcon = netProc.wifiUp ? "󰤨" : netProc.ethUp ? "󰈀" : "󰤭";
+            root.vpnUp = netProc.vpn;
+        }
     }
     Timer {
         interval: 8000; running: true; repeat: true; triggeredOnStart: true
@@ -455,6 +570,30 @@ ShellRoot {
     function pickPlayer() {
         const all = Mpris.players.values;
         return all.find(p => p.playbackState === MprisPlaybackState.Playing) ?? all[0] ?? null;
+    }
+
+    // ── real audio visualizer (cava → 4 bars) ────────────────────────────────
+    // cava streams raw ascii levels (4 values, 0..1000 each) on stdout; we feed
+    // the 4-bar equalizer in the notch. Only runs while music is playing.
+    property var vizLevels: [0, 0, 0, 0]
+    Process {
+        id: cavaProc
+        running: root.musicPlaying
+        command: ["sh", "-c",
+            "printf '[general]\\nframerate=60\\nbars=4\\n[output]\\nmethod=raw\\nraw_target=/dev/stdout\\ndata_format=ascii\\nascii_max_range=1000\\nchannels=mono\\n' > /tmp/vendi-cava.conf; exec cava -p /tmp/vendi-cava.conf"]
+        stdout: SplitParser {
+            onRead: line => {
+                const t = line.trim();
+                if (!t) return;
+                const p = t.split(";");
+                if (p.length < 4) return;
+                root.vizLevels = [
+                    (+p[0] || 0) / 1000, (+p[1] || 0) / 1000,
+                    (+p[2] || 0) / 1000, (+p[3] || 0) / 1000
+                ];
+            }
+        }
+        onRunningChanged: if (!running) root.vizLevels = [0, 0, 0, 0]
     }
 
     // ── weather (wttr.in) ────────────────────────────────────────────────────
@@ -617,6 +756,75 @@ ShellRoot {
         batOsd = true; batOsdTimer.restart();
     }
 
+    // Night-light pill: the left wing bulges into "Night 4000K" / "Night Off"
+    // for a moment when the colour temperature changes (panel.night IPC), then
+    // springs back — same iOS-island feel as the battery pill.
+    property bool nightOsd: false
+    property bool nightOn:  false
+    property int  nightTemp: 6500
+    // Warmth colour for the night pill: warm orange at 2500K → pale at 6500K.
+    readonly property color nightTone: {
+        const f = Math.max(0, Math.min(1, (nightTemp - 2500) / 4000));
+        return Qt.rgba(1.0, 0.55 + 0.32 * f, 0.32 + 0.55 * f, 1.0);
+    }
+    Timer { id: nightOsdTimer; interval: 2600; onTriggered: root.nightOsd = false }
+    function nightNotch(temp) {
+        nightTemp = temp; nightOn = temp < 6500;
+        nightOsd = true; nightOsdTimer.restart();
+    }
+
+    // ── vendi-buds: AirPods (+ generic BT headset) ──────────────────────────
+    // Polls the daemon's state file, same convention as wallpaper/screensaver/
+    // night above — no IPC client needed just to display this.
+    property bool   budsConnected: false
+    property string budsName: ""
+    property string budsKind: "generic"    // "airpods" | "generic"
+    property string budsNoiseMode: ""      // "off"|"anc"|"transparency"|"adaptive"|""
+    property var    budsBattery: ({})      // {left,right,case} -> {level,charging} | null
+    // The single most-actionable number for the transient notch pill: the
+    // lower of the two earbuds (whichever needs charging sooner matters more
+    // than an average). Case battery is shown in the control-center card only.
+    readonly property int budsPct: {
+        const l = budsBattery.left,  lv = l ? l.level : undefined;
+        const r = budsBattery.right, rv = r ? r.level : undefined;
+        if (lv !== undefined && rv !== undefined) return Math.min(lv, rv);
+        if (lv !== undefined) return lv;
+        if (rv !== undefined) return rv;
+        return -1;
+    }
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/vendi/buds-state.json"
+        watchChanges: true
+        onLoaded: root.applyBudsState(JSON.parse(text()))
+        onFileChanged: reload()
+    }
+    function applyBudsState(s) {
+        const wasConnected = root.budsConnected;
+        root.budsConnected  = !!s.connected;
+        root.budsName       = s.name || "";
+        root.budsKind       = s.kind || "generic";
+        root.budsNoiseMode  = s.noise_mode || "";
+        root.budsBattery    = s.battery || {};
+        if (root.budsConnected && !wasConnected) root.budsNotch();
+    }
+    property bool budsOsd: false
+    Timer { id: budsOsdTimer; interval: 4000; onTriggered: root.budsOsd = false }
+    function budsNotch() { budsOsd = true; budsOsdTimer.restart(); }
+
+    // ── voice typing feedback (vendi voice via panel.voice IPC) ─────────────
+    property string voiceState: ""   // "" | "listening" | "transcribing"
+    // Auto-clear if the CLI never sends "off" (e.g. it crashed mid-record).
+    Timer { id: voiceGuard; interval: 120000; onTriggered: root.voiceState = "" }
+
+    // ── Claude Code gadget ──────────────────────────────────────────────────
+    // Fed by vendi-claude-status (Claude Code statusLine + hooks) writing
+    // ~/.config/vendi/claude. Idle: usage · model. Working: the verb pulses.
+    property bool   claudeActive:  false
+    property bool   claudeWorking: false
+    property string claudeModel:   ""
+    property string claudeUsage:   ""
+    property string claudeVerb:    ""
+
     // ── 1s heartbeat: clocks, media progress, active player ─────────────────
     Timer {
         interval: 1000; running: true; repeat: true; triggeredOnStart: true
@@ -654,21 +862,27 @@ ShellRoot {
             property bool searchOpen: false
             property bool aiOpen: false
             property string searchMode: "search"
-            function toggleCenter() { centerOpen = !centerOpen; if (centerOpen) { rightOpen = false; powerOpen = false; searchOpen = false; } }
-            function toggleRight()  { rightOpen = !rightOpen;  if (rightOpen) { centerOpen = false; powerOpen = false; searchOpen = false; } }
-            function togglePower()  { powerOpen = !powerOpen;  if (powerOpen) { centerOpen = false; rightOpen = false; searchOpen = false; } }
-            function openSearch(m)  { searchMode = m; searchOpen = true; centerOpen = false; rightOpen = false; powerOpen = false; }
+            // Dedicated now-playing card (album click) — a compact center morph,
+            // separate from the full dashboard.
+            property bool mediaOpen: false
+            function toggleCenter() { centerOpen = !centerOpen; if (centerOpen) { rightOpen = false; powerOpen = false; searchOpen = false; mediaOpen = false; } }
+            function openDash(t)    { dashItem.goTab(t); if (!centerOpen) toggleCenter(); }
+            function toggleMedia()  { mediaOpen = !mediaOpen; if (mediaOpen) { centerOpen = false; rightOpen = false; powerOpen = false; searchOpen = false; } }
+            function toggleRight()  { rightOpen = !rightOpen;  if (rightOpen) { centerOpen = false; powerOpen = false; searchOpen = false; mediaOpen = false; } }
+            function togglePower()  { powerOpen = !powerOpen;  if (powerOpen) { centerOpen = false; rightOpen = false; searchOpen = false; mediaOpen = false; } }
+            function openSearch(m)  { searchMode = m; searchOpen = true; centerOpen = false; rightOpen = false; powerOpen = false; mediaOpen = false; }
             function closeSearch()  { searchOpen = false; }
             function openAi()  { aiOpen = true; centerOpen = false; rightOpen = false; powerOpen = false; searchOpen = false; }
             function closeAi() { aiOpen = false; }
             // Only ever one panel open at a time — opening any one closes the
             // rest, however it was opened (toggle, keybind, click). Guards only
             // fire on the true edge, so there's no feedback loop.
-            onCenterOpenChanged: if (centerOpen) { rightOpen = false; powerOpen = false; searchOpen = false; aiOpen = false; }
-            onRightOpenChanged:  { if (rightOpen)  { centerOpen = false; powerOpen = false; searchOpen = false; aiOpen = false; } else { control.ccPage = "main"; } }
-            onPowerOpenChanged:  if (powerOpen)  { centerOpen = false; rightOpen = false; searchOpen = false; aiOpen = false; }
-            onSearchOpenChanged: if (searchOpen) { centerOpen = false; rightOpen = false; powerOpen = false; aiOpen = false; }
-            onAiOpenChanged:     if (aiOpen)     { centerOpen = false; rightOpen = false; powerOpen = false; searchOpen = false; }
+            onCenterOpenChanged: if (centerOpen) { rightOpen = false; powerOpen = false; searchOpen = false; mediaOpen = false; aiOpen = false; }
+            onRightOpenChanged:  { if (rightOpen)  { centerOpen = false; powerOpen = false; searchOpen = false; mediaOpen = false; aiOpen = false; } else { control.ccPage = "main"; } }
+            onPowerOpenChanged:  if (powerOpen)  { centerOpen = false; rightOpen = false; searchOpen = false; mediaOpen = false; aiOpen = false; }
+            onSearchOpenChanged: if (searchOpen) { centerOpen = false; rightOpen = false; powerOpen = false; mediaOpen = false; aiOpen = false; }
+            onMediaOpenChanged:  if (mediaOpen)  { centerOpen = false; rightOpen = false; powerOpen = false; searchOpen = false; aiOpen = false; }
+            onAiOpenChanged:     if (aiOpen)     { centerOpen = false; rightOpen = false; powerOpen = false; searchOpen = false; mediaOpen = false; }
 
             // right notch mode: power menu wins, then control center, then
             // toasts, then the volume OSD
@@ -691,11 +905,12 @@ ShellRoot {
             // they shrink a little and stop kissing the island — they don't
             // vanish, and spring back when it collapses. (Scaling on a tiny
             // screen is never going to be roomy; this just adds breathing space.)
-            property bool centerExpanded: centerOpen || searchOpen || aiOpen
+            property bool centerExpanded: centerOpen || searchOpen || mediaOpen || aiOpen
             // Side notches (clock/date/weather/workspaces) retreat for the
-            // dashboard and search, but STAY while the AI panel is open — the AI
-            // notch only takes the center, so the clock can keep showing.
-            property bool sideRetract: centerOpen || searchOpen
+            // dashboard, search and media card, but STAY while the AI panel is
+            // open — the AI notch only takes the center, so the clock keeps
+            // showing as a header above the answer.
+            property bool sideRetract: centerOpen || searchOpen || mediaOpen
             // The side notches retreat the instant the island opens, but on
             // *close* they must regrow first and only then reveal their text /
             // icons — otherwise the content pops in over a half-sprung notch.
@@ -715,6 +930,7 @@ ShellRoot {
                 : leftRow.implicitWidth + root.pad * 2
             property real cw: centerOpen ? Math.min(880, panelWin.width - 120)
                 : searchOpen ? Math.min(640, panelWin.width - 120)
+                : mediaOpen ? Math.min(460, panelWin.width - 120)
                 : aiOpen ? Math.min(660, panelWin.width - 120)
                 : centerRow.implicitWidth + root.pad * 2 + (centerHover.hovered ? 10 : 0)
             property real rw: root.modulesHidden ? 0
@@ -725,13 +941,23 @@ ShellRoot {
                 : rightRow.implicitWidth + root.pad * 2 + (rightHover.hovered ? 10 : 0)
             property real ch: centerOpen ? Math.min(620, panelWin.screen.height - 100)
                 : searchOpen ? Math.min(panelWin.screen.height - 80, root.stripH + searchItem.wantHeight)
+                : mediaOpen ? root.stripH + 150
                 : aiOpen ? Math.min(panelWin.screen.height - 80, root.barH + aiItem.wantHeight)
                 : root.barH
             property real rh: rightMode === "control"
-                    ? (control.ccPage !== "main" ? 470
+                    ? (control.ccPage === "audio" ? control.audioPageH
+                       : control.ccPage !== "main" ? 470
                        : 312 + (root.batVisible ? 30 : 0)
                        + (root.notifHistory.length > 0
-                             ? 30 + Math.min(root.notifHistory.length, 3) * 22 : 0))
+                             ? 30 + Math.min(root.notifHistory.length, 3) * 22 : 0)
+                       // vendi-buds card: bound to its OWN real measured
+                       // height (+12 for the extra ColumnLayout spacing gap
+                       // its insertion adds) rather than a guessed constant —
+                       // a hardcoded number silently drifts out of sync every
+                       // time the card's content changes (font size, image
+                       // size, text wrapping) and starts clipping the
+                       // Wi-Fi/Bluetooth/Audio/Notifs buttons below it again.
+                       + (root.budsConnected ? budsCard.implicitHeight + 12 : 0))
                 : rightMode === "power" ? 224
                 : rightMode === "toast"
                     ? Math.max(root.barH, toastCol.implicitHeight + root.stripH + 26)
@@ -783,18 +1009,20 @@ ShellRoot {
             // dashboard gets a longer leash, and never closes mid-typing)
             HoverHandler { id: panelHover }
             Timer {
-                running: (panelWin.centerOpen || panelWin.rightOpen || panelWin.powerOpen)
+                running: (panelWin.centerOpen || panelWin.rightOpen || panelWin.powerOpen || panelWin.mediaOpen)
                          && !panelHover.hovered && !dashItem.typing
                 interval: panelWin.centerOpen ? 3200 : 1600
                 onTriggered: {
                     panelWin.centerOpen = false;
                     panelWin.rightOpen = false;
                     panelWin.powerOpen = false;
+                    panelWin.mediaOpen = false;
                 }
             }
             Connections {
                 target: root
                 function onDashToggle() { panelWin.toggleCenter(); }
+                function onMediaToggle() { panelWin.toggleMedia(); }
                 function onControlToggle() { if (!panelWin.rightOpen) panelWin.toggleRight(); }
                 function onControlGoto(page) { control.ccPage = page; if (!panelWin.rightOpen) panelWin.toggleRight(); }
                 function onDashOpen(tab) {
@@ -1029,12 +1257,9 @@ ShellRoot {
                 y: root.stripH
                 height: root.barH - root.stripH
                 spacing: 10
-                // Keep the clock/date/weather visible as a header while the AI
-                // panel is open (AI content sits below it); only the dashboard
-                // and search fully hide it.
-                opacity: (panelWin.centerOpen || panelWin.searchOpen) ? 0 : 1
-                // opacity 0 still eats clicks — the dashboard / search live in
-                // this exact strip, so actually drop the row from input
+                opacity: (panelWin.centerOpen || panelWin.searchOpen || panelWin.mediaOpen) ? 0 : 1
+                // opacity 0 still eats clicks — the dashboard / search / media card
+                // live in this exact strip, so actually drop the row from input
                 visible: opacity > 0
                 Behavior on opacity { NumberAnimation { duration: 140 } }
                 property color batTone: root.batOsdCharging ? root.good : root.alert
@@ -1045,6 +1270,49 @@ ShellRoot {
                     text: root.batOsdCharging ? "Charging" : "Low Battery"
                     font.bold: true
                     color: root.fg
+                }
+                // night-light, left wing: the label (the moon + warmth swatch
+                // are on the right wing, so the island stays symmetric).
+                Mono {
+                    visible: root.nightOsd
+                    text: root.nightOn ? ("Night " + root.nightTemp + "K") : "Night Off"
+                    font.bold: true
+                    color: root.fg
+                }
+                // keyboard-layout switch, left wing: a keyboard glyph (the layout
+                // name is on the right wing, flanking the clock).
+                Glyph {
+                    visible: root.kbOsd
+                    text: "󰌌"
+                    font.pixelSize: 15
+                    color: root.accent
+                    Layout.alignment: Qt.AlignVCenter
+                }
+                // voice typing, left wing: pulsing mic + "Speak now" while
+                // listening, "Transcribing…" while it works. Clear feedback so
+                // you know when vendi voice is recording.
+                Row {
+                    visible: root.voiceState !== ""
+                    spacing: 6
+                    Layout.alignment: Qt.AlignVCenter
+                    Glyph {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "󰍬"
+                        font.pixelSize: 14
+                        color: root.voiceState === "listening" ? "#f25c5c" : root.accent
+                        SequentialAnimation on opacity {
+                            running: root.voiceState === "listening"
+                            loops: Animation.Infinite
+                            NumberAnimation { to: 0.3; duration: 550; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0; duration: 550; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Mono {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.voiceState === "transcribing" ? "Transcribing…" : "Speak now"
+                        font.bold: true
+                        color: root.fg
+                    }
                 }
                 // screen-recording pill — blinking red dot + elapsed time;
                 // click it to stop the recording (brainshell-style).
@@ -1081,8 +1349,9 @@ ShellRoot {
                         onClicked: root.stopRecord()
                     }
                 }
-                // media island, left wing: a tiny equalizer breathing with
-                // the music (apple style — art on the other wing).
+                // media island, left wing: a tiny 4-bar equalizer reacting to
+                // the music (real audio levels — art on the other wing). Click it
+                // to expand the now-playing card on the dashboard.
                 Item {
                     visible: root.musicPlaying
                     implicitWidth: 20
@@ -1097,27 +1366,83 @@ ShellRoot {
                                 width: 3
                                 radius: 1.5
                                 color: root.accent
-                                height: 4
                                 anchors.verticalCenter: parent.verticalCenter
-                                SequentialAnimation on height {
-                                    running: root.musicPlaying
-                                    loops: Animation.Infinite
-                                    NumberAnimation { to: 14 - (modelData % 2) * 3; duration: 260 + modelData * 70; easing.type: Easing.InOutSine }
-                                    NumberAnimation { to: 5 + modelData;            duration: 300 + modelData * 50; easing.type: Easing.InOutSine }
-                                    NumberAnimation { to: 12 - modelData;           duration: 240 + modelData * 90; easing.type: Easing.InOutSine }
-                                    NumberAnimation { to: 4;                        duration: 280 + modelData * 60; easing.type: Easing.InOutSine }
-                                }
+                                // real audio-reactive level (0..1) → 4..14 px
+                                height: 4 + Math.max(0, Math.min(1, root.vizLevels[modelData] ?? 0)) * 10
+                                Behavior on height { NumberAnimation { duration: 90; easing.type: Easing.OutQuad } }
                             }
                         }
                     }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: panelWin.toggleMedia()
+                    }
+                }
+                // Claude Code gadget, left wing: session usage % (auto-detected
+                // when Claude Code is running). The model / "Cooking…" verb is on
+                // the right wing, so it flanks the clock like the battery island.
+                Row {
+                    visible: root.claudeActive && !panelWin.centerExpanded
+                    spacing: 8
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                    Image {
+                        anchors.verticalCenter: parent.verticalCenter
+                        source: Qt.resolvedUrl("claude.svg")
+                        sourceSize.width: 11; sourceSize.height: 11
+                        smooth: true
+                    }
+                    Mono {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.claudeUsage
+                        // soft red once the 5h usage hits 90%+ (theme alert, not pure red)
+                        color: ((parseInt(root.claudeUsage) || 0) >= 90) ? root.alert : root.fg
+                        font.pixelSize: 13
+                    }
+                }
+                // vendi-buds connect pill, left wing: a small picture of the
+                // earbuds (AirPods get their own icon; anything else gets a
+                // generic headphones icon — no per-vendor art beyond that).
+                Image {
+                    visible: root.budsOsd
+                    Layout.alignment: Qt.AlignVCenter
+                    source: Qt.resolvedUrl(root.budsKind === "airpods" ? "airpods.png" : "headphones-generic.svg")
+                    fillMode: Image.PreserveAspectFit
+                    sourceSize.width: 16; sourceSize.height: 16
+                    smooth: true
                 }
                 // date · time · weather — the bold clock sits in the middle,
                 // flanked by the dim date on the left and weather on the right.
                 Mono { id: dateT; color: root.dim }
                 Mono { id: clockT; font.bold: true; font.pixelSize: 14 }
-                Sep { visible: root.weather !== "" }
                 Mono { text: root.weather; visible: root.weather !== ""; color: root.dim }
-                // media island, right wing: the album art, rounded.
+                // Claude Code gadget, right wing: the model, or a pulsing
+                // "Cooking…" while Claude is working.
+                Row {
+                    visible: root.claudeActive && !panelWin.centerExpanded
+                    spacing: 5
+                    opacity: panelWin.sideHidden ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                    Rectangle {
+                        visible: root.claudeWorking
+                        width: 6; height: 6; radius: 3; color: root.accent
+                        anchors.verticalCenter: parent.verticalCenter
+                        SequentialAnimation on opacity {
+                            running: root.claudeWorking; loops: Animation.Infinite
+                            NumberAnimation { to: 0.3; duration: 600; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Mono {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.claudeWorking ? ((root.claudeVerb || "Cooking") + "…") : root.claudeModel
+                        color: root.claudeWorking ? root.accent : root.fg
+                        font.bold: root.claudeWorking
+                    }
+                }
+                // media island, right wing: the album art, rounded. Click it to
+                // expand the now-playing card on the dashboard.
                 ClippingRectangle {
                     visible: root.musicPlaying
                     implicitWidth: 20
@@ -1136,6 +1461,11 @@ ShellRoot {
                         text: "󰝚"
                         font.pixelSize: 11
                         color: root.accent
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: panelWin.toggleMedia()
                     }
                 }
                 // recording, right wing: a red waveform so the notch stays
@@ -1210,6 +1540,46 @@ ShellRoot {
                         }
                     }
                 }
+                // vendi-buds connect pill, right wing: just the percentage —
+                // deliberately no battery-icon graphic here (unlike the laptop
+                // battery pill above), per how this was spec'd: the picture is
+                // the left wing's job, this side is only the number.
+                Mono {
+                    visible: root.budsOsd && root.budsPct >= 0
+                    text: root.budsPct + "%"
+                    font.bold: true
+                    color: root.fg
+                }
+                // night-light, right wing: moon glyph + a warmth swatch (warm
+                // orange → pale), symmetric with the temperature label on the left.
+                Row {
+                    visible: root.nightOsd
+                    spacing: 6
+                    Layout.alignment: Qt.AlignVCenter
+                    Mono {
+                        text: "\u{f0594}"   // weather-night (moon)
+                        font.pixelSize: 13
+                        color: root.nightOn ? root.nightTone : root.fg
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 22; height: 12; radius: 3
+                        color: root.nightOn ? root.nightTone : "transparent"
+                        border.width: root.nightOn ? 0 : 1.5
+                        border.color: root.fg
+                        opacity: root.nightOn ? 0.9 : 0.6
+                        Behavior on color { ColorAnimation { duration: 220 } }
+                    }
+                }
+                // keyboard-layout switch, right wing: the layout's friendly name.
+                Mono {
+                    visible: root.kbOsd
+                    text: root.kbLayoutName(root.kbLayout)
+                    font.bold: true
+                    color: root.fg
+                    Layout.alignment: Qt.AlignVCenter
+                }
                 TapHandler { onTapped: panelWin.toggleCenter() }
                 HoverHandler { id: centerHover; cursorShape: Qt.PointingHandCursor }
             }
@@ -1246,6 +1616,128 @@ ShellRoot {
                     target: panelWin
                     function onCenterOpenChanged() {
                         if (panelWin.centerOpen) dashItem.refresh();
+                    }
+                }
+            }
+
+            // ── now-playing card (compact center morph) — opened by clicking the
+            //    album art / visualizer in the collapsed island ─────────────────
+            Item {
+                id: mediaBox
+                x: (panelWin.width - panelWin.cw) / 2
+                y: root.stripH
+                width: panelWin.cw
+                height: panelWin.ch - root.stripH
+                clip: true
+                visible: opacity > 0
+                opacity: panelWin.mediaOpen ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 180 } }
+                TapHandler { onTapped: {} }   // swallow clicks inside
+
+                // album art washes the card faintly behind the content
+                ClippingRectangle {
+                    anchors.fill: parent
+                    radius: 18
+                    color: "transparent"
+                    Image {
+                        anchors.fill: parent
+                        source: root.player?.trackArtUrl ?? ""
+                        fillMode: Image.PreserveAspectCrop
+                        sourceSize.width: 640
+                        asynchronous: true
+                        opacity: 0.14
+                        visible: (root.player?.trackArtUrl ?? "") !== ""
+                    }
+                }
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 16
+                    spacing: 16
+                    ClippingRectangle {
+                        Layout.preferredWidth: 104; Layout.preferredHeight: 104
+                        Layout.alignment: Qt.AlignVCenter
+                        radius: 14
+                        color: Qt.rgba(1, 1, 1, 0.06)
+                        Image {
+                            anchors.fill: parent
+                            source: root.player?.trackArtUrl ?? ""
+                            fillMode: Image.PreserveAspectCrop
+                            sourceSize.width: 220; asynchronous: true
+                            visible: (root.player?.trackArtUrl ?? "") !== ""
+                        }
+                        Glyph {
+                            anchors.centerIn: parent; text: "󰝚"; font.pixelSize: 32
+                            color: root.accent
+                            visible: (root.player?.trackArtUrl ?? "") === ""
+                        }
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 5
+                        Item { Layout.fillHeight: true }
+                        Mono {
+                            Layout.fillWidth: true
+                            text: (root.player?.trackTitle ?? "") || "Nothing playing"
+                            font.bold: true; font.pixelSize: 16; elide: Text.ElideRight
+                            color: root.player ? root.fg : root.dim
+                        }
+                        Mono {
+                            Layout.fillWidth: true
+                            text: root.player?.trackArtist || "music shows up here when it plays"
+                            color: root.dim; font.pixelSize: 12; elide: Text.ElideRight
+                        }
+                        Rectangle {
+                            id: mSeek
+                            Layout.fillWidth: true; Layout.topMargin: 6
+                            height: 5; radius: 2.5
+                            color: Qt.rgba(1, 1, 1, 0.10)
+                            visible: (root.player ?? null) !== null
+                            Rectangle {
+                                width: parent.width * (root.musicProgress ?? 0)
+                                height: parent.height; radius: 2.5; color: root.accent
+                                Behavior on width { NumberAnimation { duration: 500 } }
+                            }
+                            MouseArea {
+                                anchors.fill: parent; anchors.margins: -6
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: m => {
+                                    const p = root.player;
+                                    if (p && p.canSeek && p.length > 0)
+                                        p.position = Math.max(0, Math.min(1,
+                                            (m.x - 6) / mSeek.width)) * p.length;
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.topMargin: 4
+                            spacing: 28
+                            Glyph {
+                                text: "󰒮"; font.pixelSize: 19; color: root.fg
+                                MouseArea { anchors.fill: parent; anchors.margins: -6
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.player?.previous() }
+                            }
+                            Rectangle {
+                                Layout.preferredWidth: 38; Layout.preferredHeight: 38; radius: 19
+                                color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+                                Glyph {
+                                    anchors.centerIn: parent
+                                    text: (root.musicPlaying ?? false) ? "󰏤" : "󰐊"
+                                    color: root.accent; font.pixelSize: 17
+                                }
+                                MouseArea { anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.player?.togglePlaying() }
+                            }
+                            Glyph {
+                                text: "󰒭"; font.pixelSize: 19; color: root.fg
+                                MouseArea { anchors.fill: parent; anchors.margins: -6
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.player?.next() }
+                            }
+                        }
+                        Item { Layout.fillHeight: true }
                     }
                 }
             }
@@ -1359,6 +1851,52 @@ ShellRoot {
                     opacity: panelWin.sideHidden ? 0 : 1
                     Behavior on opacity { NumberAnimation { duration: 150 } }
                     Glyph { text: root.netIcon; font.pixelSize: 14 }
+                    // Keyboard layout — only shown with multiple layouts (e.g. US/ES).
+                    Mono {
+                        visible: root.kbLayout !== ""
+                        text: root.kbLayout
+                        color: root.fg
+                        font.pixelSize: 11
+                        font.bold: true
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    // VPN shield — only present while a tunnel is up.
+                    Glyph {
+                        visible: root.vpnUp
+                        text: "󰦝"
+                        color: root.accent
+                        font.pixelSize: 14
+                    }
+                    // Night-light moon — present while night light is on.
+                    Glyph {
+                        visible: root.nightOn
+                        text: "󰖔"
+                        color: root.nightTone
+                        font.pixelSize: 14
+                    }
+                    // Mic in use — red, while any app is capturing audio.
+                    Glyph {
+                        visible: root.micInUse
+                        text: "󰍬"
+                        color: "#f25c5c"
+                        font.pixelSize: 14
+                    }
+                    // Bluetooth device battery (headset / earbuds…).
+                    Row {
+                        visible: root.btDevice !== null
+                        spacing: 3
+                        Layout.alignment: Qt.AlignVCenter
+                        Glyph {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "󰋋"; font.pixelSize: 14
+                            color: (root.btDevice && root.btDevice.percentage <= 20) ? root.alert : root.fg
+                        }
+                        Mono {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.btDevice ? Math.round(root.btDevice.percentage) + "%" : ""
+                            color: root.dim; font.pixelSize: 11
+                        }
+                    }
                     Glyph {
                         text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
                         color: root.muted ? root.dim : root.fg
@@ -1371,8 +1909,10 @@ ShellRoot {
                         Layout.alignment: Qt.AlignVCenter
                     }
                     Glyph {
-                        text: root.notifHistory.length > 0 ? "󰂚" : "󰂜"
-                        color: root.notifHistory.length > 0 ? root.fg : root.dim
+                        // bell-off while Do Not Disturb is on, else bell / bell-outline.
+                        text: root.dnd ? "󰂛" : (root.notifHistory.length > 0 ? "󰂚" : "󰂜")
+                        color: root.dnd ? root.accent
+                             : (root.notifHistory.length > 0 ? root.fg : root.dim)
                         font.pixelSize: 14
                     }
                     TapHandler { onTapped: panelWin.toggleRight() }
@@ -1616,6 +2156,62 @@ ShellRoot {
                 // Wi-Fi / Bluetooth sub-page slid in over it. Reset to main when
                 // the center closes (see onRightOpenChanged).
                 property string ccPage: "main"
+                // ── radio power state (Wi-Fi / Bluetooth hard on-off) ──────────
+                property bool wifiRadio: true
+                property bool btRadio: true
+                function setWifiRadio(on) {
+                    wifiRadio = on;
+                    Quickshell.execDetached(["nmcli", "radio", "wifi", on ? "on" : "off"]);
+                    if (on) wifiRefresh.restart();
+                }
+                function setBtRadio(on) {
+                    btRadio = on;
+                    Quickshell.execDetached(["bluetoothctl", "power", on ? "on" : "off"]);
+                    if (on) btRefresh.restart();
+                }
+                Process {
+                    id: radioState
+                    running: panelWin.rightOpen
+                    command: ["sh","-c",
+                        "echo wifi=$(nmcli radio wifi 2>/dev/null); " +
+                        "echo bt=$(bluetoothctl show 2>/dev/null | grep -m1 Powered | grep -qi yes && echo enabled || echo disabled)"]
+                    stdout: SplitParser {
+                        onRead: line => {
+                            const t = line.trim();
+                            if (t.startsWith("wifi=")) control.wifiRadio = t.endsWith("enabled");
+                            else if (t.startsWith("bt=")) control.btRadio = t.endsWith("enabled");
+                        }
+                    }
+                }
+                // re-poll radio state whenever the control center opens
+                Connections {
+                    target: panelWin
+                    function onRightOpenChanged() { if (panelWin.rightOpen) radioState.running = true; }
+                }
+                // small pill toggle reused by the Wi-Fi / Bluetooth headers
+                component RadioToggle: Rectangle {
+                    id: rt
+                    property bool on: false
+                    signal toggled(bool value)
+                    width: 38; height: 20; radius: 10
+                    color: on ? root.good : Qt.rgba(1, 1, 1, 0.14)
+                    Behavior on color { ColorAnimation { duration: 160 } }
+                    Rectangle {
+                        width: 16; height: 16; radius: 8; color: "#ffffff"
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: rt.on ? parent.width - width - 2 : 2
+                        Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: rt.toggled(!rt.on)
+                    }
+                }
+                // Audio page sizes to its device lists (no big empty panel).
+                readonly property int audioPageH: Math.min(470,
+                    150 + (Math.max(1, root.audioSinks.length)
+                         + Math.max(1, root.audioSources.length)) * 36)
                 x: panelWin.width - panelWin.rw
                 y: root.stripH
                 width: panelWin.rw
@@ -1800,6 +2396,88 @@ ShellRoot {
                         }
                     }
 
+                    // vendi-buds: appears only while something's connected, between
+                    // the sliders/notifications above and the quick-actions grid
+                    // below — right = picture + name, left = noise-mode buttons
+                    // (AirPods only — protocol's unknown for anything else) and,
+                    // under them, L/R/case battery — centered under the button
+                    // grid, with the device name trailing right after it.
+                    RowLayout {
+                        id: budsCard
+                        Layout.fillWidth: true
+                        visible: root.budsConnected
+                        spacing: 12
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            component NoiseBtn: Rectangle {
+                                property string mode
+                                property string label
+                                readonly property bool active: root.budsNoiseMode === mode
+                                Layout.fillWidth: true
+                                implicitHeight: 28
+                                radius: 8
+                                color: active ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22)
+                                     : nbHover.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                                HoverHandler { id: nbHover; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: Quickshell.execDetached(["vendi-buds", "noise", mode]) }
+                                Mono {
+                                    anchors.centerIn: parent
+                                    text: label
+                                    font.pixelSize: 12
+                                    font.bold: active
+                                    color: active ? root.accent : root.fg
+                                }
+                            }
+                            GridLayout {
+                                Layout.fillWidth: true
+                                rowSpacing: 6
+                                columnSpacing: 6
+                                visible: root.budsKind === "airpods"
+                                columns: 2
+                                NoiseBtn { mode: "off";          label: "Off" }
+                                NoiseBtn { mode: "anc";          label: "ANC" }
+                                NoiseBtn { mode: "transparency"; label: "Transparency" }
+                                NoiseBtn { mode: "adaptive";     label: "Adaptive" }
+                            }
+                            RowLayout {
+                                Layout.alignment: Qt.AlignHCenter
+                                spacing: 10
+                                component BudBat: Mono {
+                                    property var comp
+                                    property string label
+                                    text: label + " " + (comp?.level !== undefined ? comp.level + "%" : "—")
+                                    font.pixelSize: 13
+                                    color: root.dim
+                                }
+                                BudBat { label: "L";    comp: root.budsBattery.left }
+                                BudBat { label: "R";    comp: root.budsBattery.right }
+                                BudBat { label: "Case"; comp: root.budsBattery.case }
+                                Mono {
+                                    Layout.preferredWidth: 90
+                                    text: root.budsName
+                                    font.pixelSize: 10
+                                    color: root.dim
+                                    elide: Text.ElideRight
+                                }
+                            }
+                        }
+                        Image {
+                            Layout.alignment: Qt.AlignVCenter
+                            source: Qt.resolvedUrl(root.budsKind === "airpods" ? "airpods.png" : "headphones-generic.svg")
+                            fillMode: Image.PreserveAspectFit
+                            // airpods.png is pre-cropped to its actual content
+                            // bounds (was a 380x720 canvas with the pods only
+                            // occupying a ~236px-tall strip in the middle —
+                            // rendering that uncropped left huge empty space
+                            // above/below and pushed everything below it down).
+                            sourceSize.height: 74
+                            smooth: true
+                        }
+                    }
+
                     Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(1,1,1,0.08) }
 
                     // quick actions
@@ -1837,8 +2515,8 @@ ShellRoot {
                             run: () => { control.ccPage = "bluetooth"; btScan.rescan(); }
                         }
                         QuickAction {
-                            glyph: root.muted ? "󰝟" : "󰕾"; label: "Audio"
-                            run: () => { control.ccPage = "audio"; audioScan.rescan(); }
+                            glyph: "󰕾"; label: "Audio"
+                            run: () => control.ccPage = "audio"
                         }
                         QuickAction {
                             glyph: root.dnd ? "󰂛" : "󰂚"
@@ -1907,16 +2585,46 @@ ShellRoot {
                         }
                         Mono { text: "Wi-Fi"; font.bold: true; color: root.accent }
                         Item { Layout.fillWidth: true }
-                        Mono {
-                            text: wifiScan.scanning ? "scanning…" : "rescan"
-                            color: root.dim; font.pixelSize: 11
+                        Glyph {
+                            id: wifiRescan
+                            visible: control.wifiRadio
+                            text: "󰑐"   // refresh
+                            color: wifiHov.hovered ? root.fg : root.dim
+                            font.pixelSize: 15
+                            Layout.alignment: Qt.AlignVCenter
+                            HoverHandler { id: wifiHov; cursorShape: Qt.PointingHandCursor }
+                            RotationAnimation on rotation {
+                                running: wifiScan.scanning
+                                loops: Animation.Infinite
+                                from: 0; to: 360; duration: 900
+                                onRunningChanged: if (!running) wifiRescan.rotation = 0
+                            }
                             MouseArea { anchors.fill: parent; anchors.margins: -8
                                 cursorShape: Qt.PointingHandCursor; onClicked: wifiScan.rescan() }
+                        }
+                        RadioToggle {
+                            Layout.alignment: Qt.AlignVCenter
+                            on: control.wifiRadio
+                            onToggled: value => control.setWifiRadio(value)
+                        }
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        visible: !control.wifiRadio
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            spacing: 6
+                            Glyph { text: "󰤭"; font.pixelSize: 26; color: root.dim
+                                    Layout.alignment: Qt.AlignHCenter }
+                            Mono { text: "Wi-Fi is off"; color: root.dim
+                                   Layout.alignment: Qt.AlignHCenter }
                         }
                     }
                     ListView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        visible: control.wifiRadio
                         clip: true
                         spacing: 1
                         model: wifiModel
@@ -2020,16 +2728,46 @@ ShellRoot {
                         }
                         Mono { text: "Bluetooth"; font.bold: true; color: root.accent }
                         Item { Layout.fillWidth: true }
-                        Mono {
-                            text: btScan.scanning ? "scanning…" : "rescan"
-                            color: root.dim; font.pixelSize: 11
+                        Glyph {
+                            id: btRescan
+                            visible: control.btRadio
+                            text: "󰑐"   // refresh
+                            color: btHov.hovered ? root.fg : root.dim
+                            font.pixelSize: 15
+                            Layout.alignment: Qt.AlignVCenter
+                            HoverHandler { id: btHov; cursorShape: Qt.PointingHandCursor }
+                            RotationAnimation on rotation {
+                                running: btScan.scanning
+                                loops: Animation.Infinite
+                                from: 0; to: 360; duration: 900
+                                onRunningChanged: if (!running) btRescan.rotation = 0
+                            }
                             MouseArea { anchors.fill: parent; anchors.margins: -8
                                 cursorShape: Qt.PointingHandCursor; onClicked: btScan.rescan() }
+                        }
+                        RadioToggle {
+                            Layout.alignment: Qt.AlignVCenter
+                            on: control.btRadio
+                            onToggled: value => control.setBtRadio(value)
+                        }
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        visible: !control.btRadio
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            spacing: 6
+                            Glyph { text: "󰂲"; font.pixelSize: 26; color: root.dim
+                                    Layout.alignment: Qt.AlignHCenter }
+                            Mono { text: "Bluetooth is off"; color: root.dim
+                                   Layout.alignment: Qt.AlignHCenter }
                         }
                     }
                     ListView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        visible: control.btRadio
                         clip: true
                         spacing: 1
                         model: btModel
@@ -2158,7 +2896,7 @@ ShellRoot {
                     }
                 }
 
-                // ── Audio sub-page ───────────────────────────────────────────
+                // ── Audio sub-page (output + input device pickers) ───────────
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: 20
@@ -2180,102 +2918,74 @@ ShellRoot {
                                 cursorShape: Qt.PointingHandCursor; onClicked: control.ccPage = "main" }
                         }
                         Mono { text: "Audio"; font.bold: true; color: root.accent }
-                        Item { Layout.fillWidth: true }
+                    }
+
+                    // device row used for both output and input lists.
+                    component AudioRow: Rectangle {
+                        id: arRoot
+                        required property var node
+                        property bool isInput: false
+                        readonly property bool active: isInput
+                            ? node === Pipewire.defaultAudioSource
+                            : node === Pipewire.defaultAudioSink
+                        readonly property string label: node
+                            ? (node.description || node.nickname || node.name || "device") : "device"
+                        Layout.fillWidth: true
+                        height: 34
+                        radius: 8
+                        color: arHov.hovered ? Qt.rgba(1,1,1,0.08) : "transparent"
+                        HoverHandler { id: arHov }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 8; anchors.rightMargin: 8
+                            spacing: 8
+                            Glyph {
+                                text: arRoot.isInput ? "󰍬"
+                                    : /headphone|airpod|bluetooth|buds|wh-|wf-/i.test(arRoot.label) ? "󰋋" : "󰓃"
+                                color: arRoot.active ? root.good : root.fg
+                            }
+                            Mono {
+                                Layout.fillWidth: true
+                                text: arRoot.label
+                                color: arRoot.active ? root.good : root.fg
+                                elide: Text.ElideRight
+                            }
+                            Glyph { visible: arRoot.active; text: "󰄬"; color: root.good }
+                        }
+                        TapHandler {
+                            onTapped: {
+                                if (arRoot.isInput) Pipewire.preferredDefaultAudioSource = arRoot.node;
+                                else Pipewire.preferredDefaultAudioSink = arRoot.node;
+                            }
+                        }
+                    }
+
+                    Mono { text: "OUTPUT"; color: root.dim; font.pixelSize: 10; font.bold: true }
+                    ColumnLayout {
+                        Layout.fillWidth: true; spacing: 2
+                        Repeater {
+                            model: root.audioSinks
+                            delegate: AudioRow { required property var modelData; node: modelData }
+                        }
                         Mono {
-                            text: "rescan"; color: root.dim; font.pixelSize: 11
-                            MouseArea { anchors.fill: parent; anchors.margins: -8
-                                cursorShape: Qt.PointingHandCursor; onClicked: audioScan.rescan() }
+                            visible: root.audioSinks.length === 0
+                            text: "no output devices"; color: root.dim; font.pixelSize: 11
                         }
                     }
 
-                    // master volume of the default sink (live pipewire node)
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 10
-                        Glyph {
-                            text: root.muted ? "󰝟" : root.volume > 60 ? "󰕾" : root.volume > 20 ? "󰖀" : "󰕿"
-                            color: root.muted ? root.dim : root.fg
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { if (root.sinkAudio) root.sinkAudio.muted = !root.sinkAudio.muted; } }
+                    Mono { text: "INPUT"; color: root.dim; font.pixelSize: 10; font.bold: true; Layout.topMargin: 6 }
+                    ColumnLayout {
+                        Layout.fillWidth: true; spacing: 2
+                        Repeater {
+                            model: root.audioSources
+                            delegate: AudioRow { required property var modelData; node: modelData; isInput: true }
                         }
-                        Rectangle {
-                            id: aVolTrack
-                            Layout.fillWidth: true
-                            height: 8; radius: 4
-                            color: Qt.rgba(1, 1, 1, 0.10)
-                            Rectangle {
-                                width: Math.max(8, parent.width * Math.max(0, root.volume) / 100)
-                                height: parent.height; radius: 4
-                                color: root.muted ? root.dim : root.accent
-                                Behavior on width { NumberAnimation { duration: 80 } }
-                            }
-                            MouseArea {
-                                anchors.fill: parent; anchors.margins: -6
-                                cursorShape: Qt.PointingHandCursor
-                                function setVol(mx) { root.setVolume(Math.round(
-                                    Math.max(0, Math.min(1, mx / aVolTrack.width)) * 100)); }
-                                onPressed: m => setVol(m.x - 6)
-                                onPositionChanged: m => { if (pressed) setVol(m.x - 6) }
-                            }
-                        }
-                        Mono { text: (root.volume < 0 ? "—" : root.volume + "%"); Layout.preferredWidth: 38 }
-                    }
-
-                    Mono { text: "Output"; color: root.dim; font.pixelSize: 11 }
-                    ListView {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: Math.min(contentHeight, 120)
-                        clip: true; spacing: 1
-                        model: sinkModel
-                        delegate: Rectangle {
-                            required property var modelData
-                            width: ListView.view ? ListView.view.width : 0
-                            height: 34; radius: 8
-                            color: oHov.hovered ? Qt.rgba(1,1,1,0.08) : "transparent"
-                            HoverHandler { id: oHov }
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8; anchors.rightMargin: 8
-                                spacing: 8
-                                Glyph { text: "󰓃"; color: modelData.active ? root.good : root.fg }
-                                Mono {
-                                    Layout.fillWidth: true
-                                    text: modelData.desc; elide: Text.ElideRight
-                                    color: modelData.active ? root.good : root.fg
-                                }
-                                Glyph { visible: modelData.active; text: "󰄬"; color: root.good }
-                            }
-                            TapHandler { onTapped: if (!modelData.active) control.setSink(modelData.name) }
+                        Mono {
+                            visible: root.audioSources.length === 0
+                            text: "no input devices"; color: root.dim; font.pixelSize: 11
                         }
                     }
-
-                    Mono { text: "Input"; color: root.dim; font.pixelSize: 11 }
-                    ListView {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        clip: true; spacing: 1
-                        model: sourceModel
-                        delegate: Rectangle {
-                            required property var modelData
-                            width: ListView.view ? ListView.view.width : 0
-                            height: 34; radius: 8
-                            color: iHov.hovered ? Qt.rgba(1,1,1,0.08) : "transparent"
-                            HoverHandler { id: iHov }
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8; anchors.rightMargin: 8
-                                spacing: 8
-                                Glyph { text: "󰍬"; color: modelData.active ? root.good : root.fg }
-                                Mono {
-                                    Layout.fillWidth: true
-                                    text: modelData.desc; elide: Text.ElideRight
-                                    color: modelData.active ? root.good : root.fg
-                                }
-                                Glyph { visible: modelData.active; text: "󰄬"; color: root.good }
-                            }
-                            TapHandler { onTapped: if (!modelData.active) control.setSource(modelData.name) }
-                        }
-                    }
+                    Item { Layout.fillHeight: true }
                 }
 
                 // ── backing scanners (nmcli / bluetoothctl) ──────────────────
@@ -2284,16 +2994,26 @@ ShellRoot {
                     id: wifiScan
                     property bool scanning: false
                     property var seen: ({})
-                    function rescan() { scanning = true; running = true; }
+                    property var acc: []
+                    function rescan() { if (scanning) return; scanning = true; running = true; }
                     function connectTo(ssid, pw) {
                         Quickshell.execDetached(pw.length > 0
                             ? ["nmcli","dev","wifi","connect",ssid,"password",pw]
                             : ["nmcli","dev","wifi","connect",ssid]);
                         wifiRefresh.restart();
                     }
-                    command: ["sh","-c","nmcli dev wifi rescan 2>/dev/null; nmcli -t -f IN-USE,SIGNAL,SECURITY,SSID dev wifi list 2>/dev/null"]
-                    onStarted: { wifiModel.clear(); seen = ({}); }
-                    onExited: scanning = false
+                    // NM's rescan is async (~2s); sleep so the list call returns
+                    // the fresh results instead of an empty cache. radio on first.
+                    command: ["sh","-c",
+                        "nmcli radio wifi on 2>/dev/null; nmcli dev wifi rescan 2>/dev/null; sleep 2; " +
+                        "nmcli -t -f IN-USE,SIGNAL,SECURITY,SSID dev wifi list 2>/dev/null"]
+                    // accumulate, then swap into the model on exit — no empty flicker
+                    onStarted: { acc = []; seen = ({}); }
+                    onExited: {
+                        wifiModel.clear();
+                        for (const n of acc) wifiModel.append(n);
+                        scanning = false;
+                    }
                     stdout: SplitParser {
                         onRead: line => {
                             if (!line) return;
@@ -2303,7 +3023,7 @@ ShellRoot {
                             if (!ssid || wifiScan.seen[ssid]) return;
                             wifiScan.seen[ssid] = true;
                             const sec = p[2];
-                            wifiModel.append({
+                            wifiScan.acc.push({
                                 ssid: ssid,
                                 signal: parseInt(p[1]) || 0,
                                 secure: sec.length > 0 && sec !== "--",
@@ -2313,6 +3033,13 @@ ShellRoot {
                     }
                 }
                 Timer { id: wifiRefresh; interval: 2500; onTriggered: wifiScan.rescan() }
+                // Auto-rescan every 10s while the Wi-Fi page is open and radio on.
+                Timer {
+                    interval: 10000; repeat: true
+                    running: panelWin.rightOpen && control.ccPage === "wifi" && control.wifiRadio
+                    triggeredOnStart: true
+                    onTriggered: wifiScan.rescan()
+                }
 
                 ListModel { id: btModel }
                 // Shared: list known devices with a connected marker, no scan.
@@ -2321,28 +3048,34 @@ ShellRoot {
                     "bluetoothctl devices 2>/dev/null | while read -r _ mac name; do " +
                     "m=' '; grep -qxF \"$mac\" <<<\"$conn\" && m='*'; " +
                     "printf '%s\\t%s\\t%s\\n' \"$m\" \"$mac\" \"$name\"; done"
-                // Append a "<mark>\t<mac>\t<name>" line, skipping unnamed devices
-                // (bluetoothctl shows the MAC as the name for those — just noise).
+                // Accumulate "<mark>\t<mac>\t<name>" lines, skipping unnamed
+                // devices (bluetoothctl shows the MAC as the name for those).
+                property var btAcc: []
                 function btAppend(line) {
                     if (!line) return;
                     const p = line.split("\t");
                     if (p.length < 3) return;
                     const name = p[2];
                     if (/^[0-9A-Fa-f:\-]{11,}$/.test(name)) return; // bare MAC, no real name
-                    btModel.append({ connected: p[0] === "*", mac: p[1], name: name });
+                    if (control.btAcc.some(d => d.mac === p[1])) return;
+                    control.btAcc.push({ connected: p[0] === "*", mac: p[1], name: name });
+                }
+                function btSwap() {
+                    btModel.clear();
+                    for (const d of control.btAcc) btModel.append(d);
                 }
                 Process {
                     id: btScan
                     property bool scanning: false
                     // Scan (slow) only on open / the rescan button.
-                    function rescan() { scanning = true; running = true; }
+                    function rescan() { if (scanning) return; scanning = true; running = true; }
                     function toggle(mac, connected) {
                         Quickshell.execDetached(["bluetoothctl", connected ? "disconnect" : "connect", mac]);
                         btRefresh.restart(); // light relist to update the marker — no rescan
                     }
                     command: ["sh","-c","bluetoothctl power on >/dev/null 2>&1; bluetoothctl --timeout 5 scan on >/dev/null 2>&1; " + control.btListCmd]
-                    onStarted: btModel.clear()
-                    onExited: scanning = false
+                    onStarted: control.btAcc = []
+                    onExited: { control.btSwap(); scanning = false; }
                     stdout: SplitParser { onRead: line => control.btAppend(line) }
                 }
                 // Lightweight relist (no scan) — used after connect/disconnect so
@@ -2350,53 +3083,18 @@ ShellRoot {
                 Process {
                     id: btRelist
                     command: ["sh","-c", control.btListCmd]
-                    onStarted: btModel.clear()
+                    onStarted: control.btAcc = []
+                    onExited: control.btSwap()
                     stdout: SplitParser { onRead: line => control.btAppend(line) }
                 }
                 Timer { id: btRefresh; interval: 1500; onTriggered: btRelist.running = true }
-
-                // ── audio devices (pactl) ────────────────────────────────────
-                ListModel { id: sinkModel }
-                ListModel { id: sourceModel }
-                // Parse "O|<mark>|<name>|<desc>" (output) / "I|…" (input) lines.
-                // Skip monitor sources (they're loopbacks, not real inputs).
-                function audioAppend(line) {
-                    if (!line) return;
-                    const p = line.split("|");
-                    if (p.length < 4) return;
-                    const name = p[2];
-                    const item = { active: p[1] === "*", name: name, desc: p[3] || name };
-                    if (p[0] === "O") sinkModel.append(item);
-                    else if (p[0] === "I" && !name.endsWith(".monitor")) sourceModel.append(item);
+                // Auto-rescan every 10s while the Bluetooth page is open and radio on.
+                Timer {
+                    interval: 10000; repeat: true
+                    running: panelWin.rightOpen && control.ccPage === "bluetooth" && control.btRadio
+                    triggeredOnStart: true
+                    onTriggered: btScan.rescan()
                 }
-                // Switch the default sink AND move already-playing streams to it,
-                // so changing output actually redirects current audio.
-                function setSink(name) {
-                    Quickshell.execDetached(["sh","-c",
-                        "pactl set-default-sink '" + name + "'; " +
-                        "pactl list short sink-inputs | while read i _; do " +
-                        "pactl move-sink-input \"$i\" '" + name + "' 2>/dev/null; done"]);
-                    audioRefresh.restart();
-                }
-                function setSource(name) {
-                    Quickshell.execDetached(["sh","-c",
-                        "pactl set-default-source '" + name + "'; " +
-                        "pactl list short source-outputs | while read i _; do " +
-                        "pactl move-source-output \"$i\" '" + name + "' 2>/dev/null; done"]);
-                    audioRefresh.restart();
-                }
-                Process {
-                    id: audioScan
-                    function rescan() { running = true; }
-                    command: ["sh","-c",
-                        "ds=$(pactl get-default-sink 2>/dev/null); " +
-                        "dr=$(pactl get-default-source 2>/dev/null); " +
-                        "pactl list sinks 2>/dev/null | awk -v d=\"$ds\" '/^Sink #/{if(n)print \"O|\"(n==d?\"*\":\"-\")\"|\"n\"|\"desc;n=\"\";desc=\"\"} /^[ \\t]*Name:/{n=$2} /^[ \\t]*Description:/{$1=\"\";sub(/^[ \\t]+/,\"\");desc=$0} END{if(n)print \"O|\"(n==d?\"*\":\"-\")\"|\"n\"|\"desc}'; " +
-                        "pactl list sources 2>/dev/null | awk -v d=\"$dr\" '/^Source #/{if(n)print \"I|\"(n==d?\"*\":\"-\")\"|\"n\"|\"desc;n=\"\";desc=\"\"} /^[ \\t]*Name:/{n=$2} /^[ \\t]*Description:/{$1=\"\";sub(/^[ \\t]+/,\"\");desc=$0} END{if(n)print \"I|\"(n==d?\"*\":\"-\")\"|\"n\"|\"desc}'"]
-                    onStarted: { sinkModel.clear(); sourceModel.clear(); }
-                    stdout: SplitParser { onRead: line => control.audioAppend(line) }
-                }
-                Timer { id: audioRefresh; interval: 400; onTriggered: audioScan.rescan() }
             }
             }
         }
@@ -2412,5 +3110,4 @@ ShellRoot {
             bar: root
         }
     }
-
 }
