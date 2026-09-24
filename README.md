@@ -6,7 +6,7 @@ vendiOS is an Arch-based Linux distribution with a custom TUI installer, Catppuc
 Mocha theming throughout, and Limine for boot. The goal is a fast, opinionated
 desktop that starts working the moment you finish installing it.
 
-**Status:** Early development. Not yet recommended for daily-driver use.
+**Status:** Public beta (v0.1.0-beta). [Download the ISO](https://github.com/VendavalSC/vendiOS/releases/latest) — expect rough edges.
 
 ---
 
@@ -18,7 +18,7 @@ desktop that starts working the moment you finish installing it.
   FAT32 `/boot` partition (the only filesystem Limine reads on BIOS).
 - **btrfs by default** — subvolume layout (`@`, `@home`, `@var`, `@snapshots`)
   with zstd compression. ext4 also supported.
-- **Hyprland desktop** — Wayland-only, configured to launch on first login.
+- **vendiWM** — our own Rust/smithay Wayland compositor: liquid tiling, tab groups, animations. Paired with the quickshell-based vendiBar Pro.
 - **`vendi` CLI** — one command for updates, snapshots, clean-up, and info.
 
 ## Repository layout

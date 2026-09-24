@@ -209,7 +209,7 @@
         vendiOS is its own thing, end to end.
       </p>
       <div class="cta-row">
-        <a class="btn primary" href="#install">Install vendiOS</a>
+        <a class="btn primary" href="https://github.com/VendavalSC/vendiOS/releases/latest">Download beta</a>
         <a class="btn ghost" href="https://github.com/VendavalSC/vendiOS">Source on GitHub</a>
       </div>
       <div class="status-pill"><b>●</b> actively developed — daily-driven by its own maintainer</div>
@@ -242,7 +242,12 @@
         <h2>Installing vendiOS</h2>
         <p class="sub">Boot the ISO, run <code>vendi-install</code>, answer a handful of screens.</p>
 
-        <h3>Build the ISO</h3>
+        <h3>Download</h3>
+        <p><strong>v0.1.0-beta</strong> — offline ISO (1.9&nbsp;GB, installs with no internet, AMD/Intel/NVIDIA drivers bundled).</p>
+        <p><a class="btn primary" href="https://github.com/VendavalSC/vendiOS/releases/latest">Download the ISO</a></p>
+        <p>Check it: <code>sha256sum -c vendios-2026.09.24-x86_64.iso.sha256</code>. Disable Secure Boot in your firmware before booting (not supported yet).</p>
+
+        <h3>Or build the ISO yourself</h3>
         <pre><code>sudo pacman -S archiso limine xorriso
 sudo bash build.sh --clean
 
