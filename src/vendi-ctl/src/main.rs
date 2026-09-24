@@ -44,6 +44,7 @@ fn main() -> Result<()> {
         "palette"          => palette_cmd(&args[1..]),
         "output"           => output_cmd(&args[1..]),
         "night"            => night_cmd(&args[1..]),
+        "action"           => action_cmd(&args[1..]),
         cmd => { eprintln!("unknown command: {cmd}\n"); print_usage(); std::process::exit(2); }
     }
 }
@@ -74,6 +75,8 @@ Usage:
   vendi-ctl output mode <name> <WxH[@hz]>   set resolution / refresh
   vendi-ctl output reset [name]         clear arrangement (all, or one monitor)
   vendi-ctl night <kelvin>             set screen colour temperature (6500=off)
+  vendi-ctl action <action...>          run any keybind action (group, pin,
+                                        stage-pull, workspace 3, …)
   vendi-ctl reload                      re-read vendiwm.kdl live (theme, binds)
 
 Reads $VENDIWM_SOCK or falls back to $XDG_RUNTIME_DIR/vendiwm-1.ipc.sock."#);
@@ -152,7 +155,11 @@ fn ipc_call(request: Value) -> Result<()> {
         for w in ws {
             let id      = w.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
             let focused = w.get("focused").and_then(|v| v.as_bool()).unwrap_or(false);
-            println!("{}{}", if focused { "* " } else { "  " }, id);
+            let output  = w.get("output").and_then(|v| v.as_str()).unwrap_or("");
+            let visible = w.get("visible").and_then(|v| v.as_bool()).unwrap_or(false);
+            // "* 1  eDP-1  shown" — the leading "* N" stays parseable by the bar
+            println!("{}{}  {}{}", if focused { "* " } else { "  " }, id, output,
+                     if visible { "  shown" } else { "" });
         }
         return Ok(());
     }
@@ -319,6 +326,11 @@ fn night_cmd(args: &[String]) -> Result<()> {
     let temp: u16 = args.first().ok_or_else(|| anyhow::anyhow!("night: missing temperature (Kelvin)"))?
         .parse().context("night: temperature must be a number in Kelvin (e.g. 4000, 6500=off)")?;
     ipc_call(json!({"cmd": "night", "temp": temp}))
+}
+
+fn action_cmd(args: &[String]) -> Result<()> {
+    if args.is_empty() { bail!("action: missing action (e.g. `vendi-ctl action group`)"); }
+    ipc_call(json!({"cmd": "action", "action": args.join(" ")}))
 }
 
 fn move_cmd(args: &[String]) -> Result<()> {

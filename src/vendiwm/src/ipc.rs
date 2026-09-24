@@ -65,6 +65,10 @@ pub enum Request {
     /// Night light: set the screen colour temperature in Kelvin via the CRTC
     /// gamma LUT. 6500 = neutral (off); lower = warmer. udev backend only.
     Night         { temp: u16 },
+    /// Run any keybind action by its config name, e.g. {"cmd":"action",
+    /// "action":"group"} or "workspace 3" — scripts and the bar get every
+    /// action a bind can do.
+    Action        { action: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,7 +82,7 @@ impl From<SplitDir> for Direction {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum EventKind { Window, Workspace, Overview }
+pub enum EventKind { Window, Workspace, Overview, Phone }
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -116,6 +120,10 @@ pub struct WindowInfo {
     pub focused:   bool,
     pub workspace: u32,
     pub floating:  bool,
+    /// [x, y, w, h] on screen (logical); empty when not on screen.
+    pub rect:      Vec<i32>,
+    /// A phone mirror window (the `phone` window rule).
+    pub phone:     bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -124,6 +132,10 @@ pub struct WorkspaceInfo {
     pub focused: bool,
     /// Number of windows living on this workspace.
     pub windows: usize,
+    /// Monitor (connector name) the workspace lives on.
+    pub output:  String,
+    /// On screen on its monitor right now (each monitor shows one).
+    pub visible: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -137,6 +149,13 @@ pub enum Event {
     WorkspacesChanged { active: u32, workspaces: Vec<WorkspaceInfo> },
     /// Overview (exposé) opened/closed — drives the bar's overview chrome.
     Overview          { active: bool },
+    /// Phone control (vendi-phone-hid): a press/move/release on the phone
+    /// mirror, x/y normalised 0..1 over the phone screen. button: 1 left, 2 right.
+    PhonePointer      { phase: String, x: f64, y: f64, button: u32 },
+    /// Wheel over the phone mirror (in wheel notches, + = down/right).
+    PhoneScroll       { dx: f64, dy: f64 },
+    /// A key typed while the phone mirror has focus (evdev code).
+    PhoneKey          { code: u32, pressed: bool },
 }
 
 // ── server ────────────────────────────────────────────────────────────────────
@@ -221,6 +240,10 @@ impl Server {
             if drop_client { self.clients.remove(idx); } else { idx += 1; }
         }
 
+        // Phone control is on exactly while something (vendi-phone-hid) is
+        // subscribed to phone events — it switches off if that dies.
+        state.chrome.phone_control = self.clients.iter().any(|c| c.subs.contains(&EventKind::Phone));
+
         // 3. Push queued events to subscribed clients.
         if !self.outbox.is_empty() {
             let events: Vec<Event> = self.outbox.drain(..).collect();
@@ -236,6 +259,9 @@ impl Server {
                         | Event::WindowTitle { .. } => EventKind::Window,
                         Event::WorkspacesChanged { .. } => EventKind::Workspace,
                         Event::Overview { .. } => EventKind::Overview,
+                        Event::PhonePointer { .. }
+                        | Event::PhoneScroll { .. }
+                        | Event::PhoneKey { .. } => EventKind::Phone,
                     };
                     if !subs.contains(&kind) { continue; }
                     let mut bytes = serde_json::to_vec(ev).unwrap_or_default();
@@ -312,7 +338,16 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
                           && state.workspaces.active_ref().floating.iter().any(|(fw, _)| fw == &w))
                     .unwrap_or(false);
                 let focused = focused_win.as_ref() == Some(&w);
-                out.push(WindowInfo { id, title, focused, workspace, floating });
+                // on-screen rect: a floating window's own rect (a phone mirror
+                // is drawn fitted to it), else where it's mapped; [] if hidden
+                let rect = state.workspaces.iter().flat_map(|ws| ws.floating.iter())
+                    .find(|(x, _)| x == &w).map(|(_, r)| *r)
+                    .or_else(|| state.space.element_geometry(&w))
+                    .filter(|_| state.space.element_geometry(&w).is_some())
+                    .map(|r| vec![r.loc.x, r.loc.y, r.size.w, r.size.h])
+                    .unwrap_or_default();
+                let phone = state.is_phone(&w);
+                out.push(WindowInfo { id, title, focused, workspace, floating, rect, phone });
             }
             Response::Windows { windows: out }
         }
@@ -320,7 +355,7 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
             let (active, list) = state.workspaces.snapshot();
             Response::Workspaces {
                 workspaces: list.into_iter()
-                    .map(|(id, windows)| WorkspaceInfo { id, focused: id == active, windows })
+                    .map(|(id, windows, output, visible)| WorkspaceInfo { id, focused: id == active, windows, output, visible })
                     .collect(),
             }
         }
@@ -390,6 +425,13 @@ fn handle_line(client_idx: usize, line: &[u8], clients: &mut [ClientConn], state
                 }
             }
         }
+        Request::Action { action } => match crate::config::parse_action(&action) {
+            Ok(a) => {
+                if state.run_action(a) { state.quit_requested = true; }
+                Response::Ok { ok: true }
+            }
+            Err(e) => Response::Error { error: format!("{e:#}") },
+        },
         Request::Night { temp } => {
             #[cfg(feature = "udev")]
             {

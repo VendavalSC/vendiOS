@@ -54,16 +54,35 @@ binds {
     bind "super+ctrl+right"    "resize-right"
     bind "super+ctrl+up"       "resize-up"
     bind "super+ctrl+down"     "resize-down"
+    // monitors: super+arrow / super+shift+arrow also cross over at a screen edge
+    bind "super+alt+left"        "focus-output-left"
+    bind "super+alt+right"       "focus-output-right"
+    bind "super+alt+shift+left"  "move-to-output-left"
+    bind "super+alt+shift+right" "move-to-output-right"
     bind "super+h"             "split-horizontal"
-    bind "super+v"             "split-vertical"
+    bind "super+ctrl+v"        "split-vertical"
     bind "super+f"             "fullscreen"
     bind "super+t"             "cycle-layout"
     bind "super+o"             "overview"
     bind "super+shift+o"       "cycle-opacity"
     bind "super+shift+b"       "toggle-blur"
     bind "super+shift+space"   "toggle-floating"
+    bind "super+i"             "cycle-kb-layout"
     bind "super+c"             "center-floating"
-    bind "super+shift+r"       "reload-config"
+    // stage shelf: park the focused window as a live card on the left (click a
+    // card to swap it on stage, shift+click to add it, drag it out anywhere);
+    // super+minus shows/hides the shelf, super+equal swaps the top card in
+    bind "super+shift+minus"   "move-to-scratchpad"
+    bind "super+minus"         "toggle-scratchpad"
+    bind "super+equal"         "stage-pull"
+    // pin: float the focused window picture-in-picture, on every desk, on top
+    bind "super+p"             "pin"
+    // tabbed groups: super+g groups w/ the next window (or cycles tabs), shift
+    // ungroups. With the mouse: drop a window on a tile's middle or its tab
+    // strip to group it; click / scroll the strip to switch; drag a tab out
+    bind "super+g"             "group"
+    bind "super+shift+g"       "ungroup"
+    bind "super+ctrl+r"        "reload-config"
     bind "super+shift+escape"  "quit"
 
     // workspace navigation
@@ -125,7 +144,8 @@ idle {
 }
 
 // Keyboard layout + key repeat. layout accepts comma lists ("us,es") and
-// options can pair them with a toggle ("grp:alt_shift_toggle").
+// options can pair them with a toggle ("grp:alt_shift_toggle"). With more than
+// one layout the bar shows a US/ES indicator; super+i (cycle-kb-layout) switches.
 input {
     keyboard-layout "us"
     repeat-delay 200
@@ -138,20 +158,38 @@ input {
     // Pointer / touchpad. Touchpads get tap-to-click + natural scroll by
     // default; uncomment to change. accel-speed is -1.0 (slow) … 1.0 (fast).
     // focus-follows-mouse moves keyboard focus to the window under the pointer.
-    // natural-scroll #true
-    // tap-to-click #true
+    // natural-scroll true
+    // tap-to-click true
     // accel-speed 0.0
-    // disable-while-typing #true
-    // focus-follows-mouse #false
+    // disable-while-typing true
+    // focus-follows-mouse false
 }
 
-// Window rules — match by app-id (exact, case-insensitive) and/or title
-// (substring). Actions: workspace=N, float=#true/#false, opacity=0..1,
-// fullscreen=#true.
+// Look & feel. smart-gaps (off by default) drops the outer margin + tile gap
+// when a desk holds a single tiled window so it fills the screen edge-to-edge.
+// theme {
+//     gap 10
+//     margin 14
+//     radius 12
+//     blur true
+//     smart-gaps false
+// }
+
+// Window rules — match by app-id (exact, case-insensitive), title
+// (substring) and/or process (the client's executable name). Actions:
+// workspace=N, float=true/false, opacity=0..1, fullscreen=true,
+// phone=true (a borderless, phone-shaped floating mirror window).
+//
+// Built in: phone mirroring (`vendi phone`) — the iPhone AirPlay stream and
+// Android's scrcpy get the phone-shaped window.
+rules {
+    rule process="uxplay" phone=true
+    rule process="scrcpy" phone=true
+}
 // rules {
 //     rule app-id="firefox" workspace=2
-//     rule app-id="pavucontrol" float=#true
-//     rule title="Picture-in-Picture" float=#true opacity=0.95
+//     rule app-id="pavucontrol" float=true
+//     rule title="Picture-in-Picture" float=true opacity=0.95
 // }
 "#;
 
@@ -168,7 +206,8 @@ pub struct Document {
     #[knus(child)]
     pub input: Option<InputBlock>,
     /// Per-monitor arrangement. Each `output "NAME" { … }` node sets scale /
-    /// position / mode for the matching connector (e.g. "eDP-1", "DP-2").
+    /// position / mode / vrr for the matching connector (e.g. "eDP-1", "DP-2"):
+    ///   output "DP-1" { mode "2560x1440@165"; vrr "fullscreen" }
     #[knus(children(name = "output"))]
     pub outputs: Vec<OutputEntry>,
     /// Window rules: `rules { rule app-id="…" … }`.
@@ -185,8 +224,8 @@ pub struct RulesBlock {
 /// One window rule. Matchers (`app-id`, `title`) select windows; the remaining
 /// properties are what to do with a match. Example:
 ///   rule app-id="firefox" workspace=2
-///   rule app-id="pavucontrol" float=#true
-///   rule title="Picture-in-Picture" float=#true opacity=0.95
+///   rule app-id="pavucontrol" float=true
+///   rule title="Picture-in-Picture" float=true opacity=0.95
 #[derive(knus::Decode, Debug)]
 pub struct RuleEntry {
     /// Exact app_id / X11 class (case-insensitive).
@@ -207,6 +246,14 @@ pub struct RuleEntry {
     /// Open fullscreen.
     #[knus(property)]
     pub fullscreen: Option<bool>,
+    /// Executable name of the client (e.g. "uxplay") — for windows that set
+    /// no useful app-id.
+    #[knus(property)]
+    pub process: Option<String>,
+    /// Phone mirror window: floating, borderless, sized to the stream's exact
+    /// aspect with phone-rounded corners and a soft shadow.
+    #[knus(property)]
+    pub phone: Option<bool>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -225,6 +272,10 @@ pub struct OutputEntry {
     /// Resolution + optional refresh, "2560x1440" or "2560x1440@165".
     #[knus(child, unwrap(argument))]
     pub mode: Option<String>,
+    /// Variable refresh rate: "fullscreen" (default — only while a fullscreen
+    /// window, e.g. a game, covers this monitor), "on", or "off".
+    #[knus(child, unwrap(argument))]
+    pub vrr: Option<String>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -318,6 +369,10 @@ pub struct ThemeBlock {
     /// window; the `cycle-opacity` bind overrides it per-window at runtime.
     #[knus(child, unwrap(argument))]
     pub opacity:    Option<f64>,
+    /// Drop the outer margin + tile gap when a workspace holds a single tiled
+    /// window, so it fills the screen edge-to-edge. On by default.
+    #[knus(child, unwrap(argument))]
+    pub smart_gaps: Option<bool>,
 }
 
 #[derive(knus::Decode, Debug)]
@@ -359,6 +414,7 @@ pub struct Theme {
     pub wallpaper:  Option<String>,
     pub blur:       bool,
     pub opacity:    f32,
+    pub smart_gaps: bool,
 }
 
 impl Default for Theme {
@@ -374,6 +430,10 @@ impl Default for Theme {
             wallpaper:  None,
             blur:       true,
             opacity:    1.0,
+            // Off by default: a lone window keeps its normal margin (clears the
+            // floating bar + looks like a tile, not a bad maximize). Opt in via
+            // the theme block for Hyprland-style edge-to-edge.
+            smart_gaps: false,
         }
     }
 }
@@ -387,6 +447,18 @@ pub struct OutputCfg {
     pub position: Option<(i32, i32)>,
     /// (width, height, optional refresh in Hz)
     pub mode:     Option<(i32, i32, Option<u32>)>,
+    pub vrr:      VrrMode,
+}
+
+/// When a monitor runs variable refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VrrMode {
+    Off,
+    On,
+    /// Only while a fullscreen window covers the output (games, video) —
+    /// VRR on the desktop can flicker brightness on some panels.
+    #[default]
+    Fullscreen,
 }
 
 pub struct Config {
@@ -430,6 +502,8 @@ pub struct WindowRule {
     pub float:      Option<bool>,
     pub opacity:    Option<f32>,
     pub fullscreen: Option<bool>,
+    pub process:    Option<String>,  // exact executable name, case-insensitive
+    pub phone:      Option<bool>,
 }
 
 /// The merged effect of every rule that matched a window.
@@ -439,12 +513,14 @@ pub struct RuleEffect {
     pub float:      Option<bool>,
     pub opacity:    Option<f32>,
     pub fullscreen: Option<bool>,
+    pub phone:      Option<bool>,
 }
 
 impl RuleEffect {
     pub fn is_empty(&self) -> bool {
         self.workspace.is_none() && self.float.is_none()
             && self.opacity.is_none() && self.fullscreen.is_none()
+            && self.phone.is_none()
     }
 }
 
@@ -456,16 +532,19 @@ impl Config {
 
     /// Merge every window rule matching `app_id` (exact, case-insensitive) and
     /// `title` (substring, case-insensitive). Later rules win per-field.
-    pub fn match_window(&self, app_id: &str, title: &str) -> RuleEffect {
+    pub fn match_window(&self, app_id: &str, title: &str, process: &str) -> RuleEffect {
         let mut eff = RuleEffect::default();
         for r in &self.window_rules {
             // A rule with no matcher matches nothing (avoids a global override).
-            if r.app_id.is_none() && r.title.is_none() { continue; }
+            if r.app_id.is_none() && r.title.is_none() && r.process.is_none() { continue; }
             let app_ok = r.app_id.as_deref()
                 .is_none_or(|p| p.eq_ignore_ascii_case(app_id));
             let title_ok = r.title.as_deref()
                 .is_none_or(|p| title.to_lowercase().contains(&p.to_lowercase()));
-            if app_ok && title_ok {
+            let proc_ok = r.process.as_deref()
+                .is_none_or(|p| p.eq_ignore_ascii_case(process));
+            if app_ok && title_ok && proc_ok {
+                if r.phone.is_some()      { eff.phone      = r.phone; }
                 if r.workspace.is_some()  { eff.workspace  = r.workspace; }
                 if r.float.is_some()      { eff.float      = r.float; }
                 if r.opacity.is_some()    { eff.opacity    = r.opacity; }
@@ -504,6 +583,8 @@ impl Config {
                     float:      e.float,
                     opacity:    e.opacity.map(|o| o.clamp(0.0, 1.0) as f32),
                     fullscreen: e.fullscreen,
+                    process:    e.process,
+                    phone:      e.phone,
                 });
             }
         }
@@ -569,6 +650,7 @@ impl Config {
             if t.wallpaper.is_some()   { theme.wallpaper = t.wallpaper; }
             if let Some(v) = t.blur    { theme.blur = v; }
             if let Some(v) = t.opacity { theme.opacity = (v as f32).clamp(0.1, 1.0); }
+            if let Some(v) = t.smart_gaps { theme.smart_gaps = v; }
         }
 
         // Runtime wallpaper switches (vendi-ctl wallpaper / the bar's picker)
@@ -623,9 +705,13 @@ impl Config {
         // and survive a reload), overriding per connector name.
         let mut output_entries = user_outputs;
         if let Some(extra) = read_output_overrides()? {
-            for e in extra {
+            for mut e in extra {
                 match output_entries.iter_mut().find(|o| o.name == e.name) {
-                    Some(slot) => *slot = e,
+                    Some(slot) => {
+                        // vendi-ctl doesn't manage vrr — keep the hand-set one
+                        if e.vrr.is_none() { e.vrr = slot.vrr.take(); }
+                        *slot = e;
+                    }
                     None       => output_entries.push(e),
                 }
             }
@@ -638,6 +724,15 @@ impl Config {
                 _ => None,
             },
             mode:     e.mode.as_deref().and_then(parse_mode),
+            vrr:      match e.vrr.as_deref().map(str::to_ascii_lowercase).as_deref() {
+                Some("on" | "always" | "true") => VrrMode::On,
+                Some("off" | "never" | "false") => VrrMode::Off,
+                Some("fullscreen" | "auto") | None => VrrMode::Fullscreen,
+                Some(other) => {
+                    tracing::warn!("unknown vrr mode {other:?}; using \"fullscreen\"");
+                    VrrMode::Fullscreen
+                }
+            },
         }).collect();
 
         Ok(Self {
@@ -779,7 +874,7 @@ fn parse_chord(s: &str) -> Result<Chord> {
 
 // ── action parsing ────────────────────────────────────────────────────────────
 
-fn parse_action(s: &str) -> Result<Action> {
+pub fn parse_action(s: &str) -> Result<Action> {
     let mut parts = s.splitn(2, char::is_whitespace);
     let verb = parts.next().unwrap_or("").trim();
     let rest = parts.next().map(str::trim).unwrap_or("");
@@ -818,6 +913,21 @@ fn parse_action(s: &str) -> Result<Action> {
         "overview"          => Action::ToggleOverview,
         "toggle-blur"       => Action::ToggleBlur,
         "cycle-opacity"     => Action::CycleOpacity,
+        "cycle-kb-layout"   => Action::CycleKbLayout,
+        "move-to-scratchpad" => Action::MoveToScratchpad,
+        "toggle-scratchpad" => Action::ToggleScratchpad,
+        "stage-pull"        => Action::StagePull,
+        "pin"               => Action::Pin,
+        "focus-output-left"  => Action::FocusOutput(Dir::Left),
+        "focus-output-right" => Action::FocusOutput(Dir::Right),
+        "focus-output-up"    => Action::FocusOutput(Dir::Up),
+        "focus-output-down"  => Action::FocusOutput(Dir::Down),
+        "move-to-output-left"  => Action::MoveToOutput(Dir::Left),
+        "move-to-output-right" => Action::MoveToOutput(Dir::Right),
+        "move-to-output-up"    => Action::MoveToOutput(Dir::Up),
+        "move-to-output-down"  => Action::MoveToOutput(Dir::Down),
+        "group"             => Action::GroupOrCycle,
+        "ungroup"           => Action::Ungroup,
         "lock"              => Action::Lock,
         "quit"              => Action::Quit,
         other => anyhow::bail!("unknown action verb {other:?}"),
@@ -832,5 +942,14 @@ pub fn chord_from(mods: &smithay::input::keyboard::ModifiersState, sym: u32) -> 
         alt:   mods.alt,
         shift: mods.shift,
         key:   sym,
+    }
+}
+
+#[cfg(test)]
+mod default_config_tests {
+    #[test]
+    fn default_config_parses() {
+        let r: Result<super::Document, _> = knus::parse("default.kdl", super::DEFAULT_CONFIG);
+        if let Err(e) = &r { panic!("{e:#?}"); }
     }
 }

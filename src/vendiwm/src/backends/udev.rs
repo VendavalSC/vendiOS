@@ -103,6 +103,93 @@ smithay::backend::renderer::element::render_elements! {
 
 type FrameElement = OutputRenderElements;
 
+/// Turn compositor chrome (tab strips, shelf cards — see chrome.rs) into
+/// render elements. `items` are in paint order (back to front); the returned
+/// elements are front-to-back like the rest of the frame. `off` shifts the
+/// items' logical coords into output-local space.
+#[allow(clippy::too_many_arguments)]
+fn chrome_elements(
+    items: &[crate::chrome::Item],
+    off: (f64, f64),
+    sf: f64,
+    renderer: &mut GlesRenderer,
+    border_prog: &GlesPixelProgram,
+    rounded_prog: &GlesTexProgram,
+    text_cache: &mut crate::text::TextCache,
+) -> Vec<FrameElement> {
+    use crate::chrome::Item;
+    let scale = smithay::utils::Scale::from(sf);
+    let rect_i = |r: &smithay::utils::Rectangle<f64, smithay::utils::Logical>| {
+        smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
+            ((r.loc.x + off.0).round() as i32, (r.loc.y + off.1).round() as i32).into(),
+            (r.size.w.round().max(1.0) as i32, r.size.h.round().max(1.0) as i32).into(),
+        )
+    };
+    let mut out: Vec<FrameElement> = Vec::new();
+    for item in items.iter().rev() {
+        match item {
+            Item::Rect { rect, radius, color } | Item::Ring { rect, radius, color, .. } => {
+                if color[3] <= 0.001 { continue; }
+                let thickness = match item {
+                    Item::Ring { thickness, .. } => *thickness,
+                    _ => (rect.size.w.max(rect.size.h)) as f32,
+                };
+                let elem = PixelShaderElement::new(
+                    border_prog.clone(), rect_i(rect), None, 1.0,
+                    vec![
+                        Uniform::new("color", *color),
+                        Uniform::new("radius", *radius),
+                        Uniform::new("thickness", thickness),
+                    ],
+                    Kind::Unspecified,
+                );
+                out.push(OutputRenderElements::Pixel(
+                    RescaleRenderElement::from_element(elem, (0, 0).into(), 1.0)));
+            }
+            Item::Text { x, cy, max_w, text, px, color, center } => {
+                if color[3] <= 0.001 || *max_w < 4.0 { continue; }
+                let Some((buf, (w, h))) = text_cache.get(text, *px * sf as f32, *color, (*max_w * sf) as f32)
+                    else { continue };
+                let lw = w as f64 / sf;
+                let lx = if *center { x + (max_w - lw).max(0.0) / 2.0 } else { *x };
+                let loc = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
+                    ((lx + off.0) * sf).round(),
+                    ((cy + off.1) * sf - h as f64 / 2.0).round(),
+                ));
+                if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer, loc, buf, Some(color[3]), None, None, Kind::Unspecified,
+                ) {
+                    out.push(OutputRenderElements::Memory(elem));
+                }
+            }
+            Item::Thumb { window, rect, radius, alpha } => {
+                let committed = window.geometry().size;
+                if committed.w <= 0 || committed.h <= 0 || *alpha <= 0.001 { continue; }
+                let cell = rect_i(rect);
+                let render_loc = (cell.loc - window.geometry().loc).to_physical_precise_round(scale);
+                let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    window.render_elements(renderer, render_loc, scale, *alpha);
+                let morph = smithay::utils::Scale {
+                    x: cell.size.w as f64 / committed.w as f64,
+                    y: cell.size.h as f64 / committed.h as f64,
+                };
+                // the rounding shader works in destination pixels
+                let r = *radius;
+                let anchor: smithay::utils::Point<i32, smithay::utils::Physical> =
+                    cell.loc.to_physical_precise_round(scale);
+                for elem in surfaces {
+                    let rounded = crate::render::RoundedElement::new(elem, rounded_prog.clone(), r);
+                    let morphed = RescaleRenderElement::from_element(rounded, anchor, morph);
+                    let rescaled = RescaleRenderElement::from_element(morphed, anchor, 1.0);
+                    out.push(OutputRenderElements::Window(
+                        RelocateRenderElement::from_element(rescaled, (0, 0), Relocate::Relative)));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Freeze the desktop for the session-lock backdrop. The sharp texture
 /// renders `elements[skip_sharp..]` (bar included — the first locked frame
 /// must be pixel-identical to the live one); the blurred texture renders
@@ -580,11 +667,18 @@ pub fn run() -> Result<()> {
         on_udev_event(event, app);
     }).map_err(|e| anyhow::anyhow!("insert udev source: {e:?}"))?;
 
-    // DRM page-flip / VBlank events drive rendering — one frame on each tick.
+    // DRM page-flip / VBlank events drive rendering — one frame on each tick,
+    // but only when something is actually pending: every surface commit now
+    // arms pending_redraw (see State::commit), so this is a real damage gate,
+    // not a guess. Without it the compositor free-ran a full render+flip on
+    // every single vblank forever, even at total idle — confirmed via strace
+    // (tens of thousands of ioctls/sec with zero windows/animations active)
+    // and this is what was actually burning idle CPU/battery.
     loop_handle.insert_source(drm_notifier, move |event, _, app: &mut State| {
         match event {
             DrmEvent::VBlank(crtc) => {
-                // Acknowledge the just-finished frame, then queue the next.
+                // Acknowledge the just-finished frame either way — the DRM
+                // subsystem needs this regardless of whether we render again.
                 if let Some(dev) = app.udev.as_mut().unwrap().drm_devices.get_mut(&primary_gpu_node) {
                     if let Some(surf) = dev.surfaces.get_mut(&crtc) {
                         if let Err(e) = surf.compositor.frame_submitted() {
@@ -593,8 +687,19 @@ pub fn run() -> Result<()> {
                         surf.flip_pending = None;
                     }
                 }
-                if let Err(e) = render_surface(app, primary_gpu_node, crtc) {
-                    tracing::warn!(?e, "render_surface");
+                // Per-output damage: this vblank renders only if THIS output
+                // has something to show. (A single global flag let one
+                // monitor's vblank eat every redraw — the other monitor then
+                // starved and its bar animated at a few fps.)
+                absorb_redraw(app);
+                let dirty = app.udev.as_mut().unwrap().drm_devices.get_mut(&primary_gpu_node)
+                    .and_then(|d| d.surfaces.get_mut(&crtc))
+                    .map(|s| std::mem::take(&mut s.dirty))
+                    .unwrap_or(false);
+                if dirty {
+                    if let Err(e) = render_surface(app, primary_gpu_node, crtc) {
+                        tracing::warn!(?e, "render_surface");
+                    }
                 }
             }
             DrmEvent::Error(e) => tracing::warn!(?e, "drm error"),
@@ -773,6 +878,8 @@ pub fn run() -> Result<()> {
 
     let mut display_handle_tick = display_handle.clone();
     let loop_signal = event_loop.get_signal();
+    // Publish the initial keyboard layout for the bar's indicator.
+    app.write_kb_layout();
     tracing::info!("vendiwm udev backend running. Press Ctrl+C to exit.");
     event_loop.run(Duration::from_millis(16), &mut app, move |app| {
         // Per-tick housekeeping: drain dmabuf imports, refresh space damage
@@ -810,9 +917,12 @@ pub fn run() -> Result<()> {
             }
         }
 
-        // Damage-driven render. VBlank already re-renders on its own, but the
-        // first frame is empty (no clients yet) so no page-flip → no VBlank →
-        // render loop stalls. This restarts it whenever a client commits.
+        // Damage-driven render. VBlank now only re-renders while pending_redraw
+        // is set, so once fully idle the chain genuinely stops (no more vblank
+        // events at all — queue_frame was never called for the last one). This
+        // tick is what restarts it: the next commit sets pending_redraw, and
+        // this 16ms poll notices and renders once, which re-arms the vblank
+        // chain via queue_frame if there's real content to show.
         //
         // Only outputs with NO flip in flight, though. This tick runs on every
         // loop wakeup — each client commit is one — and every render sends
@@ -824,19 +934,17 @@ pub fn run() -> Result<()> {
         // VBlank, which renders once per refresh. A flip that's been pending
         // too long (vblank lost to DPMS/suspend) no longer counts, so this
         // can never wedge an output.
-        if app.pending_redraw {
-            app.pending_redraw = false;
+        absorb_redraw(app);
+        {
             let primary_gpu = app.udev.as_ref().unwrap().primary_gpu;
             let now = std::time::Instant::now();
-            let crtcs: Vec<_> = app.udev.as_ref().unwrap().drm_devices.get(&primary_gpu)
-                .map(|d| d.surfaces.iter()
-                    .filter(|(_, s)| {
-                        let busy = s.flip_pending
-                            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(100));
-                        if busy { app.pending_redraw = true; }
-                        !busy
-                    })
-                    .map(|(c, _)| *c)
+            // dirty outputs with no flip in flight render now; busy ones keep
+            // their dirty flag for their own vblank
+            let crtcs: Vec<_> = app.udev.as_mut().unwrap().drm_devices.get_mut(&primary_gpu)
+                .map(|d| d.surfaces.iter_mut()
+                    .filter(|(_, s)| s.dirty && !s.flip_pending
+                        .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(100)))
+                    .map(|(c, s)| { s.dirty = false; *c })
                     .collect())
                 .unwrap_or_default();
             for crtc in crtcs {
@@ -886,6 +994,15 @@ fn build_state(
     let primary_selection_state = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<State>(dh);
     let data_control_state   = smithay::wayland::selection::wlr_data_control::DataControlState::new::<State, _>(
         dh, Some(&primary_selection_state), |_| true);
+    // Pointer lock + raw deltas. Games doing mouselook need these two:
+    // without them a client can only ever see absolute positions, so it
+    // warps the cursor back to centre every frame — which is what read as
+    // the pointer "teleporting".
+    let pointer_constraints_state =
+        smithay::wayland::pointer_constraints::PointerConstraintsState::new::<State>(&dh);
+    let _relative_pointer_state =
+        smithay::wayland::relative_pointer::RelativePointerManagerState::new::<State>(&dh);
+    let _ = &pointer_constraints_state;
     let idle_inhibit_state   = smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<State>(dh);
     // Virtual keyboard (zwp_virtual_keyboard_v1) so `wtype` / `vendi voice` can
     // type into the focused field. Dispatch is covered by delegate_dispatch2!.
@@ -942,6 +1059,7 @@ fn build_state(
         primary_selection_state,
         data_control_state,
         idle_inhibit_state,
+        xdg_activation_state: smithay::wayland::xdg_activation::XdgActivationState::new::<State>(dh),
         idle_inhibitors:        Default::default(),
         xdg_decoration_state,
         viewporter_state,
@@ -949,7 +1067,7 @@ fn build_state(
         seat,
         lock_pending:           None,
         locked:                 false,
-        lock_surface:           None,
+        lock_surfaces:          Vec::new(),
         space:                  Space::default(),
         popups:                 PopupManager::default(),
         workspaces:             crate::workspaces::Workspaces::new(),
@@ -969,7 +1087,7 @@ fn build_state(
         vlock: false,
         vlock_input: String::new(),
         vlock_fail: None,
-        last_zone:              None,
+        last_zone:              Vec::new(),
         last_activity:          std::time::Instant::now(),
         auto_lock_fired:        false,
         screen_off:             false,
@@ -981,8 +1099,16 @@ fn build_state(
         open_anims:             Vec::new(),
         ws_anim:                None,
         geo_anims:              Vec::new(),
+        fullscreen_anim:        None,
+        startup_t:              None,
         closing:                Vec::new(),
         last_geos: HashMap::new(),
+        tile_geos: HashMap::new(),
+        drop_preview: None,
+        chrome: Default::default(),
+        touch_chrome_drag: false,
+        ws_anim_output: String::new(),
+        dirty_outputs: Vec::new(),
         config,
         pointer_location:       (0.0, 0.0).into(),
         cursor_status:          smithay::input::pointer::CursorImageStatus::default_named(),
@@ -1034,12 +1160,6 @@ pub struct DeviceState {
     pub frost_prog:   GlesTexProgram,
     /// Circular wallpaper-reveal shader (wallpaper switch transition).
     pub reveal_prog:  GlesTexProgram,
-    /// Ping-pong offscreen targets for the blur, at 1/4 output size.
-    /// Recreated whenever the output size changes.
-    pub blur_texs:    Option<(
-        smithay::backend::renderer::gles::GlesTexture,
-        smithay::backend::renderer::gles::GlesTexture,
-    )>,
     /// Snapshot of every mapped window for the close ghost, keyed by window
     /// id: (previous copy, current copy, time of current copy). Owned blits,
     /// refreshed every ~300ms. Two generations because clients commit junk
@@ -1063,6 +1183,8 @@ pub struct DeviceState {
         smithay::utils::Rectangle<i32, smithay::utils::Logical>,
         std::time::Instant,
     )>,
+    /// Rasterized chrome text (tab titles, shelf labels).
+    pub text_cache: crate::text::TextCache,
 }
 
 pub struct SurfaceState {
@@ -1086,6 +1208,28 @@ pub struct SurfaceState {
     pub lock_backdrop: Option<(GlesTexture, GlesTexture, Option<std::time::Instant>)>,
     /// After unlock: the blurred backdrop melting away over the live desktop.
     pub lock_fade: Option<(GlesTexture, std::time::Instant)>,
+    /// This output has damage waiting for its next render (per-output copy of
+    /// State::pending_redraw — see absorb_redraw).
+    pub dirty: bool,
+    /// Ping-pong offscreen targets for the frosted-glass blur, at 1/4 of THIS
+    /// output's size. Per output: when they were shared, two monitors of
+    /// different resolutions reallocated them on every single frame.
+    pub blur_texs: Option<(GlesTexture, GlesTexture)>,
+    /// What the blurred backdrop was last built from (element id, commit,
+    /// placement). Unchanged → the blur passes are skipped and the patches
+    /// keep their ids, so the damage tracker sees nothing new.
+    pub blur_key: Vec<(smithay::backend::renderer::element::Id,
+                       smithay::backend::renderer::utils::CommitCounter,
+                       smithay::utils::Rectangle<i32, smithay::utils::Physical>)>,
+    /// Stable ids for the frost patches, by rect; reset when the blur changes.
+    pub blur_ids: HashMap<(i32, i32, i32, i32), smithay::backend::renderer::element::Id>,
+    /// Border rings kept between frames (by window id) with the inputs they
+    /// were built from — reusing the element keeps its id/commit, so an
+    /// unchanged border isn't damage. (A fresh element every frame made every
+    /// window count as fully damaged, every frame.)
+    pub rings: HashMap<u32, (PixelShaderElement, smithay::utils::Rectangle<i32, smithay::utils::Logical>, [f32; 4], f32, f32, f32)>,
+    /// VENDIWM_PERF=1: renders and render time since the last report.
+    pub perf: (u32, f64, f64, std::time::Instant),
     /// When the last page flip was queued, cleared on its VBlank. While a flip
     /// is in flight only the VBlank handler may render this output — see the
     /// tick path in run_udev for why.
@@ -1100,6 +1244,10 @@ pub struct SurfaceState {
     pub mode:       smithay::reexports::drm::control::Mode,
     /// The wl_output global, removed when the connector goes away.
     pub global:     smithay::reexports::wayland_server::backend::GlobalId,
+    /// The monitor can switch variable refresh on and off without a modeset.
+    pub vrr_capable: bool,
+    /// Variable refresh currently requested for this output.
+    pub vrr_on:     bool,
 }
 
 impl UdevData {
@@ -1207,11 +1355,11 @@ impl UdevData {
             blur_prog,
             frost_prog,
             reveal_prog,
-            blur_texs: None,
             tex_stash: HashMap::new(),
             focus_anim: HashMap::new(),
             last_tick: std::time::Instant::now(),
             closing_anims: Vec::new(),
+            text_cache: Default::default(),
         };
         Ok((dev, notifier))
     }
@@ -1340,6 +1488,7 @@ fn initial_surface_setup(app: &mut State, node: DrmNode) -> Result<Vec<crtc::Han
             (geo.loc.x as f64 + geo.size.w as f64 / 2.0,
              geo.loc.y as f64 + geo.size.h as f64 / 2.0).into();
     }
+    app.sync_outputs();
     app.relayout();
     Ok(crtcs)
 }
@@ -1449,6 +1598,20 @@ fn connect_connector(
         (64u32, 64u32).into(),
         Some(device.gbm.clone()),
     ).map_err(|e| anyhow::anyhow!("DrmCompositor::new: {e:?}"))?;
+    let mut compositor = compositor;
+
+    // Variable refresh. Toggled per frame (see render_surface) only when the
+    // monitor can do it without a modeset; one that needs a modeset gets it
+    // switched once here, and only when the user asked for it always-on.
+    use smithay::backend::drm::VrrSupport;
+    let vrr_mode = ocfg.as_ref().map(|c| c.vrr).unwrap_or_default();
+    let support = compositor.vrr_supported(connector.handle()).unwrap_or(VrrSupport::NotSupported);
+    let vrr_capable = matches!(support, VrrSupport::Supported);
+    let mut vrr_on = false;
+    if matches!(support, VrrSupport::RequiresModeset) && vrr_mode == crate::config::VrrMode::On {
+        vrr_on = compositor.use_vrr(true).is_ok();
+    }
+    tracing::info!(connector = %output_name, ?support, ?vrr_mode, "VRR");
 
     let mode_size = drm_mode.size();
     tracing::info!(
@@ -1477,10 +1640,18 @@ fn connect_connector(
         lock_backdrop: None,
         lock_fade: None,
         flip_pending: None,
+        dirty: true,
+        blur_texs: None,
+        blur_key: Vec::new(),
+        blur_ids: HashMap::new(),
+        rings: HashMap::new(),
+        perf: (0, 0.0, 0.0, std::time::Instant::now()),
         start_fade: None,
         connector: connector.handle(),
         mode: drm_mode,
         global,
+        vrr_capable,
+        vrr_on,
     });
     Ok(crtc)
 }
@@ -1577,6 +1748,7 @@ fn rescan_connectors(app: &mut State, node: DrmNode) {
     }
 
     clamp_pointer(&mut *app);
+    app.sync_outputs();
     app.relayout();
     app.pending_redraw = true;
 
@@ -1590,6 +1762,20 @@ fn rescan_connectors(app: &mut State, node: DrmNode) {
 
 /// Keep the pointer inside the union of output rectangles (snap to the
 /// nearest point of the nearest output when it ends up in a dead zone).
+/// Hand the global "something changed" flag to every output: each one now
+/// owes a frame, and renders it on its own vblank/tick.
+fn absorb_redraw(app: &mut State) {
+    let all = std::mem::take(&mut app.pending_redraw);
+    let some = std::mem::take(&mut app.dirty_outputs);
+    if !all && some.is_empty() { return; }
+    let Some(udev) = app.udev.as_mut() else { return };
+    for dev in udev.drm_devices.values_mut() {
+        for s in dev.surfaces.values_mut() {
+            if all || some.contains(&s.output.name()) { s.dirty = true; }
+        }
+    }
+}
+
 fn clamp_pointer(state: &mut State) {
     let rects: Vec<smithay::utils::Rectangle<i32, smithay::utils::Logical>> = state.space.outputs()
         .filter_map(|o| state.space.output_geometry(o))
@@ -1683,13 +1869,42 @@ fn maybe_focus_follows_mouse(state: &mut State) {
     if !state.config.focus_follows_mouse || state.drag.is_some() || state.vlock {
         return;
     }
-    let under = state.space.element_under(state.pointer_location).map(|(w, _)| w.clone());
+    let under = state.window_under(state.pointer_location).map(|(w, _)| w);
     if under.is_some() && under != state.focused_window() {
         state.focus_window_at_cursor();
     }
 }
 
+/// Render one output, timing it for VENDIWM_PERF=1 (per-output fps and
+/// render cost every 2s in the session log).
 fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<()> {
+    static PERF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let perf = *PERF.get_or_init(|| std::env::var_os("VENDIWM_PERF").is_some()
+        || std::env::var_os("HOME").is_some_and(|h| std::path::Path::new(&h).join(".config/vendi/wm-perf").exists()));
+    if !perf { return render_surface_inner(app, node, crtc); }
+    let t0 = std::time::Instant::now();
+    let res = render_surface_inner(app, node, crtc);
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    if let Some(s) = app.udev.as_mut().and_then(|u| u.drm_devices.get_mut(&node))
+        .and_then(|d| d.surfaces.get_mut(&crtc))
+    {
+        s.perf.0 += 1;
+        s.perf.1 += ms;
+        s.perf.2 = s.perf.2.max(ms);
+        let secs = s.perf.3.elapsed().as_secs_f64();
+        if secs >= 2.0 {
+            tracing::info!(output = %s.output.name(),
+                fps = format!("{:.0}", s.perf.0 as f64 / secs),
+                avg_ms = format!("{:.2}", s.perf.1 / s.perf.0.max(1) as f64),
+                max_ms = format!("{:.2}", s.perf.2),
+                "perf");
+            s.perf = (0, 0.0, 0.0, std::time::Instant::now());
+        }
+    }
+    res
+}
+
+fn render_surface_inner(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<()> {
     // Displays are powered off (idle DPMS). Don't render or queue frames —
     // that would re-enable the output. Waking happens on input.
     if app.screen_off {
@@ -1741,6 +1956,10 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         if want { Some(app.overview_layout()) } else { None }
     };
     let is_locked_pre = app.is_locked();
+    // Compositor chrome for this frame (tab strips, stage shelf).
+    let chrome_scene = app.chrome_scene();
+    let shelf_output = app.shelf_output_name();
+    let chrome_pal = crate::chrome::Palette::from_theme(&app.config.theme);
 
     let state = &mut *app;
     let device = state.udev.as_mut().unwrap().drm_devices.get_mut(&node)
@@ -1757,13 +1976,45 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
     let frost_prog   = device.frost_prog.clone();
     let _reveal_prog  = device.reveal_prog.clone(); // (disc shader — kept for render_bloom)
     let _is_nvidia    = device.is_nvidia;           // (wallpaper transition is now a unified fade)
-    let blur_texs     = &mut device.blur_texs;
     let tex_stash     = &mut device.tex_stash;
     let focus_anim    = &mut device.focus_anim;
     let last_tick     = &mut device.last_tick;
     let closing_anims = &mut device.closing_anims;
+    let text_cache    = &mut device.text_cache;
+    text_cache.sweep();
     let surface  = device.surfaces.get_mut(&crtc)
         .ok_or_else(|| anyhow::anyhow!("surface not found"))?;
+
+    // Multi-monitor: everything below that depends on "the desk" means the
+    // desk THIS monitor shows — its fullscreen window, its bar fade, its
+    // workspace slide. The other monitor is left alone.
+    let out_name = surface.output.name();
+    let out_fullscreen: Option<smithay::desktop::Window> = state.workspaces.shown_on(&out_name)
+        .and_then(|id| state.workspaces.get(id))
+        .and_then(|ws| ws.fullscreen.clone());
+    let focused_here = state.workspaces.focused_output() == out_name;
+    let ws_here = state.ws_anim_output.is_empty() || state.ws_anim_output == out_name;
+
+    // Variable refresh: follow the configured mode. "fullscreen" (default)
+    // turns it on only while a fullscreen window — a game, a video — owns the
+    // output, so the desktop never sees VRR brightness flicker.
+    if surface.vrr_capable {
+        let name = surface.output.name();
+        let mode = state.config.outputs.iter().find(|o| o.name == name)
+            .map(|o| o.vrr).unwrap_or_default();
+        let want = match mode {
+            crate::config::VrrMode::On => true,
+            crate::config::VrrMode::Off => false,
+            crate::config::VrrMode::Fullscreen =>
+                out_fullscreen.is_some() && state.fullscreen_anim.is_none(),
+        };
+        if want != surface.vrr_on {
+            match surface.compositor.use_vrr(want) {
+                Ok(()) => { surface.vrr_on = want; tracing::info!(output = %name, on = want, "VRR switched"); }
+                Err(e) => { surface.vrr_capable = false; tracing::warn!(?e, output = %name, "VRR switch failed; disabling"); }
+            }
+        }
+    }
 
     // Wallpaper changed over IPC: rebuild this output's buffer once, keep
     // the old one around for the bloom transition (reveal grows out of the
@@ -1831,6 +2082,10 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
     const OPEN_MS:  f32 = 260.0;
     const WS_MS:    f32 = 300.0;
     const MORPH_MS: f32 = 230.0;
+    // Fullscreen gets a longer span than an ordinary tile morph: the window
+    // crosses the whole output, and at 230ms that much distance reads as a
+    // snap rather than a glide. ~1.5x, the macOS enter-fullscreen feel.
+    const FS_MS: f32 = 340.0;
     const DRAG_MS:  f32 = 120.0;
     // Frosted glass (blur on): the composite-alpha floor for windows so the
     // frost shows through even when the user hasn't cycled opacity, and how far
@@ -1865,15 +2120,47 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             && t.map(|t| (now.duration_since(t).as_secs_f32() * 1000.0) < OPEN_MS)
                 .unwrap_or(true)
     });
+    // Fullscreen enter/exit. The window's geometry already glided (geo_anims),
+    // but the two bits of chrome around it used to snap the instant the flag
+    // flipped: the bar blinked out, and the window lost its rounding + border
+    // ring a whole morph before it finished growing. Both now ride the same
+    // span as that morph, so super+f reads as one continuous motion.
+    // The tuple is (progress, windowed-ness, window): windowed-ness is 1.0
+    // fully windowed, 0.0 fully fullscreen, eased in between.
+    // Boot fade-up. The whole desktop used to appear fully composed the instant
+    // the first frame landed — straight from the LUKS prompt to a hard cut. The
+    // wallpaper and the shell layers now rise out of black together over this
+    // span, with a slight settle-in zoom on the wallpaper (a pure alpha ramp on
+    // a static fullscreen buffer never reaches the display on NVIDIA — the same
+    // reason the wallpaper-switch cross-fade rides a zoom).
+    const STARTUP_MS: f32 = 1100.0;
+    let startup_from = *state.startup_t.get_or_insert(now);
+    let startup_p = (now.duration_since(startup_from).as_secs_f32() * 1000.0 / STARTUP_MS).min(1.0);
+    let startup_e = ease_out_quint(startup_p);
+    if startup_p < 1.0 { state.pending_redraw = true; }
+
+    let fs_anim = state.fullscreen_anim.as_ref().map(|(t, entering, w)| {
+        let p = ease_out((now.duration_since(*t).as_secs_f32() * 1000.0 / FS_MS).min(1.0));
+        (p, if *entering { 1.0 - p } else { p }, w.clone())
+    });
+    if fs_anim.as_ref().map(|(p, _, w)| *p >= 1.0 || !smithay::utils::IsAlive::alive(w)).unwrap_or(false) {
+        state.fullscreen_anim = None;
+    }
+    // The transitioning window's morph runs on the longer fullscreen span, so
+    // it must survive the ordinary MORPH_MS cutoff to finish gliding.
+    let fs_win = fs_anim.as_ref().map(|(_, _, w)| w.clone());
     state.geo_anims.retain(|(w, _, t)| {
+        let span = if fs_win.as_ref() == Some(w) { FS_MS } else { MORPH_MS };
         smithay::utils::IsAlive::alive(w)
-            && (now.duration_since(*t).as_secs_f32() * 1000.0) < MORPH_MS
+            && (now.duration_since(*t).as_secs_f32() * 1000.0) < span
     });
     let ws_progress = state.ws_anim.map(|(t, _)| now.duration_since(t).as_secs_f32() * 1000.0 / WS_MS);
     let ws_dir = state.ws_anim.map(|(_, d)| d).unwrap_or(0);
     if ws_progress.map(|p| p >= 1.0).unwrap_or(false) {
         state.ws_anim = None;
     }
+    // Only the monitor that switched desks animates.
+    let ws_progress = ws_progress.filter(|_| ws_here);
     // The incoming desk fades in and slides from the side it lives on.
     let (ws_alpha, ws_scale, ws_off) = match ws_progress.filter(|p| *p < 1.0) {
         Some(p) => {
@@ -1922,7 +2209,10 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
     let ov_e = ease_out_quint(
         (now.duration_since(state.overview_t).as_secs_f32() * 1000.0 / OVERVIEW_MS).min(1.0),
     );
-    let mut wallpaper_alpha = if locked { 0.30 } else if state.overview { 1.0 - 0.55 * ov_e } else { 0.45 + 0.55 * ov_e };
+    let mut wallpaper_alpha = if locked { 0.30 }
+        else if !focused_here { 1.0 }   // the overview only opens on the focused monitor
+        else if state.overview { 1.0 - 0.55 * ov_e } else { 0.45 + 0.55 * ov_e };
+    wallpaper_alpha *= startup_e;
     // Workspace switches dim the wallpaper through the transition so even a
     // switch between empty desks reads as motion.
     if let Some(p) = ws_progress.filter(|p| *p < 1.0) {
@@ -1943,6 +2233,8 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         || !state.geo_anims.is_empty()
         || !closing_anims.is_empty()
         || state.drag.is_some()
+        || state.fullscreen_anim.is_some()
+        || startup_p < 1.0
         || (now.duration_since(state.overview_t).as_secs_f32() * 1000.0) < OVERVIEW_MS;
     let theme = state.config.theme.clone();
     let mut upper_layer_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
@@ -1958,20 +2250,33 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
     let mut blur_windows: Vec<(usize, smithay::utils::Rectangle<i32, smithay::utils::Logical>, f32)> = Vec::new();
     // A fullscreen window hides the Top layer (the bar) — only Overlay
     // surfaces (e.g. a lock screen) stay above it, per the wlr spec.
-    let fullscreen_active = state.workspaces.active_ref().fullscreen.is_some();
+    let fullscreen_active = out_fullscreen.is_some();
+    // Through a fullscreen transition the Top layer stays mapped and fades,
+    // instead of being dropped from the element list the frame the flag flips.
+    // (Only this monitor's bar — a game going fullscreen on the other screen
+    // mustn't fade this one.)
+    let fs_anim_here = fs_anim.as_ref().filter(|(_, _, w)| {
+        state.workspaces.find_workspace(w)
+            .and_then(|id| state.workspaces.output_showing(id))
+            .is_some_and(|o| o == out_name)
+    });
+    let top_alpha = fs_anim_here
+        .map(|(_, phase, _)| *phase)
+        .unwrap_or(if fullscreen_active { 0.0 } else { 1.0})
+        * startup_e;
     if !locked {
         let layer_map = layer_map_for_output(&surface.output);
         // `layer_geometry` returns location relative to the output; we feed it
         // to render_elements in physical px so the surface lands where the
         // protocol said it should.
-        let upper_layers: Vec<_> = if fullscreen_active {
-            layer_map.layers_on(smithay::wayland::shell::wlr_layer::Layer::Overlay).collect()
-        } else {
-            layer_map.layers_on(smithay::wayland::shell::wlr_layer::Layer::Overlay)
-                .chain(layer_map.layers_on(smithay::wayland::shell::wlr_layer::Layer::Top))
+        let upper_layers: Vec<(_, f32)> = if top_alpha > 0.001 {
+            layer_map.layers_on(smithay::wayland::shell::wlr_layer::Layer::Overlay).map(|l| (l, 1.0))
+                .chain(layer_map.layers_on(smithay::wayland::shell::wlr_layer::Layer::Top).map(|l| (l, top_alpha)))
                 .collect()
+        } else {
+            layer_map.layers_on(smithay::wayland::shell::wlr_layer::Layer::Overlay).map(|l| (l, 1.0)).collect()
         };
-        for layer in upper_layers {
+        for (layer, layer_alpha) in upper_layers {
             let geo = match layer_map.layer_geometry(layer) { Some(g) => g, None => continue };
             // The menu gets a frosted-glass slab of the desktop behind it.
             if theme.blur && layer.namespace() == "vendi-menu" {
@@ -1985,7 +2290,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             };
             sink.extend(
                 smithay::backend::renderer::element::AsRenderElements::<GlesRenderer>::render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                    layer, renderer, phys_loc, scale, 1.0,
+                    layer, renderer, phys_loc, scale, layer_alpha,
                 ),
             );
         }
@@ -1994,7 +2299,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             let phys_loc = geo.loc.to_physical_precise_round(scale);
             lower_layer_elems.extend(
                 smithay::backend::renderer::element::AsRenderElements::<GlesRenderer>::render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                    layer, renderer, phys_loc, scale, 1.0,
+                    layer, renderer, phys_loc, scale, startup_e,
                 ),
             );
         }
@@ -2007,7 +2312,11 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
     // index 0 is drawn on top of everything else. Honour the client-requested
     // shape: a client-drawn surface, a hidden cursor, or a themed named shape
     // (hand/I-beam/wait/resize…); fall back to the plain arrow.
-    if !locked {
+    // Phone control: over the iPhone mirror the phone's own pointer is the
+    // cursor — hide ours so there aren't two.
+    let over_phone = state.chrome.phone_control
+        && (state.chrome.phone_hover || state.chrome.phone_press.is_some());
+    if !locked && !over_phone {
         use smithay::input::pointer::{CursorIcon, CursorImageStatus};
         match &state.cursor_status {
             CursorImageStatus::Hidden => {}
@@ -2141,8 +2450,11 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
     let focused_surf = state.seat.get_keyboard()
         .and_then(|k| k.current_focus())
         .and_then(|f| f.wl_surface());
-    let fullscreen = state.workspaces.active_ref().fullscreen.clone();
+    let fullscreen = out_fullscreen.clone();
     let stacked: Vec<_> = if locked { Vec::new() } else { state.space.elements().cloned().collect() };
+    // While dragging a tile seam, the focus border re-renders at each new rect
+    // and flickers on the shrinking window's far edge — drop it for the drag.
+    let tile_resizing = state.drag.as_ref().map(|d| d.tile_resize).unwrap_or(false);
     let mut live_ids: Vec<u32> = Vec::with_capacity(stacked.len());
     for window in stacked.iter().rev() {
         // The screensaver is in the space (for frame callbacks) but is drawn
@@ -2151,6 +2463,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         // left a second, static copy behind the sliding one.
         if state.screensaver.as_ref() == Some(window) { continue; }
         let Some(geo) = state.space.element_geometry(window) else { continue };
+        let wid = crate::state::window_id(window);
 
         // Stash this frame's texture so a close next frame can ghost it.
         if let Some(surf) = window.wl_surface() {
@@ -2198,10 +2511,16 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         // backdrop is always visible — blur is an independent on/off toggle, not
         // something you have to pair with a separate transparency mode. The
         // opacity-cycle (super+shift+o) still wins when set lower.
+        // Phone mirror: a clean, opaque, phone-shaped window (no frost, ring).
+        let phone = state.chrome.phones.iter().any(|(p, _)| p == window);
         let mut win_opa = crate::state::window_opacity(window, theme.opacity);
-        if theme.blur && fullscreen.as_ref() != Some(window) {
+        if theme.blur && fullscreen.as_ref() != Some(window) && !phone {
             win_opa = win_opa.min(FROST_WINDOW_ALPHA);
         }
+        // Pinned windows sit above the desks: the workspace slide/fade/zoom
+        // passes them by, so they read as stuck to the glass.
+        let pinned = state.chrome.pinned.contains(window);
+        let (ws_alpha, ws_scale, ws_off) = if pinned { (1.0, 1.0, 0) } else { (ws_alpha, ws_scale, ws_off) };
         let alpha = ws_alpha * open_t.map(ease_out).unwrap_or(1.0) * win_opa;
         // Super+drag pick-up: ease in a slight grow while the grab holds,
         // and ease it back out after release (put-down).
@@ -2226,14 +2545,35 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         // the old slot, so moves, resizes, and fullscreen toggles glide.
         // The workspace slide rides on the same rect. In overview the
         // destination is the window's grid cell, not its real geometry.
-        let dest = overview_cells.iter()
-            .find(|(w, _)| w == window)
-            .map(|(_, r)| *r)
-            .unwrap_or(geo);
+        // Normally the window morphs toward its committed geometry. During a
+        // live seam-resize the buffer lags the layout, so aim at the INTENDED
+        // tile rect instead — the morph then squishes the stale buffer to fit
+        // its new size rather than letting it overhang the moving edge.
+        let dest = if let Some((_, r)) = overview_cells.iter().find(|(w, _)| w == window) {
+            *r
+        } else if phone {
+            // drawn at its fitted size even if the client keeps its own
+            state.workspaces.visible_windows().contains(window).then(|| {
+                state.workspaces.iter()
+                    .flat_map(|ws| ws.floating.iter())
+                    .find(|(w, _)| w == window).map(|(_, r)| *r)
+            }).flatten().unwrap_or(geo)
+        } else if tile_resizing {
+            state.tile_geos.get(&wid).copied().unwrap_or(geo)
+        } else if open_t.is_some_and(|t| t < 1.0) && state.tile_geos.contains_key(&wid) {
+            // Opening: the app's first frames can still be at its old size
+            // (a browser restoring a 2K window on a 1080p screen) — fit them
+            // into the tile until it catches up with the configure.
+            state.tile_geos[&wid]
+        } else {
+            geo
+        };
         let target = state.geo_anims.iter()
             .find(|(w, _, _)| w == window)
             .map(|(_, old, t)| {
-                let e = ease_out_quint((now.duration_since(*t).as_secs_f32() * 1000.0 / MORPH_MS).min(1.0));
+                // The fullscreen window glides over the longer FS_MS span.
+                let span = if fs_win.as_ref() == Some(window) { FS_MS } else { MORPH_MS };
+                let e = ease_out_quint((now.duration_since(*t).as_secs_f32() * 1000.0 / span).min(1.0));
                 let l = |a: i32, b: i32| (a as f32 + (b - a) as f32 * e).round() as i32;
                 smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
                     (l(old.loc.x, dest.loc.x) + ws_off, l(old.loc.y, dest.loc.y)).into(),
@@ -2251,10 +2591,34 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         let geo = { let mut g = geo; g.loc -= out_loc; g };
 
         let is_fullscreen = fullscreen.as_ref() == Some(window);
-        let radius = if is_fullscreen { 0.0 } else { theme.radius };
 
-        // Border ring, drawn around the interpolated rect (skip on fullscreen).
-        if !is_fullscreen {
+        // A settled fullscreen window (a game, a video) goes out untouched —
+        // no rounding shader, no rescale wrappers — so the DRM compositor can
+        // put the client's own buffer straight on a scanout plane instead of
+        // compositing it. That's the low-latency path for games.
+        if is_fullscreen && fs_anim.is_none() && alpha >= 0.999 && scale_anim == 1.0
+            && target == geo && ov_layout.is_none()
+        {
+            let render_loc = (geo.loc - window.geometry().loc).to_physical_precise_round(scale);
+            let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                window.render_elements(renderer, render_loc, scale, 1.0);
+            elements.extend(surfaces.into_iter().map(OutputRenderElements::Layer));
+            continue;
+        }
+        // Chrome factor: 1.0 windowed, 0.0 fullscreen, easing between the two
+        // while THIS window is the one transitioning. The corners round down
+        // and the ring dissolves as the window grows, rather than both
+        // disappearing on frame one and leaving the morph looking like a
+        // plain resize.
+        let chrome = fs_anim.as_ref()
+            .filter(|(_, _, w)| w == window)
+            .map(|(_, phase, _)| *phase)
+            .unwrap_or(if is_fullscreen { 0.0 } else { 1.0 });
+        // a phone screen's corners: ~10% of its width
+        let radius = if phone { (target.size.w as f32 * 0.10).clamp(8.0, 70.0) } else { theme.radius * chrome };
+
+        // Border ring, drawn around the interpolated rect (gone on fullscreen).
+        if chrome > 0.001 && !phone {
             let win_surf = window.wl_surface();
             let focused = matches!((&focused_surf, &win_surf), (Some(f), Some(s)) if **s == *f);
             // Fade the ring between inactive and accent instead of snapping.
@@ -2284,18 +2648,34 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
                 (((target.loc.x + target.size.w / 2) as f64) * sf).round() as i32,
                 (((target.loc.y + target.size.h / 2) as f64) * sf).round() as i32,
             ));
-            let ring = PixelShaderElement::new(
-                border_prog.clone(),
-                area,
-                None,
-                alpha,
-                vec![
-                    Uniform::new("color", c),
-                    Uniform::new("radius", radius + border_w as f32),
-                    Uniform::new("thickness", border_w as f32),
-                ],
-                Kind::Unspecified,
-            );
+            let (ra, rr, rt) = (alpha * chrome, radius + border_w as f32, border_w as f32);
+            let ring = match surface.rings.get_mut(&wid) {
+                // same shape & alpha: reuse (colour fades update in place)
+                Some((el, a, col, r2, t2, al)) if *a == area && *r2 == rr && *t2 == rt && *al == ra => {
+                    if *col != c {
+                        *col = c;
+                        el.update_uniforms(vec![
+                            Uniform::new("color", c),
+                            Uniform::new("radius", rr),
+                            Uniform::new("thickness", rt),
+                        ]);
+                    }
+                    el.clone()
+                }
+                _ => {
+                    let el = PixelShaderElement::new(
+                        border_prog.clone(), area, None, ra,
+                        vec![
+                            Uniform::new("color", c),
+                            Uniform::new("radius", rr),
+                            Uniform::new("thickness", rt),
+                        ],
+                        Kind::Unspecified,
+                    );
+                    surface.rings.insert(wid, (el.clone(), area, c, rr, rt, ra));
+                    el
+                }
+            };
             elements.push(OutputRenderElements::Pixel(
                 RescaleRenderElement::from_element(ring, ring_center, scale_anim),
             ));
@@ -2338,8 +2718,22 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         // window is translucent enough for the frost to show, so this no longer
         // depends on detecting client-side alpha — which was unreliable and made
         // blur appear only in some opacity modes.
-        if theme.blur && !is_fullscreen {
+        if theme.blur && !is_fullscreen && !phone {
             blur_windows.push((elements.len(), target, radius));
+        }
+
+        // Tab strip of a grouped tile, riding the window's animated rect.
+        if let Some(info) = chrome_scene.tabs.get(&wid).filter(|_| ov_layout.is_none() && chrome > 0.001) {
+            use crate::chrome::{TAB_H, TAB_GAP};
+            let items = crate::chrome::strip_items(info, target.size.w as f64, theme.radius, &chrome_pal, ws_alpha * chrome);
+            let oy = (target.loc.y - TAB_H - TAB_GAP) as f64;
+            elements.extend(chrome_elements(&items, (target.loc.x as f64, oy), sf, renderer,
+                &border_prog, &rounded_prog, text_cache));
+            if theme.blur {
+                let strip = smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
+                    (target.loc.x, oy as i32).into(), (target.size.w, TAB_H).into());
+                blur_windows.push((elements.len(), strip, (theme.radius * 0.75).clamp(6.0, 12.0)));
+            }
         }
     }
 
@@ -2352,6 +2746,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             .map(crate::state::window_id)
             .collect();
         tex_stash.retain(|id, _| alive_ids.contains(id) || live_ids.contains(id));
+        surface.rings.retain(|id, _| live_ids.contains(id));
         focus_anim.retain(|id, _| alive_ids.contains(id));
     }
 
@@ -2409,6 +2804,13 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             ));
         }
     }
+
+    // Stage shelf: live cards down the left, beneath every window.
+    if !locked && !chrome_scene.shelf.is_empty() {
+        elements.extend(chrome_elements(&chrome_scene.shelf, (-out_loc.x as f64, -out_loc.y as f64), sf,
+            renderer, &border_prog, &rounded_prog, text_cache));
+    }
+    if chrome_scene.animating { state.pending_redraw = true; }
 
     // Lower layers (Bottom/Background) → below windows and borders.
     if !locked {
@@ -2538,7 +2940,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         let zoom = match ws_progress.filter(|p| *p < 1.0) {
             Some(p) => 1.05 - 0.05 * ease_out(p) as f64,
             None => 1.0,
-        };
+        } * (1.0 + 0.05 * (1.0 - startup_e) as f64);
         let osize = state.space.output_geometry(&surface.output)
             .map(|g| g.size)
             .unwrap_or_else(|| (1, 1).into());
@@ -2581,7 +2983,8 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             lelems.push(OutputRenderElements::Memory(elem));
         }
         let cursor_end = lelems.len();
-        if let Some(lock) = &state.lock_surface {
+        // this monitor's own lock surface (each is sized to its monitor)
+        if let Some(lock) = state.lock_surfaces.iter().find(|(n, _)| *n == out_name).map(|(_, s)| s) {
             lelems.extend(
                 smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
                     _, WaylandSurfaceRenderElement<GlesRenderer>,
@@ -2592,7 +2995,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         }
         if let Some((sharp, blurred, started)) = &mut surface.lock_backdrop {
             // Hold the sharp frame until the blob has mapped, then blur in.
-            if started.is_none() && state.lock_surface.is_some() {
+            if started.is_none() && state.lock_surfaces.iter().find(|(n, _)| *n == out_name).map(|(_, s)| s).is_some() {
                 *started = Some(std::time::Instant::now());
             }
             const BLUR_IN_MS: f32 = 650.0;
@@ -2644,7 +3047,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u32)
             .unwrap_or(0);
-        if let Some(lock) = &state.lock_surface {
+        if let Some(lock) = state.lock_surfaces.iter().find(|(n, _)| *n == out_name).map(|(_, s)| s) {
             send_frames_surface_tree(lock.wl_surface(), time_ms);
         }
         return Ok(());
@@ -2665,6 +3068,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             .map(|g| g.size)
             .unwrap_or_else(|| (1, 1).into());
         let (qw, qh) = ((out_size.w / DOWN).max(1), (out_size.h / DOWN).max(1));
+        let blur_texs = &mut surface.blur_texs;
         let stale = blur_texs.as_ref()
             .map(|(a, _)| { let s = Texture::size(a); s.w != qw || s.h != qh })
             .unwrap_or(true);
@@ -2686,6 +3090,18 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
                 theme.background[0], theme.background[1], theme.background[2], 1.0,
             );
 
+            // Skip the whole blur when the backdrop hasn't changed since the
+            // last frame (the common case: a static wallpaper under windows).
+            let key: Vec<_> = elements[blur_mark..].iter()
+                .filter(|e| !matches!(e, OutputRenderElements::Window(_) | OutputRenderElements::Pixel(_)))
+                .map(|e| (e.id().clone(), e.current_commit(), e.geometry(scale)))
+                .collect();
+            let reuse = !stale && key == surface.blur_key;
+            if !reuse {
+                surface.blur_key = key;
+                surface.blur_ids.clear();
+            }
+
             // Pass 0: the backdrop (wallpaper + anything below blur_mark stays
             // out — that's the menu/cursor) into texa, downscaled, back-to-front.
             // Window *content and borders* are skipped: the frost crop sits
@@ -2694,6 +3110,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             // What's left is the wallpaper — exactly "what's behind" for tiled
             // windows, which don't overlap.
             let scene = (|| -> std::result::Result<(), smithay::backend::renderer::gles::GlesError> {
+                if reuse { return Ok(()); }
                 let mut fb = renderer.bind(texa)?;
                 let mut frame = renderer.render(&mut fb, qsize, Transform::Normal)?;
                 frame.clear(theme_clear, &[full])?;
@@ -2717,7 +3134,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
             // Passes 1-4: separable gaussian, ping-pong, radius growing —
             // ends back in texa.
             let mut blurred = scene.is_ok();
-            if blurred {
+            if blurred && !reuse {
                 let dirs: [(f32, f32); 4] = [
                     (1.0 / qw as f32, 0.0), (0.0, 1.0 / qh as f32),
                     (2.0 / qw as f32, 0.0), (0.0, 2.0 / qh as f32),
@@ -2773,13 +3190,18 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
                 // not-yet-placed (lower) indices.
                 let mut bw = blur_windows.clone();
                 bw.sort_by(|a, b| b.0.cmp(&a.0));
+                let mut used = std::collections::HashSet::new();
                 for (idx, r, rad) in bw {
                     let src = smithay::utils::Rectangle::<f64, smithay::utils::Logical>::new(
                         (r.loc.x as f64 / DOWN as f64, r.loc.y as f64 / DOWN as f64).into(),
                         (r.size.w as f64 / DOWN as f64, r.size.h as f64 / DOWN as f64).into(),
                     );
+                    let rk = (r.loc.x, r.loc.y, r.size.w, r.size.h);
+                    used.insert(rk);
+                    let pid = surface.blur_ids.entry(rk)
+                        .or_insert_with(smithay::backend::renderer::element::Id::new).clone();
                     let inner = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
-                        smithay::backend::renderer::element::Id::new(),
+                        pid,
                         ctx.clone(),
                         (r.loc.x as f64, r.loc.y as f64),
                         texa.clone(),
@@ -2805,8 +3227,12 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
                         (r.loc.x as f64 / DOWN as f64, r.loc.y as f64 / DOWN as f64).into(),
                         (r.size.w as f64 / DOWN as f64, r.size.h as f64 / DOWN as f64).into(),
                     );
+                    let rk = (r.loc.x, r.loc.y, r.size.w, r.size.h);
+                    used.insert(rk);
+                    let pid = surface.blur_ids.entry(rk)
+                        .or_insert_with(smithay::backend::renderer::element::Id::new).clone();
                     let inner = smithay::backend::renderer::element::texture::TextureRenderElement::from_static_texture(
-                        smithay::backend::renderer::element::Id::new(),
+                        pid,
                         ctx.clone(),
                         (r.loc.x as f64, r.loc.y as f64),
                         texa.clone(),
@@ -2825,6 +3251,7 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
                         inner, frost_prog.clone(), 16.0, FROST_LIGHTEN, coff, cscale);
                     elements.insert(blur_mark + i, OutputRenderElements::Blur(patch));
                 }
+                surface.blur_ids.retain(|k, _| used.contains(k));
             }
         }
     }
@@ -2898,6 +3325,66 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         state.pending_redraw = true;
     }
 
+    // Drop preview placeholder: an empty slot (faint frost fill + gray unfocused
+    // border) showing exactly where the dragged tile lands — the hovered tile has
+    // already live-resized in relayout to make this space. Inserted LATE (after
+    // all blur/screenshot work) so no index shift can corrupt the blur splices.
+    if let Some(p) = state.drop_preview.clone().filter(|p| p.join) {
+        // Joining a tab group: the whole target tile lights up in the accent.
+        let mut g = p.ghost; g.loc -= out_loc;
+        let area = smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
+            (g.loc.x - 3, g.loc.y - 3).into(), (g.size.w + 6, g.size.h + 6).into());
+        for (a, th) in [(0.10f32, (g.size.w.max(g.size.h)) as f32), (0.9, 2.5)] {
+            let elem = PixelShaderElement::new(
+                border_prog.clone(), area, None, 1.0,
+                vec![
+                    Uniform::new("color", [theme.accent[0], theme.accent[1], theme.accent[2], a]),
+                    Uniform::new("radius", theme.radius + 3.0),
+                    Uniform::new("thickness", th),
+                ],
+                Kind::Unspecified,
+            );
+            elements.insert(after_bar, OutputRenderElements::Pixel(
+                RescaleRenderElement::from_element(elem, (0, 0).into(), 1.0)));
+        }
+        state.pending_redraw = true;
+    }
+    if let Some(p) = state.drop_preview.clone().filter(|p| !p.join) {
+        let mut g = p.ghost; g.loc -= out_loc;
+        let phys = g.to_physical_precise_round(scale);
+        // subtle dark fill — reads as an empty frosted slot over the wallpaper
+        elements.insert(after_bar, OutputRenderElements::Solid(
+            smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
+                smithay::backend::renderer::element::Id::new(),
+                phys, 0usize,
+                Color32F::new(0.0, 0.0, 0.0, 0.20),
+                Kind::Unspecified,
+            ),
+        ));
+        // gray (inactive) rounded border ring, like an unfocused window
+        let bw = theme.border.max(2);
+        let area = smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
+            (g.loc.x - bw, g.loc.y - bw).into(),
+            (g.size.w + bw * 2, g.size.h + bw * 2).into(),
+        );
+        let center = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
+            (((g.loc.x + g.size.w / 2) as f64) * sf).round() as i32,
+            (((g.loc.y + g.size.h / 2) as f64) * sf).round() as i32,
+        ));
+        let ring = PixelShaderElement::new(
+            border_prog.clone(), area, None, 1.0,
+            vec![
+                Uniform::new("color", theme.inactive),
+                Uniform::new("radius", theme.radius + bw as f32),
+                Uniform::new("thickness", bw as f32),
+            ],
+            Kind::Unspecified,
+        );
+        elements.insert(after_bar, OutputRenderElements::Pixel(
+            RescaleRenderElement::from_element(ring, center, 1.0)));
+        state.pending_redraw = true;
+    }
+
     // Session-start fade-in: on this output's first frames, ease the whole
     // desktop up from black so it doesn't all snap in at once. Inserted last
     // (topmost, above the cursor) and AFTER screencopy so captures aren't
@@ -2952,7 +3439,15 @@ fn render_surface(app: &mut State, node: DrmNode, crtc: crtc::Handle) -> Result<
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u32)
         .unwrap_or(0);
-    for window in state.space.elements() {
+    // Only windows actually on this monitor: a window must be paced by the
+    // display it's shown on, not by every monitor's refresh.
+    let this_output = surface.output.clone();
+    let on_here: Vec<smithay::desktop::Window> = state.space.elements()
+        .filter(|w| state.space.outputs_for_element(w).contains(&this_output))
+        .cloned()
+        .collect();
+    let shelf_here = shelf_output.as_deref() == Some(this_output.name().as_str());
+    for window in on_here.iter().chain(chrome_scene.live.iter().filter(|_| shelf_here)) {
         if let Some(surf) = window.wl_surface() {
             send_frames_surface_tree(&surf, time_ms);
         }
@@ -3047,6 +3542,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
         InputEvent::Keyboard { event } => {
             let Some(keyboard) = state.seat.get_keyboard() else { return };
             let key_state = event.state();
+            let evdev_code = event.key_code().raw().saturating_sub(8);
             let action = keyboard.input::<Option<crate::input::Action>, _>(
                 state,
                 event.key_code(),
@@ -3091,11 +3587,21 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
                     {
                         return FilterResult::Intercept(Some(crate::input::Action::ToggleOverview));
                     }
-                    crate::input::handle(&data.config, sym.raw(), key_state, mods)
+                    let bind = crate::input::handle(&data.config, sym.raw(), key_state, mods)
                         .or_else(|| handle.raw_syms().iter().find_map(|s| {
                             crate::input::handle(&data.config, s.raw(), key_state, mods)
-                        }))
-                        .map_or(FilterResult::Forward, |a| FilterResult::Intercept(Some(a)))
+                        }));
+                    if let Some(a) = bind { return FilterResult::Intercept(Some(a)); }
+                    // Phone control: with the iPhone mirror focused, every
+                    // non-shortcut key is typed on the phone instead.
+                    if data.phone_keys() {
+                        data.pending_ipc_events.push(crate::ipc::Event::PhoneKey {
+                            code: evdev_code,
+                            pressed: key_state == smithay::backend::input::KeyState::Pressed,
+                        });
+                        return FilterResult::Intercept(None);
+                    }
+                    FilterResult::Forward
                 },
             );
             if let Some(Some(act)) = action {
@@ -3109,23 +3615,111 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
         InputEvent::PointerMotion { event } => {
             if state.vlock { return; }
             let Some(pointer) = state.seat.get_pointer() else { return };
+            use smithay::wayland::pointer_constraints::{PointerConstraint, with_pointer_constraint};
             let delta_x = event.delta_x();
             let delta_y = event.delta_y();
+
+            // What does the surface under the CURRENT position want? Has to be
+            // read before we move, since a lock means we must not move at all.
+            let under_before = state.surface_under(state.pointer_location);
+            let mut pointer_locked = false;
+            let mut pointer_confined = false;
+            let mut confine_region = None;
+            if let Some((surface, surface_loc)) = &under_before {
+                let here = state.pointer_location;
+                with_pointer_constraint(surface, &pointer, |constraint| match constraint {
+                    Some(c) if c.is_active() => {
+                        // A constraint only applies while inside its region.
+                        if !c.region().is_none_or(|r| r.contains((here - *surface_loc).to_i32_round())) {
+                            return;
+                        }
+                        match &*c {
+                            PointerConstraint::Locked(_) => pointer_locked = true,
+                            PointerConstraint::Confined(cf) => {
+                                pointer_confined = true;
+                                confine_region = cf.region().cloned();
+                            }
+                        }
+                    }
+                    _ => {}
+                });
+            }
+
+            // Raw deltas go out either way — this is what mouselook actually
+            // reads, and it's unaffected by where the cursor sits on screen.
+            pointer.relative_motion(
+                state,
+                under_before.clone().map(|(s, p)| (s.into(), p)),
+                &smithay::input::pointer::RelativeMotionEvent {
+                    delta:         (delta_x, delta_y).into(),
+                    delta_unaccel: event.delta_unaccel(),
+                    utime:         InputEventTrait::time(&event),
+                },
+            );
+
+            // Locked: the cursor stays exactly where it is. Deltas only.
+            if pointer_locked {
+                pointer.frame(state);
+                return;
+            }
+
             state.pointer_location += (delta_x, delta_y).into();
             clamp_pointer(state);
+            state.update_output_focus();
             // Super+drag in progress: route motion into the drag, not the client.
             if state.drag.is_some() {
                 state.drag_update();
                 return;
             }
+            // A press on a tab / shelf card owns the motion (it may turn into
+            // a tear-off drag); otherwise just track chrome hover.
+            if state.chrome_motion() {
+                pointer.frame(state);
+                return;
+            }
+            if state.phone_motion() {
+                pointer.frame(state);
+                return;
+            }
             let location = state.pointer_location;
-            let under = state.surface_under(location).map(|(s, p)| (s.into(), p));
-            pointer.motion(state, under, &MotionEvent {
+            let new_under = state.surface_under(location);
+
+            // Confined: swallow any motion that would leave the surface/region.
+            if pointer_confined {
+                if let Some((surface, surface_loc)) = &under_before {
+                    if new_under.as_ref().map(|(s, _)| s) != Some(surface) {
+                        pointer.frame(state);
+                        return;
+                    }
+                    if let Some(region) = &confine_region {
+                        if !region.contains((location - *surface_loc).to_i32_round()) {
+                            pointer.frame(state);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            pointer.motion(state, new_under.clone().map(|(s, p)| (s.into(), p)), &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
                 time:   InputEventTrait::time_msec(&event),
             });
             pointer.frame(state);
+
+            // Moving into a constraint's region is what arms it.
+            if let Some((surface, surface_loc)) = new_under {
+                with_pointer_constraint(&surface, &pointer, |constraint| {
+                    if let Some(c) = constraint {
+                        if !c.is_active() {
+                            let p = (location - surface_loc).to_i32_round();
+                            if c.region().is_none_or(|r| r.contains(p)) { c.activate(); }
+                        }
+                    }
+                });
+            }
+
+            state.update_seam_cursor();
             maybe_focus_follows_mouse(state);
             state.pending_redraw = true;
         }
@@ -3134,15 +3728,24 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
         InputEvent::PointerMotionAbsolute { event } => {
             if state.vlock { return; }
             let Some(pointer) = state.seat.get_pointer() else { return };
-            let Some(output) = state.space.outputs().next().cloned() else { return };
+            let Some(output) = state.touch_output() else { return };
             let Some(geo) = state.space.output_geometry(&output) else { return };
             let pos = event.position_transformed(geo.size);
             state.pointer_location = pos + geo.loc.to_f64();
+            state.update_output_focus();
             // Super+drag in progress: route motion into the drag, not the
             // client (QEMU and touchscreens deliver absolute motion — without
             // this, drags only worked on real mice).
             if state.drag.is_some() {
                 state.drag_update();
+                return;
+            }
+            if state.chrome_motion() {
+                pointer.frame(state);
+                return;
+            }
+            if state.phone_motion() {
+                pointer.frame(state);
                 return;
             }
             let location = state.pointer_location;
@@ -3153,6 +3756,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
                 time:   InputEventTrait::time_msec(&event),
             });
             pointer.frame(state);
+            state.update_seam_cursor();
             maybe_focus_follows_mouse(state);
             state.pending_redraw = true;
         }
@@ -3169,10 +3773,29 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
             // eases back down where the window landed.
             if bstate == smithay::backend::input::ButtonState::Released && state.drag.is_some() {
                 if let Some(drag) = state.drag.take() {
-                    if !drag.resize {
-                        state.drag_release = Some((drag.window, std::time::Instant::now()));
-                    }
+                    state.drop_dragged(drag);   // re-tiles a detached window, else eases
                 }
+                state.pending_redraw = true;
+                return;
+            }
+
+            // Phone control: clicks on the iPhone mirror are taps on the phone
+            // (super+click still reaches the window-move path below).
+            let logo_held = state.seat.get_keyboard().map(|k| k.modifier_state().logo).unwrap_or(false);
+            let releasing = bstate == smithay::backend::input::ButtonState::Released;
+            if (!logo_held || (releasing && state.chrome.phone_press.is_some()))
+                && state.phone_button(event.button_code(),
+                bstate == smithay::backend::input::ButtonState::Pressed)
+            {
+                state.pending_redraw = true;
+                return;
+            }
+
+            // Tab strips and shelf cards are compositor chrome: clients never
+            // see presses on them.
+            if state.chrome_button(event.button_code(),
+                bstate == smithay::backend::input::ButtonState::Pressed)
+            {
                 state.pending_redraw = true;
                 return;
             }
@@ -3219,10 +3842,15 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
                 let code = event.button_code();
                 // Super+LeftDrag = move, Super+RightDrag = resize (floating free,
                 // tiled trades split ratios). Shared with touch emulation.
-                if logo && (code == BTN_LEFT || code == BTN_RIGHT)
+                if (logo && (code == BTN_LEFT || code == BTN_RIGHT)
+                    || (code == BTN_LEFT && state.phone_under_pointer()))
                     && state.try_begin_super_drag(code)
                 {
                     return;   // the client never sees this press
+                }
+                // Bare left-press on a tile seam = direct-manipulation resize.
+                if !logo && code == BTN_LEFT && state.try_begin_seam_resize() {
+                    return;   // swallow the press; drag retrades the split
                 }
                 state.focus_window_at_cursor();
             }
@@ -3253,6 +3881,14 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
             let v = event.amount(Axis::Vertical)
                 .or_else(|| event.amount_v120(Axis::Vertical).map(|d| d * 15.0 / 120.0))
                 .unwrap_or(0.0);
+            // Wheel over a tab strip flips through the group's tabs.
+            if v != 0.0 && source == AxisSource::Wheel && state.chrome_scroll(v) {
+                return;
+            }
+            // Phone control: the wheel (or touchpad) over the mirror scrolls the phone.
+            if (v != 0.0 || h != 0.0) && state.phone_scroll(h / 15.0, v / 15.0) {
+                return;
+            }
             let mut frame = AxisFrame::new(InputEventTrait::time_msec(&event)).source(source);
             if h != 0.0 {
                 frame = frame.value(Axis::Horizontal, h);
@@ -3326,7 +3962,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
         InputEvent::TouchDown { event } => {
             if state.vlock { return; }
             use smithay::backend::input::TouchEvent as _;
-            let Some(output) = state.space.outputs().next().cloned() else { return };
+            let Some(output) = state.touch_output() else { return };
             let Some(geo) = state.space.output_geometry(&output) else { return };
             let pos = event.position_transformed(geo.size) + geo.loc.to_f64();
             let super_held = state.seat.get_keyboard()
@@ -3336,7 +3972,7 @@ fn on_libinput_event(event: InputEvent<LibinputInputBackend>, app: &mut State) {
         InputEvent::TouchMotion { event } => {
             if state.vlock { return; }
             use smithay::backend::input::TouchEvent as _;
-            let Some(output) = state.space.outputs().next().cloned() else { return };
+            let Some(output) = state.touch_output() else { return };
             let Some(geo) = state.space.output_geometry(&output) else { return };
             let pos = event.position_transformed(geo.size) + geo.loc.to_f64();
             state.touch_motion(event.slot(), pos, InputEventTrait::time_msec(&event));

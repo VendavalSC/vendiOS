@@ -115,6 +115,23 @@ impl Tree {
         self.focus_path.push(1);
     }
 
+    /// Insert a window as a full-span column/row at the workspace edge: wrap the
+    /// entire current tree in a new root Split, putting the window on the `dir`
+    /// edge (`before` = left/top side). Powers edge drop-zones — drop a tile at
+    /// the screen edge to give it the whole column, pushing the rest aside.
+    pub fn insert_at_root_edge(&mut self, window: Window, dir: Direction, before: bool) {
+        if self.root.is_none() {
+            self.root = Some(Node::Leaf(window));
+            self.focus_path.clear();
+            return;
+        }
+        let old = self.root.take().unwrap();
+        let leaf = Node::Leaf(window);
+        let (children, focus_idx) = if before { (vec![leaf, old], 0) } else { (vec![old, leaf], 1) };
+        self.root = Some(Node::Split { dir, ratios: vec![0.5, 0.5], children });
+        self.focus_path = vec![focus_idx];
+    }
+
     fn parent_direction(&self) -> Option<Direction> {
         if self.focus_path.is_empty() { return None; }
         let mut node = self.root.as_ref()?;
@@ -264,6 +281,16 @@ impl Tree {
     pub fn swap_windows(&mut self, a: &Window, b: &Window) {
         if let Some(root) = self.root.as_mut() {
             swap_in_node(root, a, b);
+        }
+    }
+
+    /// Replace the window occupying `old`'s leaf with `new`, in place — the tree
+    /// shape is untouched. Tabbed stacks use this to swap which member sits in
+    /// the slot when cycling tabs. Returns false if `old` isn't in the tree.
+    pub fn replace_window(&mut self, old: &Window, new: &Window) -> bool {
+        match self.root.as_mut() {
+            Some(root) => replace_in_node(root, old, new),
+            None => false,
         }
     }
 
@@ -492,6 +519,17 @@ fn swap_in_node(node: &mut Node, a: &Window, b: &Window) {
         }
         Node::Split { children, .. } => {
             for c in children { swap_in_node(c, a, b); }
+        }
+    }
+}
+
+fn replace_in_node(node: &mut Node, old: &Window, new: &Window) -> bool {
+    match node {
+        Node::Leaf(w) => {
+            if w == old { *w = new.clone(); true } else { false }
+        }
+        Node::Split { children, .. } => {
+            children.iter_mut().any(|c| replace_in_node(c, old, new))
         }
     }
 }

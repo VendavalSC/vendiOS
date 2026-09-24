@@ -75,6 +75,24 @@ pub enum Action {
     ToggleBlur,
     /// Cycle the focused window's opacity (opaque → translucent → back).
     CycleOpacity,
+    /// Cycle the active keyboard layout (xkb group) — for multi-layout setups.
+    CycleKbLayout,
+    /// Stash the focused window onto the stage shelf.
+    MoveToScratchpad,
+    /// Show / hide the stage shelf.
+    ToggleScratchpad,
+    /// Swap the top shelf card onto the stage.
+    StagePull,
+    /// Pin the focused window: floating, on every desk, always on top.
+    Pin,
+    /// Focus the monitor in a direction (pointer jumps there).
+    FocusOutput(Dir),
+    /// Send the focused window to the monitor in a direction.
+    MoveToOutput(Dir),
+    /// Tabbed groups: group the focused window with the next, or cycle tabs.
+    GroupOrCycle,
+    /// Dissolve the focused window's tabbed group.
+    Ungroup,
     Lock,
     /// Quit the compositor.
     Quit,

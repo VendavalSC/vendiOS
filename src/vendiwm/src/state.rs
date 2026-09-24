@@ -79,6 +79,9 @@ pub struct State {
     /// idle-inhibit — surfaces (video players, presentations) that ask the
     /// session to stay awake. While any is active, auto-lock/screen-off pause.
     pub idle_inhibit_state:    IdleInhibitManagerState,
+    /// xdg-activation: apps hand each other focus (a link clicked in chat
+    /// raises the browser; a notification's action raises its app).
+    pub xdg_activation_state:  smithay::wayland::xdg_activation::XdgActivationState,
     pub idle_inhibitors:       std::collections::HashSet<WlSurface>,
     pub xdg_decoration_state:  smithay::wayland::shell::xdg::decoration::XdgDecorationState,
     pub viewporter_state:      ViewporterState,
@@ -114,7 +117,9 @@ pub struct State {
     // shows ONLY the lock surface (black if the client hasn't mapped one).
     pub lock_pending:          Option<SessionLocker>,
     pub locked:                bool,
-    pub lock_surface:          Option<LockSurface>,
+    /// One lock surface per monitor (output name, surface) — the locker
+    /// sizes each to its own monitor, so each is drawn only there.
+    pub lock_surfaces:         Vec<(String, LockSurface)>,
 
     // Unified window manager — handles toplevels, popups, layer-shell rendering,
     // multi-output stacking, focus stack. Tiling layout layers on top of this.
@@ -180,7 +185,7 @@ pub struct State {
     // Last layer-shell non-exclusive zone — relayout only runs when a layer
     // commit actually changes it. Without this, every bar/menu frame would
     // trigger a configure storm to every toplevel.
-    pub last_zone:             Option<Rectangle<i32, Logical>>,
+    pub last_zone:             Vec<(String, Rectangle<i32, Logical>)>,
 
     // Idle auto-lock: every input event stamps `last_activity`; a periodic
     // timer locks the session once it exceeds config.idle_lock_secs.
@@ -214,11 +219,25 @@ pub struct State {
     // Workspace-switch animation: (started-at, direction). The new desk
     // fades in and slides from the side it lives on (+1 = from the right).
     pub ws_anim:               Option<(std::time::Instant, i32)>,
+    // Which monitor the workspace-switch animation plays on.
+    pub ws_anim_output:        String,
 
     // Layout-morph animations: (window, previous geometry, started-at). The
     // render loop interpolates location AND size, so tile moves, split
     // resizes, and fullscreen toggles all glide instead of snapping.
     pub geo_anims:             Vec<(Window, Rectangle<i32, Logical>, std::time::Instant)>,
+
+    // First-frame timestamp, set lazily by the render loop. Boot used to slam
+    // the composed desktop on screen the instant the compositor came up —
+    // straight from the LUKS prompt to a full wallpaper with no transition at
+    // all. Everything fades up from black over this instead.
+    pub startup_t:             Option<std::time::Instant>,
+
+    // Fullscreen enter/exit: (started-at, entering, window). Drives the bar's
+    // fade and the window's corner-radius/border fade in lockstep with its
+    // geo glide, instead of the bar and corners snapping instantly while the
+    // window is still animating.
+    pub fullscreen_anim:       Option<(std::time::Instant, bool, Window)>,
 
     // Windows that just closed: (protocol id, last on-screen geometry). The
     // backend pairs these with its per-frame texture stash and plays a
@@ -229,6 +248,17 @@ pub struct State {
     // fallback when a client unmaps before destroying (Firefox does), at
     // which point the space no longer knows where the window was.
     pub last_geos:             HashMap<u32, Rectangle<i32, Logical>>,
+    // Intended tile rects from the last relayout (per window id). During an
+    // interactive seam-resize the committed buffer lags the layout, so the
+    // renderer morph-scales the buffer to THIS rect to avoid edge overdraw.
+    pub tile_geos:             HashMap<u32, Rectangle<i32, Logical>>,
+    // Live drop preview while drag-rearranging a tile (Some during the drag).
+    pub drop_preview:          Option<DropPreview>,
+    // Compositor-drawn chrome: tab strips, the stage shelf, pinned windows.
+    pub chrome:                crate::chrome::ChromeState,
+    // A touch press on chrome turned into a tear-off drag; the finger's
+    // motion/lift drive that drag instead of the emulated pointer.
+    pub touch_chrome_drag:     bool,
 
     // Compiled keybinds + future settings, loaded at startup from KDL.
     pub config:                Config,
@@ -256,6 +286,8 @@ pub struct State {
     // VBlank-driven render loop stalls after the first empty frame because no
     // page-flip ever queues.
     pub pending_redraw:         bool,
+    // Monitors (by name) with new client content — a targeted pending_redraw.
+    pub dirty_outputs:          Vec<String>,
 
     // Set by ReloadConfig when a monitor's mode/refresh may have changed. The
     // udev backend reads + clears it each tick and reprograms the affected DRM
@@ -289,6 +321,41 @@ pub struct Drag {
     pub start_rect:  Rectangle<i32, Logical>,
     // When the grab began — the renderer eases in a slight pick-up scale.
     pub started:     std::time::Instant,
+    // Last time a tile-resize actually relayout+reconfigured. Fast mouse motion
+    // is coalesced to a frame budget so clients aren't flooded with stale
+    // configures (which makes them visibly trail the cursor).
+    pub last_apply:  std::time::Instant,
+    // The window was tiled when the grab began (detached in place to follow the
+    // cursor) — on release it re-tiles at the drop target instead of floating.
+    pub from_tile:   bool,
+    // Smoothed pointer velocity (logical px/s) over the drag, when it was last
+    // sampled, and the pointer position at that sample. Powers throw-to-snap: a
+    // quick flick toward a neighbor lands the tile there even if the cursor
+    // stops short of it. (start_ptr isn't re-anchored for a from_tile drag, so
+    // per-frame delta must come from last_ptr, not start_ptr.)
+    pub vel:         (f64, f64),
+    pub last_motion: std::time::Instant,
+    pub last_ptr:    Point<f64, Logical>,
+}
+
+/// Live drop preview while dragging a detached tile. The hovered tile (`target`)
+/// is split in half: it live-resizes to `t_rect`, and a ghost placeholder (gray
+/// border + frost, no content) fills `ghost`. `dir`/`before` capture how to make
+/// the same split for real on drop.
+#[derive(Clone)]
+pub struct DropPreview {
+    pub target: Window,
+    pub t_rect: Rectangle<i32, Logical>,
+    pub ghost:  Rectangle<i32, Logical>,
+    pub dir:    crate::layout::Direction,
+    pub before: bool,   // the dragged window goes before the target (left/top)
+    // Workspace-EDGE drop: the window takes a full column/row at the edge and is
+    // inserted at the tree ROOT (the whole layout reflows into the other half),
+    // rather than splitting a single hovered tile. `target`/`t_rect` are unused.
+    pub root_edge: bool,
+    // Drop onto a tab strip or a tile's middle: the dragged window joins the
+    // target's tab group instead of splitting it. `ghost` = the whole tile.
+    pub join: bool,
 }
 
 /// Single-finger touch→pointer emulation. vendiOS targets laptops with a
@@ -372,6 +439,27 @@ impl CompositorHandler for State {
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
 
+        // Any surface commit (window, popup, layer-shell bar/notification,
+        // cursor, subsurface) is new content to present. Previously ONLY the
+        // screensaver's special case below armed pending_redraw — every other
+        // client's updates (a blinking cursor, video, the bar's clock, typing)
+        // relied entirely on the VBlank handler unconditionally re-rendering
+        // forever to ever be picked up, which is why VBlank could never be
+        // gated on pending_redraw without freezing normal rendering. This is
+        // what actually lets that gate exist (see the VBlank handler).
+        //
+        // Multi-monitor: only the monitor(s) the surface is on owe a frame —
+        // a terminal spinner on the laptop mustn't re-composite a 1440p@144
+        // screen. Unknown surfaces (cursor, popups, not-yet-mapped) redraw all.
+        match self.surface_outputs(surface) {
+            Some(outs) if !outs.is_empty() => {
+                for o in outs {
+                    if !self.dirty_outputs.contains(&o) { self.dirty_outputs.push(o); }
+                }
+            }
+            _ => self.pending_redraw = true,
+        }
+
         // Tell fractional-scale-aware clients (quickshell, alacritty, GTK) the
         // scale to render at. Without this they only ever learn the integer
         // wl_output scale and render blurry/unscaled at fractional scales.
@@ -406,13 +494,12 @@ impl CompositorHandler for State {
             .cloned();
         if let Some(window) = window {
             window.on_commit();
+            if self.is_phone(&window) { self.phone_commit(&window); }
 
-            // The screensaver lives outside the tiling tree, so nothing else
-            // schedules a frame for it. Pump one redraw per committed frame so
-            // mpv's video composites at its own rate — no busy-loop (which
-            // would steal CPU from mpv's software decode), no frozen black.
+            // The screensaver lives outside the tiling tree; pending_redraw is
+            // now armed unconditionally above for every commit, so this block
+            // only needs its slide-in timing, not a second pending_redraw set.
             if self.screensaver.as_ref() == Some(&window) {
-                self.pending_redraw = true;
                 // Start the slide-in clock on mpv's FIRST committed frame, not
                 // at capture — mpv's startup latency would otherwise eat most
                 // of the slide and the video would just appear in place.
@@ -460,7 +547,8 @@ impl CompositorHandler for State {
                     // User window rules (config `rules { rule … }`) — title is
                     // already cached in window_titles by the block above.
                     let rule_title = self.window_titles.get(&id).cloned().unwrap_or_default();
-                    let eff = self.config.match_window(&app_id, &rule_title);
+                    let process = self.window_process(&window);
+                    let eff = self.config.match_window(&app_id, &rule_title, &process);
                     if !app_id.is_empty() || has_parent || fixed_size || !eff.is_empty() {
                         self.rule_checked.insert(id);
                         // Float: an explicit rule wins; otherwise the built-in
@@ -473,6 +561,9 @@ impl CompositorHandler for State {
                         }
                         if eff.fullscreen == Some(true) {
                             self.set_fullscreen(&window, true);
+                        }
+                        if eff.phone == Some(true) {
+                            self.make_phone(&window);
                         }
                         if let Some(ws) = eff.workspace {
                             if ws != self.workspaces.active_id() {
@@ -521,8 +612,13 @@ impl CompositorHandler for State {
             // area (or is the surface's first). Layer clients commit every
             // frame — doing this unconditionally floods every toplevel with
             // configures and tanks performance.
-            if !initial_configure_sent || self.last_zone != Some(zone) {
-                self.last_zone = Some(zone);
+            // (per monitor: a single shared value flip-flopped between two
+            // monitors' zones and re-tiled everything on every layer commit)
+            let oname = output.name();
+            let prev = self.last_zone.iter().find(|(n, _)| *n == oname).map(|(_, z)| *z);
+            if !initial_configure_sent || prev != Some(zone) {
+                self.last_zone.retain(|(n, _)| *n != oname);
+                self.last_zone.push((oname, zone));
                 self.relayout();
                 // Launchers set keyboard_interactivity before mapping — grab
                 // or release keyboard focus as layer surfaces come and go.
@@ -629,7 +725,10 @@ impl XdgShellHandler for State {
         self.workspaces.active().tree.insert(window.clone());
         self.workspaces.active().focus_floating = None;
         self.open_anims.push((window.clone(), None));
-        self.space.map_element(window, (0, 0), true);
+        // Start it on the focused monitor (global 0,0 may be on no monitor at
+        // all with a custom arrangement); relayout then puts it in its tile.
+        let start = self.tiling_viewport().map(|v| v.loc).unwrap_or_default();
+        self.space.map_element(window, start, true);
         self.relayout();  // sets size in pending state and sends configure.
         self.update_keyboard_focus();
         self.pending_ipc_events.push(crate::ipc::Event::WindowOpened {
@@ -910,20 +1009,23 @@ impl SessionLockHandler for State {
         tracing::info!("session unlocked");
         self.locked = false;
         self.lock_pending = None;
-        self.lock_surface = None;
+        self.lock_surfaces.clear();
         self.update_keyboard_focus();
         self.pending_redraw = true;
     }
     fn new_surface(&mut self, surface: LockSurface, output: wl_output::WlOutput) {
-        let size = Output::from_resource(&output)
-            .and_then(|o| self.space.output_geometry(&o))
+        let out = Output::from_resource(&output);
+        let size = out.as_ref()
+            .and_then(|o| self.space.output_geometry(o))
             .map(|g| g.size)
             .unwrap_or_else(|| (1920, 1080).into());
         surface.with_pending_state(|s| {
             s.size = Some((size.w as u32, size.h as u32).into());
         });
         surface.send_configure();
-        self.lock_surface = Some(surface);
+        let name = out.map(|o| o.name()).unwrap_or_default();
+        self.lock_surfaces.retain(|(n, s)| n != &name && s.alive());
+        self.lock_surfaces.push((name, surface));
         self.update_keyboard_focus();
         self.pending_redraw = true;
     }
@@ -942,7 +1044,11 @@ impl State {
     pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
         // While locked, pointer input may only ever reach the lock surface.
         if self.is_locked() {
-            return self.lock_surface.as_ref().map(|l| (l.wl_surface().clone(), Point::from((0.0, 0.0))));
+            // the lock surface of the monitor under the pointer, at that
+            // monitor's origin
+            let out = self.space.output_under(pos).next().cloned()?;
+            let origin = self.space.output_geometry(&out)?.loc.to_f64();
+            return self.lock_surface_on(&out.name()).map(|l| (l.wl_surface().clone(), origin));
         }
         fn layer_hit(
             map: &smithay::desktop::LayerMap,
@@ -955,17 +1061,35 @@ impl State {
             let (surface, surf_loc) = layer.surface_under(pos - layer_loc, WindowSurfaceType::ALL)?;
             Some((surface, surf_loc.to_f64() + layer_loc))
         }
-        let output = self.space.outputs().next()?.clone();
+        // The monitor under the pointer — its own bar/layers take the input
+        // (every monitor has a bar; only the first one's used to be clickable).
+        let output = self.space.output_under(pos).next().cloned()
+            .or_else(|| self.space.outputs().next().cloned())?;
         let out_geo = self.space.output_geometry(&output)?;
+        // A fullscreen window covers the Top layer: the renderer already drops
+        // the bar from the frame, so it must not take pointer input either.
+        // Otherwise clicks along the bar's strip land on a surface that isn't
+        // on screen and never reach the fullscreen app underneath. Overlay
+        // stays live either way, per the wlr-layer-shell spec — that's where a
+        // lock screen lives. Kept as the same test the renderer uses, so input
+        // and rendering can't drift apart.
+        let fullscreen_active = self.workspaces.shown_on(&output.name())
+            .and_then(|id| self.workspaces.get(id))
+            .is_some_and(|ws| ws.fullscreen.is_some());
         {
             let map = layer_map_for_output(&output);
-            for l in [Layer::Overlay, Layer::Top] {
+            let upper: &[Layer] = if fullscreen_active {
+                &[Layer::Overlay]
+            } else {
+                &[Layer::Overlay, Layer::Top]
+            };
+            for l in upper.iter().copied() {
                 if let Some(layer) = map.layer_under(l, pos - out_geo.loc.to_f64()) {
                     if let Some(hit) = layer_hit(&map, layer, out_geo.loc, pos) { return Some(hit); }
                 }
             }
         }
-        if let Some((window, loc)) = self.space.element_under(pos) {
+        if let Some((window, loc)) = self.window_under(pos) {
             if let Some((surface, surf_loc)) = window.surface_under(pos - loc.to_f64(), WindowSurfaceType::ALL) {
                 return Some((surface, (surf_loc + loc).to_f64()));
             }
@@ -988,16 +1112,19 @@ impl State {
     /// (launcher, lock screen) — it outranks any window focus.
     fn exclusive_layer_surface(&self) -> Option<WlSurface> {
         use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, LayerSurfaceCachedState};
-        let output = self.space.outputs().next()?;
-        let map = layer_map_for_output(output);
-        let layer = map.layers().rev().find(|l| {
-            if !matches!(l.layer(), Layer::Top | Layer::Overlay) { return false; }
-            with_states(l.wl_surface(), |states| {
-                states.cached_state.get::<LayerSurfaceCachedState>().current()
-                    .keyboard_interactivity != KeyboardInteractivity::None
-            })
-        })?;
-        Some(layer.wl_surface().clone())
+        // any monitor's launcher / lock screen
+        for output in self.space.outputs() {
+            let map = layer_map_for_output(output);
+            let layer = map.layers().rev().find(|l| {
+                if !matches!(l.layer(), Layer::Top | Layer::Overlay) { return false; }
+                with_states(l.wl_surface(), |states| {
+                    states.cached_state.get::<LayerSurfaceCachedState>().current()
+                        .keyboard_interactivity != KeyboardInteractivity::None
+                })
+            });
+            if let Some(layer) = layer { return Some(layer.wl_surface().clone()); }
+        }
+        None
     }
 
     /// Push keyboard focus + xdg Activated state to whatever the active
@@ -1005,7 +1132,10 @@ impl State {
     pub fn update_keyboard_focus(&mut self) {
         // A lock surface owns the keyboard unconditionally while locked.
         if self.is_locked() {
-            let surf = self.lock_surface.as_ref().map(|l| KbFocus::Wl(l.wl_surface().clone()));
+            let focused = self.focused_output().map(|o| o.name()).unwrap_or_default();
+            let surf = self.lock_surface_on(&focused)
+                .or_else(|| self.lock_surfaces.first().map(|(_, s)| s))
+                .map(|l| KbFocus::Wl(l.wl_surface().clone()));
             if let Some(kb) = self.seat.get_keyboard() {
                 kb.set_focus(self, surf, SERIAL_COUNTER.next_serial());
             }
@@ -1051,6 +1181,8 @@ impl State {
         }
         if let Some(window) = &focused {
             self.space.raise_element(window, true);
+            // pinned windows + phone mirrors stay above whatever has focus
+            self.raise_overlays();
             // Also raise it in the X11 stack so the focused game/app is on top.
             #[cfg(feature = "xwayland")]
             if let Some(x11) = window.x11_surface() {
@@ -1071,7 +1203,7 @@ impl State {
         self.pending_ipc_events.push(crate::ipc::Event::WorkspacesChanged {
             active,
             workspaces: list.into_iter()
-                .map(|(id, windows)| crate::ipc::WorkspaceInfo { id, focused: id == active, windows })
+                .map(|(id, windows, output, visible)| crate::ipc::WorkspaceInfo { id, focused: id == active, windows, output, visible })
                 .collect(),
         });
     }
@@ -1085,10 +1217,23 @@ impl State {
             self.overview = false;
             self.overview_t = std::time::Instant::now();
         }
+        // That desk is already on the other monitor: go there instead of
+        // stealing it (sway/i3 behaviour) — focus + pointer jump across.
+        if let Some(out) = self.workspaces.output_showing(id).map(str::to_string) {
+            self.workspaces.switch_to(id);
+            self.warp_to_output(&out);
+            self.update_keyboard_focus();
+            self.emit_workspaces();
+            return;
+        }
         let dir = if id > self.workspaces.active_id() { 1 } else { -1 };
+        let pins = self.unpin_for_switch();
         let hidden = self.workspaces.switch_to(id);
         for w in hidden { self.space.unmap_elem(&w); }
+        self.repin(pins);
         self.ws_anim = Some((std::time::Instant::now(), dir));
+        // only the monitor that switched slides
+        self.ws_anim_output = self.workspaces.focused_output().to_string();
         self.relayout();
         self.update_keyboard_focus();
         self.emit_workspaces();
@@ -1098,7 +1243,8 @@ impl State {
     pub fn move_focused_to_workspace(&mut self, id: u32) {
         let Some(window) = self.focused_window() else { return };
         self.workspaces.move_window_to(&window, id);
-        if id != self.workspaces.active_id() {
+        // off screen → hide it; on screen on either monitor → relayout maps it
+        if !self.workspaces.is_shown(id) {
             self.space.unmap_elem(&window);
         }
         self.relayout();
@@ -1163,6 +1309,94 @@ impl State {
         }
     }
 
+    /// Stash the focused window onto the stage shelf (super+shift+minus). It
+    /// flies to a live card on the left; click the card to bring it back.
+    pub fn move_to_scratchpad(&mut self) {
+        let Some(w) = self.focused_window() else { return };
+        self.stash(&w, 0);
+    }
+
+    /// super+minus: show / hide the stage shelf.
+    pub fn toggle_scratchpad(&mut self) {
+        self.toggle_shelf();
+    }
+
+    /// Tabbed groups (super+g): if the focused tiled window is in a stack, cycle
+    /// to the next tab; otherwise group it with the next tiled window into a new
+    /// stack (they share one tile under a tab strip — see chrome.rs).
+    pub fn group_or_cycle(&mut self) {
+        let Some(f) = self.focused_window() else { return };
+        if !self.workspaces.active_ref().tree.contains(&f) { return; } // tiled only
+
+        // Already grouped → advance to the next member.
+        if let Some(si) = self.workspaces.active_ref().stack_of(&f) {
+            let (old, new) = {
+                let ws = self.workspaces.active();
+                let s = &mut ws.stacks[si];
+                if s.members.len() < 2 { return; }
+                let old = s.members[s.active].clone();
+                s.active = (s.active + 1) % s.members.len();
+                let new = s.members[s.active].clone();
+                (old, new)
+            };
+            let ws = self.workspaces.active();
+            ws.tree.replace_window(&old, &new);
+            ws.tree.focus_window(&new);
+            self.space.unmap_elem(&old);
+            self.open_anims.retain(|(x, _)| x != &new);
+            self.open_anims.push((new, None));
+            self.relayout();
+            self.update_keyboard_focus();
+            self.emit_workspaces();
+            return;
+        }
+
+        // Not grouped → stack with the next tiled window that isn't already in
+        // a stack (so we never list one window in two stacks).
+        let wins = self.workspaces.active_ref().tree.windows();
+        if wins.len() < 2 { return; }
+        let target = {
+            let ws = self.workspaces.active_ref();
+            let fi = wins.iter().position(|w| w == &f).unwrap_or(0);
+            let n = wins.len();
+            let mut t = None;
+            for k in 1..n {
+                let cand = &wins[(fi + k) % n];
+                if cand != &f && ws.stack_of(cand).is_none() { t = Some(cand.clone()); break; }
+            }
+            t
+        };
+        let Some(target) = target else { return; };
+        let ws = self.workspaces.active();
+        ws.tree.remove(&target);
+        ws.stacks.push(crate::workspaces::Stack {
+            members: vec![f.clone(), target.clone()], active: 0,
+        });
+        ws.tree.focus_window(&f);
+        self.space.unmap_elem(&target);
+        self.relayout();
+        self.update_keyboard_focus();
+        self.emit_workspaces();
+    }
+
+    /// Ungroup (super+shift+g): dissolve the focused window's stack — the hidden
+    /// members tile back in, the active one stays put.
+    pub fn ungroup(&mut self) {
+        let Some(f) = self.focused_window() else { return };
+        let Some(si) = self.workspaces.active_ref().stack_of(&f) else { return };
+        let ws = self.workspaces.active();
+        let stack = ws.stacks.remove(si);
+        let active = stack.members[stack.active].clone();
+        for m in stack.members {
+            if m == active { continue; }
+            ws.tree.insert(m);
+        }
+        ws.tree.focus_window(&active);
+        self.relayout();
+        self.update_keyboard_focus();
+        self.emit_workspaces();
+    }
+
     /// Fullscreen on/off for a specific window.
     pub fn set_fullscreen(&mut self, window: &Window, on: bool) {
         let ws = self.workspaces.active();
@@ -1177,6 +1411,7 @@ impl State {
                 else  { s.states.unset(xdg_toplevel::State::Fullscreen); }
             });
         }
+        self.fullscreen_anim = Some((std::time::Instant::now(), on, window.clone()));
         self.relayout();
     }
 
@@ -1261,8 +1496,61 @@ impl State {
         best.map(|(_, w)| w)
     }
 
+    /// The nearest other monitor in a screen direction from the focused one.
+    pub fn output_in_dir(&self, dir: crate::input::Dir) -> Option<Output> {
+        use crate::input::Dir;
+        let cur = self.focused_output()?;
+        let g = self.space.output_geometry(&cur)?;
+        let c = (g.loc.x + g.size.w / 2, g.loc.y + g.size.h / 2);
+        self.space.outputs()
+            .filter(|o| **o != cur)
+            .filter_map(|o| {
+                let og = self.space.output_geometry(o)?;
+                let oc = (og.loc.x + og.size.w / 2, og.loc.y + og.size.h / 2);
+                let (dx, dy) = ((oc.0 - c.0) as i64, (oc.1 - c.1) as i64);
+                let ok = match dir {
+                    Dir::Left  => dx < 0 && dx.abs() >= dy.abs(),
+                    Dir::Right => dx > 0 && dx.abs() >= dy.abs(),
+                    Dir::Up    => dy < 0 && dy.abs() >= dx.abs(),
+                    Dir::Down  => dy > 0 && dy.abs() >= dx.abs(),
+                };
+                ok.then_some((dx * dx + dy * dy, o.clone()))
+            })
+            .min_by_key(|(d, _)| *d)
+            .map(|(_, o)| o)
+    }
+
+    /// Jump focus (and the pointer) to the monitor in `dir`.
+    pub fn focus_output_dir(&mut self, dir: crate::input::Dir) {
+        let Some(o) = self.output_in_dir(dir) else { return };
+        let name = o.name();
+        self.warp_to_output(&name);
+        if self.workspaces.focus_output(&name) {
+            self.update_keyboard_focus();
+            self.emit_workspaces();
+        }
+    }
+
+    /// Send the focused window to the desk on the monitor in `dir`; you and
+    /// the pointer follow it there.
+    pub fn move_to_output_dir(&mut self, dir: crate::input::Dir) {
+        let Some(w) = self.focused_window() else { return };
+        let Some(o) = self.output_in_dir(dir) else { return };
+        let name = o.name();
+        let Some(id) = self.workspaces.shown_on(&name) else { return };
+        if self.chrome.pinned.contains(&w) { return; }
+        self.detach_group_member(&w);
+        self.workspaces.move_window_to(&w, id);
+        self.warp_to_output(&name);
+        self.workspaces.focus_output(&name);
+        self.relayout();
+        self.focus_window(&w);
+        self.emit_workspaces();
+    }
+
     pub fn focus_dir(&mut self, dir: crate::input::Dir) {
-        let Some(target) = self.window_in_dir(dir) else { return };
+        // nothing further this way on this monitor → continue onto the next one
+        let Some(target) = self.window_in_dir(dir) else { return self.focus_output_dir(dir) };
         let ws = self.workspaces.active();
         if ws.floating.iter().any(|(w, _)| w == &target) {
             ws.focus_floating = Some(target);
@@ -1277,7 +1565,8 @@ impl State {
         let Some(focused) = self.focused_window() else { return };
         let ws = self.workspaces.active();
         if ws.floating.iter().any(|(w, _)| w == &focused) { return; }
-        let Some(target) = self.window_in_dir(dir) else { return };
+        // at the edge of this monitor → carry the window onto the next one
+        let Some(target) = self.window_in_dir(dir) else { return self.move_to_output_dir(dir) };
         let ws = self.workspaces.active();
         if ws.floating.iter().any(|(w, _)| w == &target) { return; }
         ws.tree.swap_windows(&focused, &target);
@@ -1319,12 +1608,20 @@ impl State {
     pub fn drag_update(&mut self) {
         let Some(drag) = self.drag.clone() else { return };
 
-        // Tiled right-drag: trade split ratios with the neighbors, KDE-style.
+        // Tiled right-drag / seam-drag: trade split ratios with the neighbors,
+        // KDE-style. Coalesce to a frame budget — applying on every motion event
+        // floods clients with stale configures so they trail the cursor.
         if drag.tile_resize {
+            if drag.last_apply.elapsed() < std::time::Duration::from_millis(8) {
+                return;   // accumulate the delta; don't re-anchor start_ptr
+            }
             let Some(vp) = self.tiling_viewport() else { return };
             let dx = self.pointer_location.x - drag.start_ptr.x;
             let dy = self.pointer_location.y - drag.start_ptr.y;
-            if let Some(d) = self.drag.as_mut() { d.start_ptr = self.pointer_location; }
+            if let Some(d) = self.drag.as_mut() {
+                d.start_ptr = self.pointer_location;
+                d.last_apply = std::time::Instant::now();
+            }
             let tree = &mut self.workspaces.active().tree;
             tree.focus_window(&drag.window);
             if dx.abs() >= 1.0 {
@@ -1355,13 +1652,49 @@ impl State {
         let loc = entry.1.loc;
         self.space.map_element(drag.window.clone(), loc, true);
         self.pending_redraw = true;
+
+        // Live drop preview: when rearranging a tile — or aero-snapping a floating
+        // window to a workspace edge — reflow the layout to show where it'll land
+        // (only relayout when the target/split actually changes). Skip resizes.
+        if !drag.resize {
+            // Smooth pointer velocity (EMA) for throw-to-snap on release. Use
+            // the per-frame delta (last_ptr → now); start_ptr isn't re-anchored.
+            let ptr = self.pointer_location;
+            if let Some(d) = self.drag.as_mut() {
+                let dt = d.last_motion.elapsed().as_secs_f64().max(1.0 / 1000.0);
+                if dt < 0.1 {
+                    let inst = ((ptr.x - d.last_ptr.x) / dt, (ptr.y - d.last_ptr.y) / dt);
+                    d.vel.0 = d.vel.0 * 0.6 + inst.0 * 0.4;
+                    d.vel.1 = d.vel.1 * 0.6 + inst.1 * 0.4;
+                } else {
+                    d.vel = (0.0, 0.0); // long idle pause → not a throw
+                }
+                d.last_motion = std::time::Instant::now();
+                d.last_ptr = ptr;
+            }
+            // Over the stage shelf: no layout preview; the shelf lights up.
+            let over_shelf = self.pointer_over_shelf() && !self.chrome.pinned.contains(&drag.window);
+            if over_shelf != self.chrome.shelf_drop {
+                self.chrome.shelf_drop = over_shelf;
+                self.pending_redraw = true;
+            }
+            let new_prev = if over_shelf { None } else { self.compute_drop_preview() };
+            let changed = match (self.drop_preview.as_ref(), new_prev.as_ref()) {
+                (Some(a), Some(b)) =>
+                    window_id(&a.target) != window_id(&b.target) || a.t_rect != b.t_rect
+                        || a.ghost != b.ghost || a.root_edge != b.root_edge || a.join != b.join,
+                (None, None) => false,
+                _ => true,
+            };
+            if changed { self.drop_preview = new_prev; self.relayout(); }
+        }
     }
 
     /// Click-to-focus: focus the window under the cursor (layer surfaces
     /// like the bar receive pointer events but never steal keyboard focus).
     pub fn focus_window_at_cursor(&mut self) {
         let pos = self.pointer_location;
-        let Some(window) = self.space.element_under(pos).map(|(w, _)| w.clone()) else { return };
+        let Some(window) = self.window_under(pos).map(|(w, _)| w) else { return };
         let ws = self.workspaces.active();
         if ws.floating.iter().any(|(w, _)| w == &window) {
             ws.focus_floating = Some(window.clone());
@@ -1378,20 +1711,46 @@ impl State {
     /// trade. Returns true if a grab started. Shared by the mouse PointerButton
     /// handler and the touch emulation (touch always passes left = move).
     pub fn try_begin_super_drag(&mut self, code: u32) -> bool {
+        const BTN_LEFT:  u32 = 0x110;
         const BTN_RIGHT: u32 = 0x111;
         let pos = self.pointer_location;
-        let Some(window) = self.space.element_under(pos).map(|(w, _)| w.clone()) else { return false };
+        let Some(window) = self.window_under(pos).map(|(w, _)| w) else { return false };
         let floating_rect = self.workspaces.active_ref().floating.iter()
             .find(|(w, _)| w == &window).map(|(_, r)| *r);
         let tiled = floating_rect.is_none() && self.workspaces.active_ref().tree.contains(&window);
+
+        // Tiled + left-drag: detach the window in place so it follows the cursor,
+        // then re-tile it at the drop target on release (drag-to-rearrange).
+        // A grouped tile leaves its group first; its siblings keep the slot.
+        if tiled && code == BTN_LEFT && self.pull_grouped(&window) {
+            return true;
+        }
+        if tiled && code == BTN_LEFT {
+            let geo = self.space.element_geometry(&window).unwrap_or_else(|| {
+                Rectangle::new((pos.x as i32 - 300, pos.y as i32 - 20).into(), (600, 400).into())
+            });
+            self.float_window_at(&window, geo);
+            self.drag = Some(Drag {
+                window, resize: false, tile_resize: false, from_tile: true,
+                start_ptr: pos, start_rect: geo,
+                started: std::time::Instant::now(), last_apply: std::time::Instant::now(),
+                vel: (0.0, 0.0), last_motion: std::time::Instant::now(), last_ptr: pos,
+            });
+            return true;
+        }
+
         let drag = match (floating_rect, tiled, code) {
             (Some(start_rect), _, _) => Some(Drag {
                 window: window.clone(), resize: code == BTN_RIGHT, tile_resize: false,
                 start_ptr: pos, start_rect, started: std::time::Instant::now(),
+                last_apply: std::time::Instant::now(), from_tile: false,
+                vel: (0.0, 0.0), last_motion: std::time::Instant::now(), last_ptr: pos,
             }),
             (None, true, BTN_RIGHT) => Some(Drag {
                 window: window.clone(), resize: true, tile_resize: true,
                 start_ptr: pos, start_rect: Default::default(), started: std::time::Instant::now(),
+                last_apply: std::time::Instant::now(), from_tile: false,
+                vel: (0.0, 0.0), last_motion: std::time::Instant::now(), last_ptr: pos,
             }),
             _ => None,
         };
@@ -1404,12 +1763,345 @@ impl State {
         }
     }
 
+    /// The live drop preview for the in-flight tile drag: the hovered tile split
+    /// in half by cursor position. None when not over a droppable tile. Uses
+    /// `tile_geos` (the live layout, which already excludes the floating window).
+    fn compute_drop_preview(&self) -> Option<DropPreview> {
+        let drag = self.drag.as_ref()?;
+        if drag.resize { return None; }
+        // Tiled rearrange gets the full preview (edge zones + per-tile split); a
+        // floating window only aero-snaps at the workspace EDGES (edge_only).
+        self.drop_preview_at(self.pointer_location, &drag.window, !drag.from_tile)
+    }
+
+    /// The drop preview for an arbitrary point and dragged window. Split out so
+    /// throw-to-snap can probe a *projected* release point (cursor + flick
+    /// momentum) without depending on `self.drag` still being live. `edge_only`
+    /// restricts to workspace-edge snaps (used for floating windows).
+    fn drop_preview_at(&self, pos: Point<f64, Logical>, dragged: &Window, edge_only: bool) -> Option<DropPreview> {
+        let did = window_id(dragged);
+        use crate::layout::Direction;
+        let gap = self.config.theme.gap;
+
+        // ── workspace EDGE zones (checked first) ────────────────────────────
+        // Cursor within EDGE px of a SCREEN edge → the window takes that whole
+        // column/row (a root-level split). Hit-test against the full output (not
+        // the inset tiling viewport) so pushing to the very edge — past the gap —
+        // still triggers; the ghost/reflow stay viewport-based. Only when there's
+        // an existing layout to push aside.
+        if let Some(vp) = self.tiling_viewport() {
+            let others = self.tile_geos.keys().filter(|id| **id != did).count();
+            let screen = self.focused_output()
+                .and_then(|o| self.space.output_geometry(&o));
+            tracing::info!(edge_only, others, tile_geos = self.tile_geos.len(),
+                screen_some = screen.is_some(), "drop_preview_at edge entry");
+            if let Some(g) = screen {
+                let (gx, gy) = (g.loc.x as f64, g.loc.y as f64);
+                let (gw, gh) = (g.size.w as f64, g.size.h as f64);
+                const EDGE: f64 = 64.0;   // hot-zone depth from the screen edge
+                let inset = |r: Rectangle<i32, Logical>| Rectangle::new(
+                    (r.loc.x + gap / 2, r.loc.y + gap / 2).into(),
+                    ((r.size.w - gap).max(1), (r.size.h - gap).max(1)).into());
+                // With existing tiles the snapped window takes HALF (a column/row);
+                // with none it just fills the area (becomes the sole tile).
+                let hw = if others >= 1 { vp.size.w / 2 } else { vp.size.w };
+                let hh = if others >= 1 { vp.size.h / 2 } else { vp.size.h };
+                let edge = if pos.x < gx + EDGE {
+                    Some((Direction::Horizontal, true,  Rectangle::new(vp.loc, (hw, vp.size.h).into())))
+                } else if pos.x > gx + gw - EDGE {
+                    Some((Direction::Horizontal, false, Rectangle::new((vp.loc.x + vp.size.w - hw, vp.loc.y).into(), (hw, vp.size.h).into())))
+                } else if pos.y < gy + EDGE {
+                    Some((Direction::Vertical, true,  Rectangle::new(vp.loc, (vp.size.w, hh).into())))
+                } else if pos.y > gy + gh - EDGE {
+                    Some((Direction::Vertical, false, Rectangle::new((vp.loc.x, vp.loc.y + vp.size.h - hh).into(), (vp.size.w, hh).into())))
+                } else { None };
+                tracing::info!(?pos, gx, gy, gw, gh, others, edge_only,
+                    matched = edge.is_some(), "edge_zone_check");
+                if let Some((dir, before, raw)) = edge {
+                    let ghost = inset(raw);
+                    return Some(DropPreview {
+                        target: dragged.clone(), t_rect: ghost, ghost, dir, before, root_edge: true, join: false });
+                }
+            }
+        }
+
+        // Floating aero-snap only engages at the edges — never split a tile.
+        if edge_only { return None; }
+
+        // ── tab groups: onto a strip, or the middle of a tile → join ────────
+        if let Some(s) = self.chrome.strips.iter()
+            .find(|s| s.rect.to_f64().contains(pos) && &s.active != dragged)
+        {
+            let tile = self.tile_geos.get(&window_id(&s.active)).copied().unwrap_or(s.rect);
+            let ghost = Rectangle::new(s.rect.loc,
+                (s.rect.size.w, tile.loc.y + tile.size.h - s.rect.loc.y).into());
+            return Some(DropPreview { target: s.active.clone(), t_rect: tile, ghost,
+                dir: Direction::Horizontal, before: false, root_edge: false, join: true });
+        }
+        if let Some((tid, r)) = self.tile_geos.iter()
+            .filter(|(id, _)| **id != did)
+            .find(|(_, rr)| {
+                // the middle third (both axes) of a tile
+                let (mx, my) = (rr.size.w as f64 / 3.0, rr.size.h as f64 / 3.0);
+                pos.x > rr.loc.x as f64 + mx && pos.x < (rr.loc.x + rr.size.w) as f64 - mx
+                    && pos.y > rr.loc.y as f64 + my && pos.y < (rr.loc.y + rr.size.h) as f64 - my
+            })
+            .map(|(id, r)| (*id, *r))
+        {
+            let target = self.workspaces.active_ref().tree.windows()
+                .into_iter().find(|w| window_id(w) == tid)?;
+            let ghost = self.chrome.strips.iter().find(|s| s.active == target)
+                .map(|s| Rectangle::new(s.rect.loc, (r.size.w, r.loc.y + r.size.h - s.rect.loc.y).into()))
+                .unwrap_or(r);
+            return Some(DropPreview { target, t_rect: r, ghost,
+                dir: Direction::Horizontal, before: false, root_edge: false, join: true });
+        }
+
+        // ── otherwise: split the hovered tile in half ───────────────────────
+        let (tid, r) = self.tile_geos.iter()
+            .filter(|(id, _)| **id != did)
+            .find(|(_, rr)| rr.to_f64().contains(pos))
+            .map(|(id, r)| (*id, *r))?;
+        let target = self.workspaces.active_ref().tree.windows()
+            .into_iter().find(|w| window_id(w) == tid)?;
+        // Split the tile along its longer axis; the cursor's half is the ghost.
+        let (dir, before, t_rect, ghost) = if r.size.w >= r.size.h {
+            let half = ((r.size.w - gap) / 2).max(1);
+            let left  = Rectangle::new(r.loc, (half, r.size.h).into());
+            let right = Rectangle::new(
+                (r.loc.x + r.size.w - half, r.loc.y).into(), (half, r.size.h).into());
+            if pos.x < (r.loc.x + r.size.w / 2) as f64 {
+                (Direction::Horizontal, true, right, left)
+            } else {
+                (Direction::Horizontal, false, left, right)
+            }
+        } else {
+            let half = ((r.size.h - gap) / 2).max(1);
+            let top    = Rectangle::new(r.loc, (r.size.w, half).into());
+            let bottom = Rectangle::new(
+                (r.loc.x, r.loc.y + r.size.h - half).into(), (r.size.w, half).into());
+            if pos.y < (r.loc.y + r.size.h / 2) as f64 {
+                (Direction::Vertical, true, bottom, top)
+            } else {
+                (Direction::Vertical, false, top, bottom)
+            }
+        };
+        Some(DropPreview { target, t_rect, ghost, dir, before, root_edge: false, join: false })
+    }
+
+    /// Finish a drag: re-tile a detached (from_tile) window where the live
+    /// preview showed it — splitting the hovered tile on the previewed side.
+    /// An empty drop re-tiles at the focused slot. Non-tiling drags just ease.
+    pub fn drop_dragged(&mut self, drag: Drag) {
+        let mut preview = self.drop_preview.take();
+        let over_shelf = std::mem::take(&mut self.chrome.shelf_drop);
+        if drag.resize { return; }   // tiled/floating resizes settle themselves
+
+        // Dropped on the stage shelf → stash it there, at the drop position.
+        if over_shelf && !self.chrome.pinned.contains(&drag.window) {
+            let at = self.shelf_drop_index();
+            self.stash(&drag.window, at);
+            return;
+        }
+
+        // Throw-to-snap: released over empty space, but flicked hard — project the
+        // release point along the flick and land there, so a quick toss snaps home
+        // without pixel-precise aim. Floating drags only probe EDGES (edge_only).
+        if preview.is_none() {
+            let speed = (drag.vel.0 * drag.vel.0 + drag.vel.1 * drag.vel.1).sqrt();
+            const FLICK: f64 = 900.0;      // px/s — above this is a deliberate toss
+            const LOOKAHEAD: f64 = 0.14;   // project ~140ms of travel ahead
+            if speed > FLICK {
+                let projected = Point::from((
+                    self.pointer_location.x + drag.vel.0 * LOOKAHEAD,
+                    self.pointer_location.y + drag.vel.1 * LOOKAHEAD,
+                ));
+                preview = self.drop_preview_at(projected, &drag.window, !drag.from_tile);
+            }
+        }
+
+        tracing::info!(from_tile = drag.from_tile, resize = drag.resize,
+            preview_some = preview.is_some(),
+            root_edge = preview.as_ref().map(|p| p.root_edge),
+            "drop_dragged");
+        // Floating window: aero-snap into the tiling ONLY if it landed on an edge
+        // zone; otherwise leave it floating where it was dropped.
+        if !drag.from_tile {
+            match preview.filter(|p| p.root_edge) {
+                Some(p) => {
+                    let ws = self.workspaces.active();
+                    ws.floating.retain(|(w, _)| w != &drag.window);
+                    ws.focus_floating = None;
+                    ws.tree.insert_at_root_edge(drag.window.clone(), p.dir, p.before);
+                    self.drag_release = Some((drag.window, std::time::Instant::now()));
+                    self.relayout();
+                    self.update_keyboard_focus();
+                    self.emit_workspaces();
+                }
+                None => self.drag_release = Some((drag.window, std::time::Instant::now())),
+            }
+            return;
+        }
+
+        // Onto a tab strip / a tile's middle → it joins that tab group.
+        if let Some(p) = preview.as_ref().filter(|p| p.join) {
+            let target = p.target.clone();
+            self.join_group(&target, &drag.window);
+            self.drag_release = Some((drag.window, std::time::Instant::now()));
+            self.relayout();
+            self.update_keyboard_focus();
+            self.emit_workspaces();
+            return;
+        }
+
+        // Tiled (detached) window: re-tile where the live preview showed it.
+        let ws = self.workspaces.active();
+        ws.floating.retain(|(w, _)| w != &drag.window);
+        ws.focus_floating = None;
+        if let Some(p) = preview {
+            if p.root_edge {
+                // Full-span edge column/row → wrap the whole tree at the root.
+                ws.tree.insert_at_root_edge(drag.window.clone(), p.dir, p.before);
+            } else {
+                ws.tree.focus_window(&p.target);
+                ws.tree.next_split_override = Some(p.dir);
+                ws.tree.insert(drag.window.clone());  // splits target → [target, dragged]
+                if p.before {
+                    // ghost was on the left/top → put the dragged window first
+                    ws.tree.swap_windows(&p.target, &drag.window);
+                }
+            }
+        } else {
+            ws.tree.insert(drag.window.clone());  // no target — re-tile at focus
+        }
+        self.drag_release = Some((drag.window, std::time::Instant::now()));
+        self.relayout();
+        self.update_keyboard_focus();
+        self.emit_workspaces();
+    }
+
+    /// Direct-manipulation tiling: grab the visible seam between two tiled
+    /// windows with the BARE mouse (no Super) and drag to retrade their split
+    /// ratios — like dragging a tile border in Hyprland/KDE. Detects a draggable
+    /// seam when the pointer sits within ~gap px of a tile edge that has a
+    /// neighbor on the far side; resizes the near (left/top) window's split.
+    /// Returns true if a seam grab started (the press is then swallowed).
+    pub fn try_begin_seam_resize(&mut self) -> bool {
+        let pos = self.pointer_location;
+        if let Some((w, _)) = self.seam_at_pointer() {
+            self.begin_tile_resize(w, pos);
+            return true;
+        }
+        false
+    }
+
+    /// Hit-test the pointer against the gaps between tiled windows. Returns the
+    /// near (left/top) window plus the resize orientation (`true` = vertical
+    /// seam → horizontal EW resize; `false` = horizontal seam → NS resize) when
+    /// the pointer sits in a draggable seam. Backs both the bare-mouse seam grab
+    /// and the hover resize-cursor affordance.
+    pub fn seam_at_pointer(&self) -> Option<(Window, bool)> {
+        let pos = self.pointer_location;
+        let (px, py) = (pos.x, pos.y);
+        // Stay in the gap between tiles (+a small tolerance) so we never steal a
+        // click that's meant for window content near the edge.
+        let gap = (self.config.theme.gap as f64).max(4.0);
+        let tol = 4.0;
+        // A grouped tile's tab strip is part of the tile: seams are measured
+        // from the top of its strip, not the window under it.
+        let tiled: Vec<(Window, Rectangle<i32, Logical>)> =
+            self.workspaces.active_ref().tree.windows().into_iter()
+                .filter_map(|w| self.space.element_geometry(&w).map(|mut g| {
+                    if let Some(s) = self.chrome.strips.iter().find(|s| s.active == w) {
+                        g.size.h += g.loc.y - s.rect.loc.y;
+                        g.loc.y = s.rect.loc.y;
+                    }
+                    (w, g)
+                }))
+                .collect();
+        if tiled.len() < 2 { return None; }
+
+        for (w, g) in &tiled {
+            let right  = (g.loc.x + g.size.w) as f64;
+            let bottom = (g.loc.y + g.size.h) as f64;
+            let span_y = py >= g.loc.y as f64 && py <= bottom;
+            let span_x = px >= g.loc.x as f64 && px <= right;
+            // vertical seam → horizontal resize of this (left) window. The gap
+            // to the right runs [right, right+gap]; grab inside it (+tol).
+            if span_y && px >= right - tol && px <= right + gap + tol {
+                let has_right = tiled.iter().any(|(_, o)| {
+                    let ol = o.loc.x as f64;
+                    ol >= right && ol <= right + gap + tol
+                        && py >= o.loc.y as f64 && py <= (o.loc.y + o.size.h) as f64
+                });
+                if has_right { return Some((w.clone(), true)); }
+            }
+            // horizontal seam → vertical resize of this (top) window
+            if span_x && py >= bottom - tol && py <= bottom + gap + tol {
+                let has_below = tiled.iter().any(|(_, o)| {
+                    let ot = o.loc.y as f64;
+                    ot >= bottom && ot <= bottom + gap + tol
+                        && px >= o.loc.x as f64 && px <= (o.loc.x + o.size.w) as f64
+                });
+                if has_below { return Some((w.clone(), false)); }
+            }
+        }
+        None
+    }
+
+    /// After a plain pointer move, show a resize cursor when hovering a seam so
+    /// the drag-to-resize affordance is discoverable. Only overrides the cursor
+    /// when no client owns it (the gap is compositor background); reverts to the
+    /// arrow when leaving a seam over that same background.
+    pub fn update_seam_cursor(&mut self) {
+        use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+        // A client surface under the pointer owns the cursor — don't fight it.
+        if matches!(self.cursor_status, CursorImageStatus::Surface(_)) { return; }
+        match self.seam_at_pointer() {
+            Some((_, horizontal)) => {
+                let icon = if horizontal { CursorIcon::EwResize } else { CursorIcon::NsResize };
+                self.cursor_status = CursorImageStatus::Named(icon);
+            }
+            None => {
+                // Revert a lingering resize cursor once we leave the seam.
+                if matches!(self.cursor_status,
+                    CursorImageStatus::Named(CursorIcon::EwResize | CursorIcon::NsResize))
+                {
+                    self.cursor_status = CursorImageStatus::default_named();
+                }
+            }
+        }
+    }
+
+    fn begin_tile_resize(&mut self, window: Window, pos: Point<f64, Logical>) {
+        self.workspaces.active().tree.focus_window(&window);
+        self.update_keyboard_focus();
+        self.drag = Some(Drag {
+            window, resize: true, tile_resize: true,
+            start_ptr: pos, start_rect: Default::default(),
+            started: std::time::Instant::now(),
+            last_apply: std::time::Instant::now(), from_tile: false,
+            vel: (0.0, 0.0), last_motion: std::time::Instant::now(), last_ptr: pos,
+        });
+    }
+
     // ── touchscreen → pointer emulation ──────────────────────────────────────
     // vendiOS is a laptop-with-touchscreen target, so touch acts like the mouse.
     // ~8px slop separates a tap from a drag; a 450ms still hold is a right click.
     fn emul_motion(&mut self, pos: Point<f64, Logical>, time: u32) {
         let Some(pointer) = self.seat.get_pointer() else { return };
         self.pointer_location = pos;
+        // A finger on a tab / shelf card: chrome owns it (and may turn it into
+        // a tear-off drag, which then follows the finger like a mouse drag).
+        if self.drag.is_some() && self.chrome.press.is_none() && self.touch_chrome_drag {
+            self.drag_update();
+            return;
+        }
+        if self.chrome_motion() {
+            if self.drag.is_some() { self.touch_chrome_drag = true; }
+            self.pending_redraw = true;
+            return;
+        }
         let under = self.surface_under(pos);
         pointer.motion(self, under, &MotionEvent {
             location: pos, serial: SERIAL_COUNTER.next_serial(), time,
@@ -1420,6 +2112,15 @@ impl State {
 
     fn emul_button(&mut self, code: u32, pressed: bool, time: u32) {
         let Some(pointer) = self.seat.get_pointer() else { return };
+        if !pressed && std::mem::take(&mut self.touch_chrome_drag) {
+            if let Some(drag) = self.drag.take() { self.drop_dragged(drag); }
+            self.pending_redraw = true;
+            return;
+        }
+        if self.chrome_button(code, pressed) {
+            self.pending_redraw = true;
+            return;
+        }
         pointer.button(self, &ButtonEvent {
             button: code,
             state:  if pressed { ButtonState::Pressed } else { ButtonState::Released },
@@ -1436,11 +2137,7 @@ impl State {
         match t.phase {
             TouchPhase::Dragging => self.emul_button(0x110, false, time),
             TouchPhase::WindowMove => {
-                if let Some(drag) = self.drag.take() {
-                    if !drag.resize {
-                        self.drag_release = Some((drag.window, std::time::Instant::now()));
-                    }
-                }
+                if let Some(drag) = self.drag.take() { self.drop_dragged(drag); }
                 self.pending_redraw = true;
             }
             _ => {}
@@ -1585,11 +2282,7 @@ impl State {
             }
             TouchPhase::Dragging => self.emul_button(0x110, false, time),
             TouchPhase::WindowMove => {
-                if let Some(drag) = self.drag.take() {
-                    if !drag.resize {
-                        self.drag_release = Some((drag.window, std::time::Instant::now()));
-                    }
-                }
+                if let Some(drag) = self.drag.take() { self.drop_dragged(drag); }
                 self.pending_redraw = true;
             }
             TouchPhase::Consumed => {}
@@ -1659,6 +2352,7 @@ impl State {
             }
             kb.change_repeat_info(rate, delay);
         }
+        self.write_kb_layout();
         let cfgs = self.config.outputs.clone();
         let outs: Vec<_> = self.space.outputs().cloned().collect();
         for o in outs {
@@ -1809,60 +2503,333 @@ impl State {
                     self.pending_redraw = true;
                 }
             }
+            CycleKbLayout       => {
+                if let Some(kb) = self.seat.get_keyboard() {
+                    kb.with_xkb_state(self, |mut ctx| ctx.cycle_next_layout());
+                }
+                // The bar watches $XDG_RUNTIME_DIR/vendiwm-kblayout and shows a
+                // notch popup on change — no notify-send needed.
+                self.write_kb_layout();
+            }
+            MoveToScratchpad    => self.move_to_scratchpad(),
+            ToggleScratchpad    => self.toggle_scratchpad(),
+            GroupOrCycle        => self.group_or_cycle(),
+            StagePull           => self.stage_pull_next(),
+            Pin                 => self.toggle_pin(),
+            FocusOutput(d)      => self.focus_output_dir(d),
+            MoveToOutput(d)     => self.move_to_output_dir(d),
+            Ungroup             => self.ungroup(),
             Lock                => self.lock_session(),
             Quit => { self.quit_requested = true; return true; }
         }
         false
     }
 
-    /// Output area minus layer-shell exclusive zones (the bar), minus the
+    /// Publish the active keyboard layout for the bar to read. Writes a short
+    /// upper-case code (e.g. "US"/"ES") to $XDG_RUNTIME_DIR/vendiwm-kblayout, or
+    /// an empty file when only one layout is configured (so the bar hides the
+    /// indicator). The bar watches this file (FileView) and shows it live.
+    pub fn write_kb_layout(&mut self) {
+        let Some(kb) = self.seat.get_keyboard() else { return };
+        let (idx, count) = kb.with_xkb_state(self, |ctx| {
+            let xkb = ctx.xkb().lock().unwrap();
+            (xkb.active_layout().0, xkb.layouts().count())
+        });
+        let code = if count <= 1 {
+            String::new()
+        } else {
+            self.config.kb_layout.split(',')
+                .nth(idx as usize)
+                .map(|s| s.trim().to_uppercase())
+                .unwrap_or_default()
+        };
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+            let path = std::path::Path::new(&dir).join("vendiwm-kblayout");
+            let _ = std::fs::write(path, format!("{code}\n"));
+        }
+    }
+
+    /// Match the workspace model to the connected monitors: a new monitor
+    /// gets a desk, an unplugged one takes its desk off screen (a reconnect
+    /// brings it back). Call after outputs are mapped/unmapped.
+    pub fn sync_outputs(&mut self) {
+        let names: Vec<String> = self.space.outputs().map(|o| o.name()).collect();
+        let gone: Vec<String> = self.workspaces.shown().iter()
+            .map(|(o, _)| o.clone())
+            .filter(|o| !names.contains(o))
+            .collect();
+        for o in gone {
+            for w in self.workspaces.output_removed(&o) { self.space.unmap_elem(&w); }
+        }
+        for n in &names { self.workspaces.output_added(n); }
+        self.emit_workspaces();
+    }
+
+    /// The monitor absolute pointer/touch input maps onto: the laptop's
+    /// built-in panel (that's where the touchscreen is), else the first one.
+    pub fn touch_output(&self) -> Option<Output> {
+        self.space.outputs()
+            .find(|o| { let n = o.name(); n.starts_with("Embedded") || n.starts_with("eDP") || n.starts_with("LVDS") })
+            .or_else(|| self.space.outputs().next())
+            .cloned()
+    }
+
+    /// Which monitors show this surface (via its root: a mapped window or a
+    /// layer surface). None when it can't be placed.
+    fn surface_outputs(&self, surface: &WlSurface) -> Option<Vec<String>> {
+        let mut root = surface.clone();
+        while let Some(p) = smithay::wayland::compositor::get_parent(&root) { root = p; }
+        if let Some(w) = self.space.elements().find(|w| w.wl_surface().is_some_and(|s| *s == root)) {
+            return Some(self.space.outputs_for_element(w).iter().map(|o| o.name()).collect());
+        }
+        for o in self.space.outputs() {
+            let map = layer_map_for_output(o);
+            if map.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL).is_some() {
+                return Some(vec![o.name()]);
+            }
+        }
+        None
+    }
+
+    /// The lock surface the locker made for this monitor.
+    pub fn lock_surface_on(&self, output: &str) -> Option<&LockSurface> {
+        self.lock_surfaces.iter().find(|(n, _)| n == output).map(|(_, s)| s)
+    }
+
+    /// Executable name of a window's client (/proc/<pid>/comm) — "" if unknown.
+    pub fn window_process(&self, w: &Window) -> String {
+        #[cfg(feature = "xwayland")]
+        if let Some(x) = w.x11_surface() {
+            return x.pid().and_then(|p| std::fs::read_to_string(format!("/proc/{p}/comm")).ok())
+                .map(|s| s.trim().to_string()).unwrap_or_default();
+        }
+        w.wl_surface()
+            .and_then(|s| s.client())
+            .and_then(|c| c.get_credentials(&self.display_handle).ok())
+            .and_then(|cr| std::fs::read_to_string(format!("/proc/{}/comm", cr.pid)).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// A monitor by connector name.
+    pub fn output_named(&self, name: &str) -> Option<Output> {
+        self.space.outputs().find(|o| o.name() == name).cloned()
+    }
+
+    /// The focused monitor — the one showing the active workspace (the
+    /// pointer's monitor). Falls back to the first one.
+    pub fn focused_output(&self) -> Option<Output> {
+        self.output_named(self.workspaces.focused_output())
+            .or_else(|| self.space.outputs().next().cloned())
+    }
+
+    /// The pointer crossed onto another monitor: that monitor's desk becomes
+    /// the active one (keybinds, new windows and focus follow you there).
+    pub fn update_output_focus(&mut self) {
+        let pos = self.pointer_location;
+        let Some(name) = self.space.output_under(pos).next().map(|o| o.name()) else { return };
+        let old = self.workspaces.active_id();
+        if name != self.workspaces.focused_output() && self.workspaces.focus_output(&name) {
+            // A window being dragged comes along: it now belongs to the desk
+            // on the monitor it was carried onto (drops land there).
+            if let Some(w) = self.drag.as_ref().map(|d| d.window.clone()) {
+                let entry = self.workspaces.get_mut_existing(old).and_then(|ws| {
+                    let i = ws.floating.iter().position(|(x, _)| x == &w)?;
+                    if ws.focus_floating.as_ref() == Some(&w) { ws.focus_floating = None; }
+                    Some(ws.floating.remove(i))
+                });
+                if let Some(e) = entry {
+                    let ws = self.workspaces.active();
+                    ws.floating.push(e);
+                    ws.focus_floating = Some(w);
+                }
+                self.drop_preview = None;
+                self.emit_workspaces();
+                self.pending_redraw = true;
+                return;
+            }
+            // focus what's under the pointer on the new monitor, if anything
+            if let Some(w) = self.window_under(pos).map(|(w, _)| w) {
+                self.focus_window(&w);
+            } else {
+                self.update_keyboard_focus();
+            }
+            self.emit_workspaces();
+            self.pending_redraw = true;
+        }
+    }
+
+    /// Put the pointer in the middle of a monitor (keyboard jumps between
+    /// monitors, `workspace N` onto a desk shown on the other screen).
+    pub fn warp_to_output(&mut self, name: &str) {
+        let Some(o) = self.output_named(name) else { return };
+        let Some(g) = self.space.output_geometry(&o) else { return };
+        self.pointer_location = (
+            (g.loc.x + g.size.w / 2) as f64,
+            (g.loc.y + g.size.h / 2) as f64,
+        ).into();
+        if let Some(pointer) = self.seat.get_pointer() {
+            let under = self.surface_under(self.pointer_location).map(|(s, p)| (s.into(), p));
+            let loc = self.pointer_location;
+            pointer.motion(self, under, &MotionEvent {
+                location: loc, serial: SERIAL_COUNTER.next_serial(), time: 0,
+            });
+            pointer.frame(self);
+        }
+        self.pending_redraw = true;
+    }
+
+    /// Is the stage shelf on this monitor?
+    fn shelf_here(&self, output: &str) -> bool {
+        self.shelf_visible() && self.shelf_output_name().as_deref() == Some(output)
+    }
+
+    /// Smart-gaps case: a single tiled window, nothing floating/fullscreen, and
+    /// the feature enabled. The lone window fills the screen edge-to-edge (no
+    /// outer margin, no inner gap) — like Hyprland's no_gaps_when_only_one.
+    fn smart_single_on(&self, output: &str, ws_id: u32) -> bool {
+        let Some(ws) = self.workspaces.get(ws_id) else { return false };
+        self.config.theme.smart_gaps
+            && !self.shelf_here(output)
+            && ws.fullscreen.is_none()
+            && ws.floating.is_empty()
+            && ws.tree.windows().len() == 1
+    }
+
+    /// A monitor's area minus layer-shell exclusive zones (the bar), minus the
     /// outer gap. Tiles are later shrunk by GAP_IN/2 per side, so windows
     /// sit GAP_IN apart and GAP_OUT from the screen edge.
-    fn tiling_viewport(&self) -> Option<Rectangle<i32, Logical>> {
-        let output = self.space.outputs().next()?.clone();
-        let geometry = self.space.output_geometry(&output)?;
-        let layer_map = layer_map_for_output(&output);
+    fn viewport_on(&self, output: &Output, ws_id: u32) -> Option<Rectangle<i32, Logical>> {
+        let geometry = self.space.output_geometry(output)?;
+        let layer_map = layer_map_for_output(output);
         let non_exclusive = layer_map.non_exclusive_zone();
         drop(layer_map);
         let mut viewport = geometry;
         viewport.loc  += non_exclusive.loc;
         viewport.size  = non_exclusive.size;
-        let margin = self.config.theme.margin - self.config.theme.gap / 2;
+        let name = output.name();
+        let margin = if self.smart_single_on(&name, ws_id) { 0 }
+                     else { self.config.theme.margin - self.config.theme.gap / 2 };
         viewport.loc.x  += margin;
         viewport.loc.y  += margin;
         viewport.size.w  = (viewport.size.w - margin * 2).max(1);
         viewport.size.h  = (viewport.size.h - margin * 2).max(1);
+        // The stage shelf takes a column on the left; the stage keeps the rest.
+        if self.shelf_here(&name) {
+            viewport.loc.x += crate::chrome::SHELF_W;
+            viewport.size.w = (viewport.size.w - crate::chrome::SHELF_W).max(1);
+        }
         Some(viewport)
     }
 
-    /// Recompute every mapped window's rectangle from the active workspace:
-    /// tiled tree → viewport splits, floating → stored rects (raised),
-    /// fullscreen → whole output, on top of everything.
+    pub fn tiling_viewport_pub(&self) -> Option<Rectangle<i32, Logical>> { self.tiling_viewport() }
+
+    /// The tiling area of the focused monitor's desk.
+    fn tiling_viewport(&self) -> Option<Rectangle<i32, Logical>> {
+        let output = self.focused_output()?;
+        self.viewport_on(&output, self.workspaces.active_id())
+    }
+
+    /// Recompute every mapped window's rectangle: each monitor lays out the
+    /// desk it's showing — tiled tree → that monitor's viewport, floating →
+    /// stored rects (raised), fullscreen → that whole monitor, on top.
     pub fn relayout(&mut self) {
         self.workspaces.prune_dead();
-        let Some(output) = self.space.outputs().next().cloned() else { return };
-        let Some(geometry) = self.space.output_geometry(&output) else { return };
-        let Some(viewport) = self.tiling_viewport() else { return };
 
-        // Safety net: unmap anything that isn't on the active workspace.
-        let visible = self.workspaces.active_ref().windows();
+        // Safety net: unmap anything that isn't on a desk that's on screen.
+        let visible = self.workspaces.visible_windows();
         let stray: Vec<Window> = self.space.elements()
             .filter(|w| !visible.contains(*w))
             .cloned()
             .collect();
         for w in stray { self.space.unmap_elem(&w); }
 
-        let gap = self.config.theme.gap;
-        let mode = self.workspaces.active_ref().mode;
-        let layouts = self.workspaces.active_ref().tree.placements(viewport, mode);
+        self.tile_geos.clear();
+        self.chrome.strips.clear();
+        let shown: Vec<(String, u32)> = self.workspaces.shown().to_vec();
+        for (name, ws_id) in shown {
+            if let Some(output) = self.output_named(&name) {
+                self.layout_desk(&output, ws_id);
+            }
+        }
+
+        // Pinned windows ride above the rest of the floating layer.
+        self.chrome.pinned.retain(|w| w.alive());
+        self.chrome.pinned_from_tile.retain(|w| w.alive());
+        self.chrome.phones.retain(|(w, _)| w.alive());
+        self.chrome.phone_drag.retain(|w| w.alive());
+        self.raise_overlays();
+        self.workspaces.scratchpad.retain(|w| w.alive());
+        self.layout_shelf();
+
+        self.pending_redraw = true;
+    }
+
+    /// Lay out one monitor's desk.
+    fn layout_desk(&mut self, output: &Output, ws_id: u32) {
+        let Some(geometry) = self.space.output_geometry(output) else { return };
+        let Some(viewport) = self.viewport_on(output, ws_id) else { return };
+        let Some(ws) = self.workspaces.get(ws_id) else { return };
+        let focused_desk = ws_id == self.workspaces.active_id();
+        const TILED: [xdg_toplevel::State; 4] = [
+            xdg_toplevel::State::TiledLeft, xdg_toplevel::State::TiledRight,
+            xdg_toplevel::State::TiledTop, xdg_toplevel::State::TiledBottom,
+        ];
+        let bounds = viewport.size;
+
+        let gap = if self.smart_single_on(&output.name(), ws_id) { 0 } else { self.config.theme.gap };
+        let mode = ws.mode;
+        // Edge drop-zone: reflow the existing tree into the half NOT taken by the
+        // full-span ghost column/row, so you see the exact post-drop layout.
+        let mut viewport = viewport;
+        if let Some(p) = self.drop_preview.as_ref().filter(|p| p.root_edge && focused_desk) {
+            use crate::layout::Direction;
+            let hw = viewport.size.w / 2;
+            let hh = viewport.size.h / 2;
+            match (p.dir, p.before) {
+                (Direction::Horizontal, true)  => { viewport.loc.x += hw; viewport.size.w -= hw; }
+                (Direction::Horizontal, false) => { viewport.size.w -= hw; }
+                (Direction::Vertical, true)    => { viewport.loc.y += hh; viewport.size.h -= hh; }
+                (Direction::Vertical, false)   => { viewport.size.h -= hh; }
+            }
+        }
+        let layouts = ws.tree.placements(viewport, mode);
+        // Grouped tiles give the top of their slot to the tab strip.
+        let stacks: Vec<(Window, Vec<Window>)> = ws.stacks.iter()
+            .filter_map(|s| s.active_window().map(|a| (a.clone(), s.members.clone())))
+            .collect();
+        let monocle_top = ws.tree.focused().cloned();
+        let floating = ws.floating.clone();
+        let fullscreen = ws.fullscreen.clone();
         for (window, mut rect) in layouts {
             // Inner gap: half per side so neighbors end up `gap` apart.
             rect.loc.x  += gap / 2;
             rect.loc.y  += gap / 2;
             rect.size.w  = (rect.size.w - gap).max(1);
             rect.size.h  = (rect.size.h - gap).max(1);
+            if let Some((_, members)) = stacks.iter().find(|(a, _)| a == &window) {
+                use crate::chrome::{TAB_H, TAB_GAP};
+                if rect.size.h > (TAB_H + TAB_GAP) * 3 {
+                    self.chrome.strips.push(crate::chrome::TabStrip {
+                        rect: Rectangle::new(rect.loc, (rect.size.w, TAB_H).into()),
+                        active: window.clone(),
+                        members: members.clone(),
+                    });
+                    rect.loc.y += TAB_H + TAB_GAP;
+                    rect.size.h -= TAB_H + TAB_GAP;
+                }
+            }
+            self.tile_geos.insert(window_id(&window), rect);
             if let Some(toplevel) = window.toplevel() {
-                toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
+                toplevel.with_pending_state(|s| {
+                    s.size = Some(rect.size);
+                    // Tell the app it's tiled (the size is exact, not a hint)
+                    // and how big its monitor's usable area is — browsers
+                    // otherwise restore their last window size, e.g. a 2K
+                    // size on a 1080p laptop screen.
+                    s.bounds = Some(bounds);
+                    for st in TILED { s.states.set(st); }
+                });
                 toplevel.send_configure();
             }
             // X11 windows are rootful: hand them the full rect (loc + size) so
@@ -1879,16 +2846,42 @@ impl State {
         // Monocle stacks every window at full size — raise the focused one so
         // it's the one you actually see (and keep it above its peers).
         if mode == crate::layout::LayoutMode::Monocle {
-            if let Some(w) = self.workspaces.active_ref().tree.focused().cloned() {
-                self.space.raise_element(&w, true);
+            if let Some(w) = monocle_top { self.space.raise_element(&w, true); }
+        }
+
+        // Live drop preview: shrink the hovered tile to its half so the ghost
+        // placeholder has real space — you see the exact resulting layout.
+        if let Some(p) = self.drop_preview.clone().filter(|_| focused_desk) {
+            if !p.root_edge && !p.join && p.target.alive() {
+                use crate::chrome::{TAB_H, TAB_GAP};
+                if let Some(s) = self.chrome.strips.iter_mut().find(|s| s.active == p.target) {
+                    s.rect = Rectangle::new((p.t_rect.loc.x, p.t_rect.loc.y - TAB_H - TAB_GAP).into(),
+                        (p.t_rect.size.w, TAB_H).into());
+                }
+                if let Some(toplevel) = p.target.toplevel() {
+                    toplevel.with_pending_state(|s| { s.size = Some(p.t_rect.size); });
+                    toplevel.send_configure();
+                }
+                #[cfg(feature = "xwayland")]
+                if let Some(x11) = p.target.x11_surface() { let _ = x11.configure(Some(p.t_rect)); }
+                self.push_geo_anim(&p.target, p.t_rect);
+                self.space.map_element(p.target.clone(), p.t_rect.loc, false);
             }
         }
 
         // Floating layer sits above tiled windows.
-        let floating = self.workspaces.active_ref().floating.clone();
         for (window, rect) in floating {
+            // A phone mirror keeps its own (video) size — that's how we learn
+            // the stream's real shape, rotation included. It's drawn scaled
+            // into `rect`. (Sizing it ourselves made the video sink letterbox
+            // a portrait phone inside a landscape window.)
+            let phone = self.is_phone(&window);
             if let Some(toplevel) = window.toplevel() {
-                toplevel.with_pending_state(|s| { s.size = Some(rect.size); });
+                toplevel.with_pending_state(|s| {
+                    s.size = if phone { None } else { Some(rect.size) };
+                    s.bounds = Some(bounds);
+                    for st in TILED { s.states.unset(st); }
+                });
                 toplevel.send_pending_configure();
             }
             #[cfg(feature = "xwayland")]
@@ -1900,8 +2893,7 @@ impl State {
             self.space.raise_element(&window, false);
         }
 
-        // Fullscreen override covers the whole output (incl. the bar zone).
-        let fullscreen = self.workspaces.active_ref().fullscreen.clone();
+        // Fullscreen override covers the whole monitor (incl. the bar zone).
         if let Some(window) = fullscreen.filter(|w| w.alive()) {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|s| { s.size = Some(geometry.size); });
@@ -1915,8 +2907,6 @@ impl State {
             self.space.map_element(window.clone(), geometry.loc, false);
             self.space.raise_element(&window, true);
         }
-
-        self.pending_redraw = true;
     }
 
     /// Toggle the overview grid. Entering queues a morph from every window's
@@ -1931,6 +2921,8 @@ impl State {
             self.overview = true;
             self.overview_t = now;
             self.drag = None;
+            self.drop_preview = None;
+            self.drop_preview = None;
             for (window, _) in cells {
                 if let Some(geo) = self.space.element_geometry(&window) {
                     self.geo_anims.retain(|(w, _, _)| w != &window);
@@ -1960,12 +2952,16 @@ impl State {
     /// renderer and click hit-testing both rely on it.
     pub fn overview_layout(&self) -> OverviewLayout {
         let mut out = OverviewLayout::default();
-        let Some(output) = self.space.outputs().next() else { return out };
-        let Some(geo) = self.space.output_geometry(output) else { return out };
+        // The overview opens on the focused monitor and shows that monitor's
+        // desks; the other monitor keeps showing its desk untouched.
+        let Some(output) = self.focused_output() else { return out };
+        let Some(geo) = self.space.output_geometry(&output) else { return out };
         let active = self.workspaces.active_id();
+        let here = output.name();
 
         let panels: Vec<u32> = self.workspaces.iter()
-            .filter(|ws| !ws.is_empty() || ws.id == active)
+            .filter(|ws| ws.id == active || (!ws.is_empty() && ws.output == here
+                && !self.workspaces.is_shown(ws.id)))
             .map(|ws| ws.id)
             .collect();
         let k = panels.len() as i32;
@@ -2003,7 +2999,8 @@ impl State {
             let Some(ws) = self.workspaces.iter().find(|w| w.id == ws_id) else { continue };
             if ws_id == active {
                 // Mapped windows: scale their real geometry into the panel.
-                for window in self.space.elements() {
+                let mine = ws.windows();
+                for window in self.space.elements().filter(|w| mine.contains(*w)) {
                     let Some(wgeo) = self.space.element_geometry(window) else { continue };
                     let cell = Rectangle::<i32, Logical>::new(
                         (panel.loc.x + ((wgeo.loc.x - geo.loc.x) as f64 * s) as i32,
@@ -2063,6 +3060,7 @@ impl State {
         self.vlock_input.clear();
         self.vlock_fail = None;
         self.drag = None;
+        self.drop_preview = None;
         self.overview = false;
         self.pending_redraw = true;
     }
@@ -2110,9 +3108,14 @@ impl State {
     /// (no-op when nothing changed or the window isn't mapped yet). During a
     /// Super+drag the window must track the pointer 1:1, so drags don't morph.
     fn push_geo_anim(&mut self, window: &Window, target: Rectangle<i32, Logical>) {
-        // During any drag, geometry must track the pointer 1:1 — a tiled
-        // resize relayouts every motion event and morphs would lag behind.
-        if self.drag.is_some() { return; }
+        // The dragged window itself and a seam-resize must track the pointer
+        // 1:1 (relayout fires every motion event; a spring would lag behind).
+        // But OTHER tiles reflowing — the detach fill-in and the drop-preview
+        // resize — should glide. (The morph also scales the buffer, so the
+        // gliding tile never overdraws its moving edge.)
+        if let Some(d) = &self.drag {
+            if d.tile_resize || &d.window == window { return; }
+        }
         let Some(old) = self.space.element_geometry(window) else { return };
         if old == target { return; }
         self.geo_anims.retain(|(w, _, _)| w != window);
@@ -2249,4 +3252,84 @@ impl DmabufHandler for State {
 }
 
 // Wires up Dispatch for every Wayland global the handlers above implement.
+
+/// Pointer constraints. A game in mouselook asks to lock the cursor in place
+/// (or confine it to a region) and reads raw deltas from zwp_relative_pointer
+/// instead of chasing absolute positions. Without these protocols a game can
+/// only warp the cursor back to centre every frame to fake it — which is what
+/// showed up as the pointer teleporting.
+impl smithay::wayland::pointer_constraints::PointerConstraintsHandler for State {
+    // Arming happens in the motion path, once the pointer is known to be
+    // inside the constraint region.
+    fn new_constraint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &smithay::input::pointer::PointerHandle<Self>,
+    ) {
+    }
+
+    fn remove_constraint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &smithay::input::pointer::PointerHandle<Self>,
+    ) {
+    }
+
+    /// Where the client wants the cursor left when the lock lifts, so it
+    /// doesn't reappear wherever it happened to be frozen.
+    fn cursor_position_hint(
+        &mut self,
+        surface: &WlSurface,
+        pointer: &smithay::input::pointer::PointerHandle<Self>,
+        location: Point<f64, Logical>,
+    ) {
+        let active = smithay::wayland::pointer_constraints::with_pointer_constraint(
+            surface, pointer, |c| c.map(|c| c.is_active()).unwrap_or(false),
+        );
+        if !active { return; }
+        if let Some((_, origin)) = self.surface_under(self.pointer_location) {
+            self.pointer_location = origin + location;
+        }
+    }
+}
+
 smithay::delegate_dispatch2!(State);
+
+impl smithay::wayland::xdg_activation::XdgActivationHandler for State {
+    fn activation_state(&mut self) -> &mut smithay::wayland::xdg_activation::XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    /// Honour a focus request only while its token is fresh (the user just
+    /// did something in the requesting app) — stale tokens are how focus
+    /// stealing happens. The target comes forward wherever it lives: another
+    /// desk, behind a tab, or parked on the shelf.
+    fn request_activation(
+        &mut self,
+        token: smithay::wayland::xdg_activation::XdgActivationToken,
+        token_data: smithay::wayland::xdg_activation::XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        self.xdg_activation_state.remove_token(&token);
+        if token_data.timestamp.elapsed() > std::time::Duration::from_secs(10) { return; }
+        let is = |w: &Window| w.wl_surface().is_some_and(|s| *s == surface);
+        if let Some(w) = self.workspaces.scratchpad.iter().find(|w| is(w)).cloned() {
+            self.stage_swap(&w);
+            return;
+        }
+        let Some(w) = self.workspaces.iter()
+            .flat_map(|ws| ws.windows().into_iter()
+                .chain(ws.stacks.iter().flat_map(|s| s.members.clone())))
+            .find(|w| is(w))
+        else { return };
+        if let Some(id) = self.workspaces.find_workspace(&w) {
+            if id != self.workspaces.active_id() { self.switch_workspace(id); }
+        }
+        if self.workspaces.active_ref().stack_of(&w).is_some() {
+            self.activate_tab(&w);
+        }
+        self.focus_window(&w);
+        self.space.raise_element(&w, true);
+        self.pending_redraw = true;
+    }
+}

@@ -46,6 +46,85 @@ use smithay::{
 
 use crate::state::{ClientState, State};
 
+use smithay::backend::renderer::{
+    element::{
+        Kind,
+        memory::MemoryRenderBufferRenderElement,
+        surface::WaylandSurfaceRenderElement,
+        utils::RescaleRenderElement,
+    },
+    gles::{GlesPixelProgram, GlesTexProgram, Uniform, UniformName, UniformType, element::PixelShaderElement},
+};
+
+// Chrome (tab strips + stage shelf) for the nested backend — the same
+// primitives the udev session draws, minus its animations and blur.
+smithay::backend::renderer::element::render_elements! {
+    ChromeElems<=GlesRenderer>;
+    Pixel=PixelShaderElement,
+    Memory=MemoryRenderBufferRenderElement<GlesRenderer>,
+    Thumb=RescaleRenderElement<crate::render::RoundedElement>,
+}
+
+fn chrome_elements(
+    items: &[crate::chrome::Item],
+    off: (f64, f64),
+    renderer: &mut GlesRenderer,
+    border: &GlesPixelProgram,
+    rounded: &GlesTexProgram,
+    text: &mut crate::text::TextCache,
+    out: &mut Vec<ChromeElems>,
+) {
+    use crate::chrome::Item;
+    let scale = smithay::utils::Scale::from(1.0);
+    let ri = |r: &Rectangle<f64, smithay::utils::Logical>| Rectangle::<i32, smithay::utils::Logical>::new(
+        ((r.loc.x + off.0).round() as i32, (r.loc.y + off.1).round() as i32).into(),
+        (r.size.w.round().max(1.0) as i32, r.size.h.round().max(1.0) as i32).into(),
+    );
+    for item in items.iter().rev() {
+        match item {
+            Item::Rect { rect, radius, color } | Item::Ring { rect, radius, color, .. } => {
+                let thickness = match item {
+                    Item::Ring { thickness, .. } => *thickness,
+                    _ => rect.size.w.max(rect.size.h) as f32,
+                };
+                out.push(ChromeElems::Pixel(PixelShaderElement::new(
+                    border.clone(), ri(rect), None, 1.0,
+                    vec![Uniform::new("color", *color), Uniform::new("radius", *radius),
+                         Uniform::new("thickness", thickness)],
+                    Kind::Unspecified,
+                )));
+            }
+            Item::Text { x, cy, max_w, text: s, px, color, center } => {
+                let Some((buf, (w, h))) = text.get(s, *px, *color, *max_w as f32) else { continue };
+                let lx = if *center { x + (max_w - w as f64).max(0.0) / 2.0 } else { *x };
+                let loc = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
+                    (lx + off.0).round(), (cy + off.1 - h as f64 / 2.0).round()));
+                if let Ok(e) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer, loc, buf, Some(color[3]), None, None, Kind::Unspecified)
+                {
+                    out.push(ChromeElems::Memory(e));
+                }
+            }
+            Item::Thumb { window, rect, radius, alpha } => {
+                let c = window.geometry().size;
+                if c.w <= 0 || c.h <= 0 { continue; }
+                let cell = ri(rect);
+                let loc = (cell.loc - window.geometry().loc).to_physical_precise_round(scale);
+                let surfs: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    smithay::backend::renderer::element::AsRenderElements::<GlesRenderer>::render_elements(
+                        window, renderer, loc, scale, *alpha);
+                let m = smithay::utils::Scale { x: cell.size.w as f64 / c.w as f64, y: cell.size.h as f64 / c.h as f64 };
+                let r = *radius;
+                for e in surfs {
+                    out.push(ChromeElems::Thumb(RescaleRenderElement::from_element(
+                        crate::render::RoundedElement::new(e, rounded.clone(), r),
+                        cell.loc.to_physical_precise_round(scale), m)));
+                }
+            }
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
     let mut display: Display<State> = Display::new().context("create wayland Display")?;
     let dh = display.handle();
@@ -66,6 +145,15 @@ pub fn run() -> Result<()> {
     let primary_selection_state = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<State>(&dh);
     let data_control_state   = smithay::wayland::selection::wlr_data_control::DataControlState::new::<State, _>(
         &dh, Some(&primary_selection_state), |_| true);
+    // Pointer lock + raw deltas. Games doing mouselook need these two:
+    // without them a client can only ever see absolute positions, so it
+    // warps the cursor back to centre every frame — which is what read as
+    // the pointer "teleporting".
+    let pointer_constraints_state =
+        smithay::wayland::pointer_constraints::PointerConstraintsState::new::<State>(&dh);
+    let _relative_pointer_state =
+        smithay::wayland::relative_pointer::RelativePointerManagerState::new::<State>(&dh);
+    let _ = &pointer_constraints_state;
     let idle_inhibit_state   = smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<State>(&dh);
     let xdg_decoration_state = smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<State>(&dh);
     let viewporter_state     = smithay::wayland::viewporter::ViewporterState::new::<State>(&dh);
@@ -146,6 +234,7 @@ pub fn run() -> Result<()> {
         primary_selection_state,
         data_control_state,
         idle_inhibit_state,
+        xdg_activation_state: smithay::wayland::xdg_activation::XdgActivationState::new::<State>(&dh),
         idle_inhibitors: Default::default(),
         xdg_decoration_state,
         viewporter_state,
@@ -153,7 +242,7 @@ pub fn run() -> Result<()> {
         seat,
         lock_pending: None,
         locked: false,
-        lock_surface: None,
+        lock_surfaces: Vec::new(),
         space,
         popups: PopupManager::default(),
         workspaces: crate::workspaces::Workspaces::new(),
@@ -173,7 +262,7 @@ pub fn run() -> Result<()> {
         vlock: false,
         vlock_input: String::new(),
         vlock_fail: None,
-        last_zone: None,
+        last_zone: Vec::new(),
         last_activity: std::time::Instant::now(),
         auto_lock_fired: false,
         screen_off: false,
@@ -185,8 +274,16 @@ pub fn run() -> Result<()> {
         open_anims: Vec::new(),
         ws_anim: None,
         geo_anims: Vec::new(),
+        fullscreen_anim: None,
+        startup_t: None,
         closing: Vec::new(),
         last_geos: std::collections::HashMap::new(),
+        tile_geos: std::collections::HashMap::new(),
+        drop_preview: None,
+        chrome: Default::default(),
+        touch_chrome_drag: false,
+        ws_anim_output: String::new(),
+        dirty_outputs: Vec::new(),
         config,
         pointer_location: (0.0, 0.0).into(),
         cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
@@ -210,6 +307,8 @@ pub fn run() -> Result<()> {
     tracing::info!(socket = %socket_name, "vendiwm listening — set WAYLAND_DISPLAY to this and spawn a client");
 
     // IPC socket paired with the wayland socket name.
+    state.sync_outputs();
+
     let mut ipc = crate::ipc::Server::bind(&socket_name)
         .context("start IPC server")?;
 
@@ -224,6 +323,21 @@ pub fn run() -> Result<()> {
     };
     let keyboard = state.seat.add_keyboard(kb_xkb, state.config.repeat_delay, state.config.repeat_rate)
         .context("add keyboard to seat")?;
+
+    let (border_prog, rounded_prog) = {
+        let r = backend.renderer();
+        let rounded = r.compile_custom_texture_shader(
+            crate::render::ROUNDED_TEX_FRAG,
+            &[UniformName::new("size", UniformType::_2f), UniformName::new("radius", UniformType::_1f)],
+        ).map_err(|e| anyhow::anyhow!("compile rounded shader: {e:?}"))?;
+        let border = r.compile_custom_pixel_shader(
+            crate::render::BORDER_FRAG,
+            &[UniformName::new("color", UniformType::_4f), UniformName::new("radius", UniformType::_1f),
+              UniformName::new("thickness", UniformType::_1f)],
+        ).map_err(|e| anyhow::anyhow!("compile border shader: {e:?}"))?;
+        (border, rounded)
+    };
+    let mut text_cache = crate::text::TextCache::default();
 
     loop {
         let status = winit_evloop.dispatch_new_events(|event| match event {
@@ -258,6 +372,9 @@ pub fn run() -> Result<()> {
                     let size = backend.window_size().to_logical(1);
                     let pos  = event.position_transformed(size);
                     state.pointer_location = pos;
+                    state.update_output_focus();
+                    if state.drag.is_some() { state.drag_update(); return; }
+                    if state.chrome_motion() { return; }
                     let under = state.surface_under(pos).map(|(s, p)| (s.into(), p));
                     pointer.motion(&mut state, under, &MotionEvent {
                         location: pos,
@@ -268,6 +385,12 @@ pub fn run() -> Result<()> {
                 }
                 InputEvent::PointerButton { event } => {
                     let bstate = event.state();
+                    let pressed = bstate == smithay::backend::input::ButtonState::Pressed;
+                    if !pressed && state.drag.is_some() {
+                        if let Some(d) = state.drag.take() { state.drop_dragged(d); }
+                        return;
+                    }
+                    if state.chrome_button(event.button_code(), pressed) { return; }
                     // Click-to-focus on press.
                     if bstate == smithay::backend::input::ButtonState::Pressed {
                         state.focus_window_at_cursor();
@@ -335,6 +458,22 @@ pub fn run() -> Result<()> {
                 1.0,
             ).context("gather space render elements")?;
 
+            // Chrome beneath the windows: shelf cards, then tab strips.
+            let scene = state.chrome_scene();
+            let pal = crate::chrome::Palette::from_theme(&state.config.theme);
+            let mut chrome: Vec<ChromeElems> = Vec::new();
+            for (wid, info) in &scene.tabs {
+                let Some(w) = state.space.elements().find(|w| crate::state::window_id(w) == *wid) else { continue };
+                let Some(g) = state.space.element_geometry(w) else { continue };
+                let items = crate::chrome::strip_items(info, g.size.w as f64, state.config.theme.radius, &pal, 1.0);
+                chrome_elements(&items,
+                    (g.loc.x as f64, (g.loc.y - crate::chrome::TAB_H - crate::chrome::TAB_GAP) as f64),
+                    renderer, &border_prog, &rounded_prog, &mut text_cache, &mut chrome);
+            }
+            chrome_elements(&scene.shelf, (0.0, 0.0), renderer, &border_prog, &rounded_prog,
+                &mut text_cache, &mut chrome);
+            text_cache.sweep();
+
             let mut frame = renderer
                 .render(&mut framebuffer, size, Transform::Flipped180)
                 .context("begin frame")?;
@@ -342,12 +481,14 @@ pub fn run() -> Result<()> {
             // Mocha base #1E1E2E = (0.117, 0.117, 0.180).
             frame.clear(Color32F::new(0.117, 0.117, 0.180, 1.0), &[damage])
                 .context("clear")?;
+            draw_render_elements(&mut frame, 1.0, &chrome, &[damage])
+                .context("draw chrome")?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .context("draw elements")?;
             let _ = frame.finish().context("finish frame")?;
 
             // Send frame callbacks to every mapped window so they keep drawing.
-            for window in state.space.elements() {
+            for window in state.space.elements().chain(scene.live.iter()) {
                 if let Some(surf) = window.wl_surface() {
                     send_frames_surface_tree(&surf, start_time.elapsed().as_millis() as u32);
                 }

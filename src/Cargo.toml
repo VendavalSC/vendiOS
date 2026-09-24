@@ -1,5 +1,5 @@
 [workspace]
-members = ["vendiwm", "vendi-menu", "vendi-ctl", "vendi-demo", "vendibar", "vendi-ai"]
+members = ["vendiwm", "vendi-menu", "vendi-ctl", "vendi-demo", "vendibar", "vendi-ai", "vendi-buds"]
 resolver = "2"
 
 [workspace.package]
@@ -37,6 +37,11 @@ calloop = "0.13"
 
 # vendi-ai: blocking HTTP to the local ollama daemon (no async runtime needed)
 ureq = { version = "2", features = ["json"] }
+
+# vendi-buds: raw L2CAP sockets (AF_BLUETOOTH) for the AirPods AACP protocol —
+# deliberately not the `bluer` crate, which pulls in a full tokio + zbus async
+# stack; this workspace stays synchronous/calloop-first everywhere else.
+libc = "0.2"
 
 [profile.release]
 lto           = "thin"
