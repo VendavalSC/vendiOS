@@ -10,6 +10,11 @@ import QtQuick
 
 Rectangle {
     id: mc
+
+    // Light bar tint, mirrored from the shell root: hover/surface overlays flip
+    // from translucent white to translucent black (see shell.qml's surf()).
+    property bool light: false
+    function surf(a: real): color { return light ? Qt.rgba(0, 0, 0, a * 0.9) : Qt.rgba(1, 1, 1, a); }
     property var card: ({})
     property color fg: "#cdd6f4"
     property color dim: "#717189"
@@ -24,9 +29,9 @@ Rectangle {
 
     implicitHeight: col.implicitHeight + 26
     radius: 16
-    color: Qt.rgba(1, 1, 1, 0.05)
+    color: mc.surf(0.05)
     border.width: 1
-    border.color: Qt.rgba(1, 1, 1, 0.08)
+    border.color: mc.surf(0.08)
 
     Column {
         id: col

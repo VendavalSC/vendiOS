@@ -4,8 +4,8 @@
 // notch stays the quiet clock · weather island it always was):
 //   Home       big clock · profile · calendar · media · quick settings
 //   System     live gauges (cpu/ram/disk/load) · network rates · disks
-//   Tasks      persistent kanban — to do / ongoing / done
-//              (~/.config/vendi/tasks.json)
+//   Tools      to-do kanban (~/.config/vendi/tasks.json) · notes scratchpad
+//              (~/.config/vendi/notes.md) · calculator · focus timer
 //   Wallpapers full-bleed grid picker with live previews
 //   Config     themes with swatches · bar choice · keybind reference
 //
@@ -22,7 +22,7 @@ Item {
     id: dash
 
     property var bar                       // the ShellRoot — all live state
-    property int tab: 0                    // 0 home · 1 system · 2 tasks · 3 walls · 4 config · 5 displays
+    property int tab: 0                    // 0 home · 1 system · 2 tools · 3 walls · 4 config · 5 displays
     property bool typing: false            // a text field has focus — don't auto-close
     signal requestClose()
 
@@ -32,8 +32,26 @@ Item {
     readonly property color alert:  bar?.alert ?? "#f38ba8"
     readonly property color good:   bar?.good ?? "#a6e3a1"
     readonly property string mono:  bar?.mono ?? "JetBrainsMonoNL Nerd Font"
-    readonly property color cardBg: Qt.rgba(1, 1, 1, 0.04)
-    readonly property color cardBr: Qt.rgba(1, 1, 1, 0.07)
+    // Light bar tint, mirrored from the shell root so the dashboard's cards
+    // and hover surfaces flip along with the bar itself.
+    readonly property bool light:   bar?.light ?? false
+    function surf(a: real): color {
+        return dash.light ? Qt.rgba(0, 0, 0, a * 0.9) : Qt.rgba(1, 1, 1, a);
+    }
+    readonly property color cardBg: dash.surf(0.04)
+    readonly property color cardBr: dash.surf(0.07)
+
+    // ONE height for the whole dashboard, sized to the tallest page — so the
+    // panel is identical on every tab (it must not resize as you switch) and no
+    // page is clipped. A hardcoded height can't do both: it silently cut off
+    // whatever outgrew it, which is what 620 was doing to Home's quick-settings
+    // and to Config's last card.
+    // StackLayout.implicitHeight is already the max over its pages, so this
+    // needs no per-page bookkeeping and self-corrects as pages gain content.
+    // Measured from the real tab bar plus the fixed chrome — deliberately NOT
+    // from dash.height, which the panel derives from this and would bind-loop.
+    //   14 top margin + 14 column spacing + 20 bottom margin = 48
+    readonly property int wantHeight: pages.implicitHeight + tabBar.implicitHeight + 48
 
     function refresh() {
         sysInfo.running = true;
@@ -281,6 +299,25 @@ Item {
         tasksFile.writeAdapter();
     }
 
+    // tool state is shared across screens: see ToolState.qml (bar.tools)
+    readonly property var tools: bar ? bar.tools : null
+    property int tool: 0                   // 0 to-do · 1 notes · 2 calculator · 3 focus
+
+    // tool switch: same slide as the page turn, just shorter
+    function goTool(i) {
+        if (i === tool) return;
+        toolFx.stop();
+        toolStack.xoff = i > tool ? 24 : -24;
+        toolStack.opacity = 0;
+        tool = i;
+        toolFx.restart();
+    }
+    ParallelAnimation {
+        id: toolFx
+        NumberAnimation { target: toolStack; property: "opacity"; to: 1; duration: 150; easing.type: Easing.OutCubic }
+        SpringAnimation { target: toolStack; property: "xoff"; to: 0; spring: 6.4; damping: 0.62; mass: 0.7; epsilon: 0.25 }
+    }
+
     // ── theme / bar state (config tab) ───────────────────────────────────────
     property string themeNow: "mocha"
     FileView {
@@ -297,6 +334,16 @@ Item {
         path: Quickshell.env("HOME") + "/.config/vendi/bar"
         watchChanges: true
         onLoaded: dash.barNow = text().trim() || "classic"
+        onFileChanged: reload()
+    }
+    // GTK app light/dark (`vendi appearance`). The file may hold "auto", in
+    // which case the effective mode is resolved from the wallpaper — so the
+    // card tracks the saved *choice*, not the resolved result.
+    property string appearanceNow: "dark"
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/vendi/appearance"
+        watchChanges: true
+        onLoaded: dash.appearanceNow = text().trim() || "dark"
         onFileChanged: reload()
     }
 
@@ -349,6 +396,7 @@ Item {
 
         // ── tab pills + close ───────────────────────────────────────────────
         RowLayout {
+            id: tabBar
             Layout.fillWidth: true
             spacing: 8
             Item { Layout.fillWidth: true }
@@ -356,7 +404,7 @@ Item {
                 model: [
                     { g: "󰋜", t: "Home" },
                     { g: "󰍛", t: "System" },
-                    { g: "󰄬", t: "Tasks" },
+                    { g: "󱁤", t: "Tools" },
                     { g: "󰸉", t: "Wallpapers" },
                     { g: "󰒓", t: "Config" },
                     { g: "󰍹", t: "Displays" },
@@ -370,7 +418,7 @@ Item {
                     implicitHeight: 32
                     radius: 16
                     color: current ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.18)
-                         : tabHover.hovered ? Qt.rgba(1, 1, 1, 0.07) : "transparent"
+                         : tabHover.hovered ? dash.surf(0.07) : "transparent"
                     Behavior on color { ColorAnimation { duration: 130 } }
                     HoverHandler { id: tabHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: dash.goTab(index) }
@@ -638,7 +686,7 @@ Item {
                                 Layout.preferredHeight: 92
                                 Layout.alignment: Qt.AlignVCenter
                                 radius: 12
-                                color: Qt.rgba(1, 1, 1, 0.06)
+                                color: dash.surf(0.06)
                                 Image {
                                     anchors.fill: parent
                                     source: dash.bar?.player?.trackArtUrl ?? ""
@@ -679,7 +727,7 @@ Item {
                                     Layout.topMargin: 4
                                     height: 5
                                     radius: 2.5
-                                    color: Qt.rgba(1, 1, 1, 0.10)
+                                    color: dash.surf(0.10)
                                     visible: (dash.bar?.player ?? null) !== null
                                     Rectangle {
                                         width: parent.width * (dash.bar?.musicProgress ?? 0)
@@ -766,7 +814,7 @@ Item {
                                     Layout.fillHeight: true
                                     radius: 12
                                     color: active ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.20)
-                                         : tileHover.hovered ? Qt.rgba(1, 1, 1, 0.09) : Qt.rgba(1, 1, 1, 0.04)
+                                         : tileHover.hovered ? dash.surf(0.09) : dash.surf(0.04)
                                     Behavior on color { ColorAnimation { duration: 120 } }
                                     HoverHandler { id: tileHover; cursorShape: Qt.PointingHandCursor }
                                     TapHandler { onTapped: run() }
@@ -864,7 +912,7 @@ Item {
                                     Layout.fillWidth: true
                                     height: 7
                                     radius: 3.5
-                                    color: Qt.rgba(1, 1, 1, 0.10)
+                                    color: dash.surf(0.10)
                                     Rectangle {
                                         width: Math.max(7, parent.width * Math.max(0, dash.bar?.volume ?? 0) / 100)
                                         height: parent.height
@@ -1093,7 +1141,7 @@ Item {
                                         Layout.fillWidth: true
                                         height: 6
                                         radius: 3
-                                        color: Qt.rgba(1, 1, 1, 0.08)
+                                        color: dash.surf(0.08)
                                         Rectangle {
                                             width: parent.width * diskRow.modelData.pct / 100
                                             height: parent.height
@@ -1109,7 +1157,109 @@ Item {
                 }
             }
 
-            // ════ TASKS ═══════════════════════════════════════════════════
+            // ════ TOOLS ═══════════════════════════════════════════════════
+            // A second, smaller row of pills picks the tool; the tool gets the
+            // whole room. All tools stay alive in the stack (and their state
+            // lives on `dash`), so a running focus timer or a half-written note
+            // survives switching tools and closing the island.
+            ColumnLayout {
+                spacing: 12
+
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    spacing: 0
+                    Rectangle {
+                        implicitWidth: toolPills.implicitWidth + 8
+                        implicitHeight: 34
+                        radius: 17
+                        color: dash.surf(0.04)
+                        border.width: 1
+                        border.color: dash.cardBr
+
+                        // sliding highlight under the current tool
+                        Rectangle {
+                            readonly property Item cur: toolRep.itemAt(dash.tool)
+                            x: 4 + (cur ? cur.x : 0)
+                            y: 4
+                            width: cur ? cur.width : 0
+                            height: 26
+                            radius: 13
+                            color: Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.18)
+                            Behavior on x { SpringAnimation { spring: 6; damping: 0.6; mass: 0.6; epsilon: 0.25 } }
+                            Behavior on width { SpringAnimation { spring: 6; damping: 0.6; mass: 0.6; epsilon: 0.25 } }
+                        }
+
+                        Row {
+                            id: toolPills
+                            x: 4; y: 4
+                            Repeater {
+                                id: toolRep
+                                model: [
+                                    { g: "󰄬", t: "To-Do" },
+                                    { g: "󰎞", t: "Notes" },
+                                    { g: "󰃬", t: "Calculator" },
+                                    { g: "󰔛", t: "Focus" },
+                                ]
+                                Item {
+                                    required property var modelData
+                                    required property int index
+                                    readonly property bool current: dash.tool === index
+                                    // Focus shows its live countdown on the pill
+                                    // while you're off doing something else.
+                                    readonly property bool live: index === 3 && dash.tools.focusActive && !current
+                                    implicitWidth: pillRow.implicitWidth + 26
+                                    implicitHeight: 26
+                                    HoverHandler { id: pillHover; cursorShape: Qt.PointingHandCursor }
+                                    TapHandler { onTapped: dash.goTool(index) }
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: 13
+                                        color: pillHover.hovered && !parent.current ? dash.surf(0.06) : "transparent"
+                                        Behavior on color { ColorAnimation { duration: 120 } }
+                                    }
+                                    RowLayout {
+                                        id: pillRow
+                                        anchors.centerIn: parent
+                                        spacing: 6
+                                        Glyph {
+                                            text: modelData.g
+                                            font.pixelSize: 12
+                                            color: parent.parent.current || parent.parent.live ? dash.accent : dash.dim
+                                        }
+                                        Mono {
+                                            text: parent.parent.live ? dash.tools.focusClock : modelData.t
+                                            font.pixelSize: 11
+                                            font.bold: parent.parent.current
+                                            color: parent.parent.current ? dash.fg
+                                                 : parent.parent.live ? dash.accent : dash.dim
+                                        }
+                                        Rectangle {
+                                            visible: parent.parent.live && dash.tools.focusRunning
+                                            width: 5; height: 5; radius: 2.5
+                                            color: dash.accent
+                                            SequentialAnimation on opacity {
+                                                running: parent.visible
+                                                loops: Animation.Infinite
+                                                NumberAnimation { to: 0.25; duration: 700; easing.type: Easing.InOutSine }
+                                                NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                StackLayout {
+                    id: toolStack
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    currentIndex: dash.tool
+                    property real xoff: 0
+                    transform: Translate { x: toolStack.xoff }
+
+            // ── to-do ──────────────────────────────────────────────────────
             RowLayout {
                 spacing: 14
 
@@ -1151,7 +1301,7 @@ Item {
                                 width: ListView.view.width
                                 height: taskTxt.implicitHeight + 30
                                 radius: 10
-                                color: taskHover.hovered ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.04)
+                                color: taskHover.hovered ? dash.surf(0.08) : dash.surf(0.04)
                                 border.width: 1
                                 border.color: dash.cardBr
                                 HoverHandler { id: taskHover }
@@ -1200,7 +1350,7 @@ Item {
                             Layout.fillWidth: true
                             height: 32
                             radius: 10
-                            color: Qt.rgba(1, 1, 1, 0.05)
+                            color: dash.surf(0.05)
                             border.width: 1
                             border.color: taskInput.activeFocus
                                 ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.5) : dash.cardBr
@@ -1232,6 +1382,693 @@ Item {
                 TaskCol { title: "To Do";   key: "todo";  tint: dash.accent; items: td.todo }
                 TaskCol { title: "Ongoing"; key: "doing"; tint: "#f0b88a";   items: td.doing }
                 TaskCol { title: "Done";    key: "done";  tint: dash.good;   items: td.done }
+            }
+
+            // ── notes: a sticky-note board ─────────────────────────────────
+            // Rounded paper squares you drop anywhere: double-click the board
+            // (or +) to stick one, drag it by its top edge, recolour or peel it
+            // off on hover. They pop in, lift while you hold them, and tidy into
+            // a grid on request. State lives in ToolState (bar.tools.notes).
+            Card {
+                id: notesCard
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 16
+                    spacing: 10
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        CardTitle { text: "STICKY NOTES" }
+                        Mono {
+                            text: dash.tools.notes.count + (dash.tools.notes.count === 1 ? " note" : " notes")
+                            color: dash.dim
+                            font.pixelSize: 10
+                        }
+                        Item { Layout.fillWidth: true }
+                        component BoardBtn: Rectangle {
+                            id: bb
+                            property string glyph
+                            property string label
+                            property bool primary: false
+                            signal clicked()
+                            implicitWidth: bbRow.implicitWidth + 20
+                            implicitHeight: 26
+                            radius: 13
+                            color: primary ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b,
+                                                     bbTap.pressed ? 0.40 : bbHover.hovered ? 0.30 : 0.22)
+                                 : bbHover.hovered ? dash.surf(0.08) : "transparent"
+                            Behavior on color { ColorAnimation { duration: 120 } }
+                            scale: bbTap.pressed ? 0.95 : 1
+                            Behavior on scale { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+                            HoverHandler { id: bbHover; cursorShape: Qt.PointingHandCursor }
+                            TapHandler { id: bbTap; onTapped: bb.clicked() }
+                            RowLayout {
+                                id: bbRow
+                                anchors.centerIn: parent
+                                spacing: 5
+                                Glyph { text: bb.glyph; font.pixelSize: 11; color: bb.primary ? dash.accent : dash.dim }
+                                Mono { text: bb.label; font.pixelSize: 10; color: bb.primary ? dash.accent : dash.dim
+                                       font.bold: bb.primary }
+                            }
+                        }
+                        BoardBtn {
+                            visible: dash.tools.notes.count > 1
+                            glyph: "󰕰"; label: "tidy"
+                            onClicked: board.tidy()
+                        }
+                        BoardBtn {
+                            primary: true
+                            glyph: "󰐕"; label: "new note"
+                            onClicked: board.addAt(-1, -1)
+                        }
+                    }
+
+                    Rectangle {
+                        id: board
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        radius: 12
+                        color: dash.surf(0.02)
+                        border.width: 1
+                        border.color: dash.cardBr
+                        clip: true
+                        readonly property int noteW: 176
+                        readonly property int noteMinH: 132
+
+                        function clampX(x) { return Math.max(8, Math.min(x, width - noteW - 8)); }
+                        function clampY(y, h) { return Math.max(8, Math.min(y, height - (h || noteMinH) - 8)); }
+                        // x,y < 0 → next free-ish spot, cascading from the top-left
+                        function addAt(x, y) {
+                            if (x < 0) {
+                                const n = dash.tools.notes.count;
+                                const cols = Math.max(1, Math.floor((width - 16) / (noteW + 14)));
+                                x = 12 + (n % cols) * (noteW + 14);
+                                y = 12 + Math.floor(n / cols) % 3 * 30 + (Math.floor(n / cols) >= 1 ? 20 : 0);
+                            } else {
+                                x -= noteW / 2; y -= 20;
+                            }
+                            dash.tools.noteAdd(clampX(x), clampY(y));
+                        }
+                        // lay every note out in a neat grid (they glide there)
+                        function tidy() {
+                            const cols = Math.max(1, Math.floor((width - 16) / (noteW + 14)));
+                            const m = dash.tools.notes;
+                            for (let i = 0; i < m.count; i++) {
+                                const nid = m.get(i).nid;
+                                dash.tools.noteSet(nid, "x", 12 + (i % cols) * (noteW + 14));
+                                dash.tools.noteSet(nid, "y", 12 + Math.floor(i / cols) * (noteMinH + 18));
+                                dash.tools.noteSet(nid, "rot", (i % 3 - 1) * 0.8);
+                            }
+                        }
+
+                        // faint dot grid — reads as a pinboard, not an empty box
+                        Canvas {
+                            anchors.fill: parent
+                            opacity: 0.5
+                            onWidthChanged: requestPaint()
+                            onHeightChanged: requestPaint()
+                            onPaint: {
+                                const c = getContext("2d");
+                                c.reset();
+                                c.fillStyle = dash.surf(0.10);
+                                for (let x = 14; x < width; x += 22)
+                                    for (let y = 14; y < height; y += 22) c.fillRect(x, y, 1.5, 1.5);
+                            }
+                        }
+                        TapHandler {
+                            // double-click empty board → a note right there
+                            onDoubleTapped: ev => board.addAt(ev.position.x, ev.position.y)
+                            onTapped: dash.forceActiveFocus()
+                        }
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            visible: dash.tools.notes.count === 0
+                            spacing: 6
+                            Glyph { Layout.alignment: Qt.AlignHCenter; text: "󰎞"; font.pixelSize: 28; opacity: 0.5 }
+                            Mono {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "Double-click anywhere to stick a note"
+                                color: dash.dim; font.pixelSize: 11
+                            }
+                        }
+
+                        Repeater {
+                            model: dash.tools.notes
+                            delegate: Item {
+                                id: note
+                                readonly property int nid: model.nid
+                                readonly property string mtext: model.text
+                                readonly property color paper: model.color
+                                property bool dying: false
+                                readonly property bool lifted: grip.active
+                                x: model.x
+                                y: model.y
+                                z: model.z
+                                width: board.noteW
+                                height: Math.min(Math.max(board.noteMinH, edit.implicitHeight + 46), 260)
+                                Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                                // glide when tidied, but track the finger 1:1 while dragged
+                                Behavior on x { enabled: !note.lifted; SpringAnimation { spring: 5; damping: 0.55; epsilon: 0.3 } }
+                                Behavior on y { enabled: !note.lifted; SpringAnimation { spring: 5; damping: 0.55; epsilon: 0.3 } }
+                                rotation: note.lifted ? 0 : model.rot
+                                Behavior on rotation { SpringAnimation { spring: 4; damping: 0.4; epsilon: 0.1 } }
+                                scale: 0.5
+                                opacity: 0
+                                Component.onCompleted: { popIn.start(); if (model.fresh) { edit.forceActiveFocus(); dash.tools.notes.setProperty(index, "fresh", false); } }
+                                ParallelAnimation {
+                                    id: popIn
+                                    SpringAnimation { target: note; property: "scale"; to: 1; spring: 5.5; damping: 0.42; epsilon: 0.005 }
+                                    NumberAnimation { target: note; property: "opacity"; to: 1; duration: 160 }
+                                }
+                                // peel off: shrink, tilt and fade, then really delete
+                                SequentialAnimation {
+                                    id: peel
+                                    ParallelAnimation {
+                                        NumberAnimation { target: note; property: "scale"; to: 0.6; duration: 190; easing.type: Easing.InCubic }
+                                        NumberAnimation { target: note; property: "opacity"; to: 0; duration: 190 }
+                                        NumberAnimation { target: note; property: "rotation"; to: note.rotation + 10; duration: 190 }
+                                    }
+                                    ScriptAction { script: dash.tools.noteRemove(note.nid) }
+                                }
+                                onMtextChanged: if (edit.text !== mtext) edit.text = mtext
+
+                                HoverHandler { id: noteHover }
+                                readonly property real hoverLift: (noteHover.hovered || lifted) && !dying ? 1 : 0
+
+                                // shadow: grows while the note is held up
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.topMargin: 3 + note.hoverLift * 3 + (note.lifted ? 5 : 0)
+                                    anchors.leftMargin: 1
+                                    anchors.rightMargin: -1
+                                    anchors.bottomMargin: -(3 + note.hoverLift * 3 + (note.lifted ? 5 : 0))
+                                    radius: 14
+                                    color: Qt.rgba(0, 0, 0, 0.22 + (note.lifted ? 0.12 : 0))
+                                    Behavior on anchors.topMargin { NumberAnimation { duration: 140 } }
+                                }
+                                Rectangle {
+                                    id: paperRect
+                                    anchors.fill: parent
+                                    radius: 14
+                                    color: note.paper
+                                    scale: note.lifted ? 1.05 : 1 + note.hoverLift * 0.015
+                                    Behavior on scale { SpringAnimation { spring: 6; damping: 0.5; epsilon: 0.002 } }
+                                    Behavior on color { ColorAnimation { duration: 200 } }
+                                    // a slightly darker band where you grab it
+                                    Rectangle {
+                                        anchors { left: parent.left; right: parent.right; top: parent.top }
+                                        height: 24
+                                        radius: 14
+                                        color: Qt.rgba(0, 0, 0, 0.06)
+                                    }
+
+                                    // grip: the top edge drags the note around the board
+                                    Item {
+                                        id: gripArea
+                                        anchors { left: parent.left; right: parent.right; top: parent.top }
+                                        height: 24
+                                        HoverHandler { cursorShape: note.lifted ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
+                                        DragHandler {
+                                            id: grip
+                                            target: null
+                                            property real sx: 0
+                                            property real sy: 0
+                                            onActiveChanged: {
+                                                if (active) {
+                                                    sx = model.x; sy = model.y;
+                                                    dash.tools.noteRaise(note.nid);
+                                                }
+                                            }
+                                            onTranslationChanged: if (active) {
+                                                dash.tools.noteSet(note.nid, "x", board.clampX(sx + translation.x));
+                                                dash.tools.noteSet(note.nid, "y", board.clampY(sy + translation.y, note.height));
+                                            }
+                                        }
+                                        TapHandler { onTapped: dash.tools.noteRaise(note.nid) }
+                                        // tape strip
+                                        Rectangle {
+                                            anchors.centerIn: parent
+                                            width: 26; height: 4; radius: 2
+                                            color: Qt.rgba(0, 0, 0, 0.18)
+                                        }
+                                        // recolour dots (on hover)
+                                        Row {
+                                            anchors.left: parent.left
+                                            anchors.leftMargin: 8
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            spacing: 4
+                                            opacity: note.hoverLift
+                                            visible: opacity > 0.01
+                                            Behavior on opacity { NumberAnimation { duration: 140 } }
+                                            Repeater {
+                                                model: dash.tools.noteColors
+                                                Rectangle {
+                                                    required property string modelData
+                                                    width: 9; height: 9; radius: 4.5
+                                                    color: modelData
+                                                    border.width: Qt.colorEqual(modelData, note.paper) ? 1.5 : 0.5
+                                                    border.color: Qt.rgba(0, 0, 0, 0.45)
+                                                    TapHandler { onTapped: dash.tools.noteSet(note.nid, "color", modelData) }
+                                                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                                                }
+                                            }
+                                        }
+                                        // peel off (delete)
+                                        Text {
+                                            anchors.right: parent.right
+                                            anchors.rightMargin: 8
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: "󰅖"
+                                            font.family: dash.mono
+                                            font.pixelSize: 12
+                                            color: delHover.hovered ? "#d20f39" : Qt.rgba(0, 0, 0, 0.5)
+                                            opacity: note.hoverLift
+                                            visible: opacity > 0.01
+                                            Behavior on opacity { NumberAnimation { duration: 140 } }
+                                            HoverHandler { id: delHover; cursorShape: Qt.PointingHandCursor }
+                                            TapHandler { onTapped: { note.dying = true; peel.start(); } }
+                                        }
+                                    }
+
+                                    TextEdit {
+                                        id: edit
+                                        anchors { left: parent.left; right: parent.right; top: gripArea.bottom
+                                                  leftMargin: 12; rightMargin: 12; topMargin: 4 }
+                                        wrapMode: TextEdit.Wrap
+                                        color: "#1e1e2e"
+                                        selectionColor: Qt.rgba(0, 0, 0, 0.18)
+                                        selectedTextColor: "#1e1e2e"
+                                        font.family: dash.mono
+                                        font.pixelSize: 12
+                                        selectByMouse: true
+                                        clip: true
+                                        height: Math.min(implicitHeight, 260 - 46)
+                                        Component.onCompleted: text = note.mtext
+                                        onTextChanged: dash.tools.noteSet(note.nid, "text", text)
+                                        onActiveFocusChanged: {
+                                            dash.typing = activeFocus;
+                                            if (activeFocus) dash.tools.noteRaise(note.nid);
+                                            // an empty note you leave behind peels itself off
+                                            else if (text.trim() === "" && !note.dying) { note.dying = true; peel.start(); }
+                                        }
+                                        Keys.onEscapePressed: { focus = false; dash.forceActiveFocus(); }
+                                        Text {
+                                            visible: edit.text === "" && !edit.activeFocus
+                                            text: "Write something…"
+                                            color: Qt.rgba(0, 0, 0, 0.4)
+                                            font: edit.font
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── calculator ─────────────────────────────────────────────────
+            RowLayout {
+                spacing: 14
+
+                Card {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 16
+                        spacing: 10
+
+                        // display: what you're typing, with the live result under it
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: 76
+                            radius: 12
+                            color: dash.surf(0.03)
+                            border.width: 1
+                            border.color: calcIn.activeFocus
+                                ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.45) : dash.cardBr
+                            TapHandler { onTapped: calcIn.forceActiveFocus() }
+                            TextInput {
+                                id: calcIn
+                                anchors { left: parent.left; right: parent.right; top: parent.top
+                                          leftMargin: 14; rightMargin: 14; topMargin: 10 }
+                                horizontalAlignment: TextInput.AlignRight
+                                color: dash.fg
+                                font.family: dash.mono
+                                font.pixelSize: 20
+                                clip: true
+                                text: dash.tools.calcExpr
+                                onTextEdited: dash.tools.calcExpr = text
+                                onAccepted: dash.tools.calcPress("=")
+                                onActiveFocusChanged: dash.typing = activeFocus
+                                Keys.onEscapePressed: event => {
+                                    if (text !== "") dash.tools.calcPress("C");
+                                    else { focus = false; dash.forceActiveFocus(); }
+                                }
+                            }
+                            Mono {
+                                anchors { right: parent.right; bottom: parent.bottom
+                                          rightMargin: 14; bottomMargin: 10 }
+                                text: dash.tools.calcPreview !== "" && dash.tools.calcPreview !== dash.tools.calcExpr
+                                      ? "= " + dash.tools.calcPreview : ""
+                                color: dash.accent
+                                font.pixelSize: 13
+                            }
+                            Mono {
+                                anchors { left: parent.left; verticalCenter: parent.verticalCenter; leftMargin: 14 }
+                                visible: dash.tools.calcExpr === "" && !calcIn.activeFocus
+                                text: "type or tap"
+                                color: dash.dim
+                                font.pixelSize: 11
+                            }
+                        }
+
+                        GridLayout {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            columns: 5
+                            rowSpacing: 6
+                            columnSpacing: 6
+                            Repeater {
+                                // [label, what it types, kind]
+                                model: [
+                                    ["C", "C", "fn"], ["(", "(", "op"], [")", ")", "op"], ["%", "%", "op"], ["⌫", "⌫", "fn"],
+                                    ["7", "7", ""],   ["8", "8", ""],   ["9", "9", ""],   ["÷", "÷", "op"], ["√", "sqrt(", "op"],
+                                    ["4", "4", ""],   ["5", "5", ""],   ["6", "6", ""],   ["×", "×", "op"], ["xʸ", "^", "op"],
+                                    ["1", "1", ""],   ["2", "2", ""],   ["3", "3", ""],   ["−", "−", "op"], ["π", "pi", "op"],
+                                    ["0", "0", ""],   [".", ".", ""],   ["ans", "ans", "op"], ["+", "+", "op"], ["=", "=", "eq"],
+                                ]
+                                Rectangle {
+                                    required property var modelData
+                                    readonly property string kind: modelData[2]
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    Layout.minimumHeight: 30
+                                    radius: 10
+                                    color: kind === "eq" ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b,
+                                                                   keyTap.pressed ? 0.45 : keyHover.hovered ? 0.34 : 0.26)
+                                         : keyTap.pressed ? dash.surf(0.14)
+                                         : keyHover.hovered ? dash.surf(0.09)
+                                         : kind === "" ? dash.surf(0.05) : dash.surf(0.025)
+                                    Behavior on color { ColorAnimation { duration: 90 } }
+                                    scale: keyTap.pressed ? 0.95 : 1
+                                    Behavior on scale { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
+                                    HoverHandler { id: keyHover; cursorShape: Qt.PointingHandCursor }
+                                    TapHandler { id: keyTap; onTapped: dash.tools.calcPress(modelData[1]) }
+                                    Mono {
+                                        anchors.centerIn: parent
+                                        text: modelData[0]
+                                        font.pixelSize: 14
+                                        font.bold: kind === "eq"
+                                        color: kind === "eq" ? dash.accent
+                                             : kind === "fn" ? dash.alert
+                                             : kind === "op" ? dash.accent : dash.fg
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Card {
+                    Layout.preferredWidth: 250
+                    Layout.maximumWidth: 250
+                    Layout.fillHeight: true
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 16
+                        spacing: 10
+                        RowLayout {
+                            Layout.fillWidth: true
+                            CardTitle { text: "HISTORY" }
+                            Item { Layout.fillWidth: true }
+                            Glyph {
+                                visible: dash.tools.calcHistory.length > 0
+                                text: "󰆴"
+                                font.pixelSize: 11
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                            onClicked: dash.tools.calcHistory = [] }
+                            }
+                        }
+                        ListView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            spacing: 4
+                            boundsBehavior: Flickable.StopAtBounds
+                            model: dash.tools.calcHistory
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: ListView.view.width
+                                height: 44
+                                radius: 8
+                                color: histHover.hovered ? dash.surf(0.07) : "transparent"
+                                HoverHandler { id: histHover; cursorShape: Qt.PointingHandCursor }
+                                // tap a line to pull its result back into the display
+                                TapHandler { onTapped: dash.tools.calcExpr = modelData.r }
+                                ColumnLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8
+                                    anchors.rightMargin: 8
+                                    spacing: 0
+                                    Mono {
+                                        Layout.fillWidth: true
+                                        text: modelData.e
+                                        color: dash.dim
+                                        font.pixelSize: 10
+                                        elide: Text.ElideLeft
+                                        horizontalAlignment: Text.AlignRight
+                                    }
+                                    Mono {
+                                        Layout.fillWidth: true
+                                        text: modelData.r
+                                        font.pixelSize: 14
+                                        elide: Text.ElideRight
+                                        horizontalAlignment: Text.AlignRight
+                                    }
+                                }
+                            }
+                            Mono {
+                                anchors.centerIn: parent
+                                visible: dash.tools.calcHistory.length === 0
+                                text: "Nothing yet"
+                                color: dash.dim
+                                font.pixelSize: 11
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── focus (pomodoro) ───────────────────────────────────────────
+            RowLayout {
+                spacing: 14
+
+                Card {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+
+                    ColumnLayout {
+                        anchors.centerIn: parent
+                        spacing: 16
+
+                        Item {
+                            id: ring
+                            Layout.alignment: Qt.AlignHCenter
+                            implicitWidth: 196
+                            implicitHeight: 196
+                            readonly property real frac: dash.tools.focusPhaseLen > 0
+                                ? Math.max(0, Math.min(1, dash.tools.focusLeft / dash.tools.focusPhaseLen)) : 0
+                            readonly property color tint: dash.tools.focusPhase === "focus" ? dash.accent : dash.good
+                            // ease the arc between the 1s ticks so it sweeps, not steps
+                            property real shown: frac
+                            Behavior on shown { NumberAnimation { duration: 900; easing.type: Easing.Linear } }
+                            onShownChanged: arc.requestPaint()
+                            onTintChanged: arc.requestPaint()
+                            Canvas {
+                                id: arc
+                                anchors.fill: parent
+                                onPaint: {
+                                    const c = getContext("2d");
+                                    c.reset();
+                                    const r = width / 2 - 8;
+                                    c.lineWidth = 9;
+                                    c.lineCap = "round";
+                                    c.strokeStyle = dash.surf(0.07);
+                                    c.beginPath();
+                                    c.arc(width / 2, height / 2, r, 0, 2 * Math.PI);
+                                    c.stroke();
+                                    if (ring.shown > 0.001) {
+                                        c.strokeStyle = ring.tint;
+                                        c.beginPath();
+                                        c.arc(width / 2, height / 2, r, -Math.PI / 2,
+                                              -Math.PI / 2 + 2 * Math.PI * ring.shown);
+                                        c.stroke();
+                                    }
+                                }
+                            }
+                            ColumnLayout {
+                                anchors.centerIn: parent
+                                spacing: 2
+                                Mono {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: dash.tools.focusClock
+                                    font.pixelSize: 40
+                                    font.bold: true
+                                    opacity: dash.tools.focusRunning ? 1 : 0.75
+                                    Behavior on opacity { NumberAnimation { duration: 200 } }
+                                }
+                                Mono {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: dash.tools.focusLabel.toUpperCase()
+                                    color: ring.tint
+                                    font.pixelSize: 10
+                                    font.letterSpacing: 2
+                                    font.bold: true
+                                }
+                            }
+                        }
+
+                        // round dots: which focus session of the 4-cycle you're on
+                        Row {
+                            Layout.alignment: Qt.AlignHCenter
+                            spacing: 8
+                            Repeater {
+                                model: 4
+                                Rectangle {
+                                    required property int index
+                                    readonly property bool filled: index < dash.tools.focusRound
+                                    readonly property bool now: index === dash.tools.focusRound && dash.tools.focusPhase === "focus"
+                                    width: now ? 18 : 7
+                                    height: 7
+                                    radius: 3.5
+                                    color: filled || now ? dash.accent : dash.surf(0.12)
+                                    opacity: now && !dash.tools.focusRunning ? 0.6 : 1
+                                    Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                                    Behavior on color { ColorAnimation { duration: 220 } }
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.alignment: Qt.AlignHCenter
+                            spacing: 14
+                            component RoundBtn: Rectangle {
+                                id: rb
+                                property string glyph
+                                property bool primary: false
+                                signal clicked()
+                                implicitWidth: primary ? 56 : 40
+                                implicitHeight: implicitWidth
+                                radius: implicitWidth / 2
+                                color: primary ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b,
+                                                         rbTap.pressed ? 0.42 : rbHover.hovered ? 0.32 : 0.24)
+                                       : rbTap.pressed ? dash.surf(0.14) : rbHover.hovered ? dash.surf(0.09) : dash.surf(0.05)
+                                Behavior on color { ColorAnimation { duration: 110 } }
+                                scale: rbTap.pressed ? 0.93 : 1
+                                Behavior on scale { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+                                HoverHandler { id: rbHover; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { id: rbTap; onTapped: rb.clicked() }
+                                Glyph {
+                                    anchors.centerIn: parent
+                                    text: rb.glyph
+                                    font.pixelSize: rb.primary ? 22 : 15
+                                    color: rb.primary ? dash.accent : dash.fg
+                                }
+                            }
+                            RoundBtn { glyph: "󰦛"; onClicked: dash.tools.focusReset() }
+                            RoundBtn {
+                                primary: true
+                                glyph: dash.tools.focusRunning ? "󰏤" : "󰐊"
+                                onClicked: dash.tools.focusToggle()
+                            }
+                            RoundBtn { glyph: "󰒭"; onClicked: dash.tools.focusAdvance(false) }
+                        }
+                    }
+                }
+
+                Card {
+                    Layout.preferredWidth: 250
+                    Layout.maximumWidth: 250
+                    Layout.fillHeight: true
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 16
+                        spacing: 8
+                        CardTitle { text: "SESSIONS" }
+                        Repeater {
+                            model: [
+                                { k: "focus", t: "Focus",       g: "󰔛" },
+                                { k: "short", t: "Short break", g: "󰅶" },
+                                { k: "long",  t: "Long break",  g: "󰒲" },
+                            ]
+                            Rectangle {
+                                id: phaseRow
+                                required property var modelData
+                                readonly property bool current: dash.tools.focusPhase === modelData.k
+                                readonly property int mins: modelData.k === "focus" ? dash.tools.focusMin
+                                                          : modelData.k === "short" ? dash.tools.shortMin : dash.tools.longMin
+                                Layout.fillWidth: true
+                                implicitHeight: 46
+                                radius: 10
+                                color: current ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.14)
+                                     : phHover.hovered ? dash.surf(0.07) : dash.surf(0.03)
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                                HoverHandler { id: phHover; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: dash.tools.focusSetPhase(phaseRow.modelData.k) }
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 8
+                                    spacing: 8
+                                    Glyph { text: phaseRow.modelData.g; color: phaseRow.current ? dash.accent : dash.dim }
+                                    Mono {
+                                        Layout.fillWidth: true
+                                        text: phaseRow.modelData.t
+                                        font.pixelSize: 11
+                                        font.bold: phaseRow.current
+                                        color: phaseRow.current ? dash.fg : dash.dim
+                                    }
+                                    // minute stepper
+                                    Glyph {
+                                        text: "−"; font.pixelSize: 14
+                                        Layout.preferredWidth: 18
+                                        horizontalAlignment: Text.AlignHCenter
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: dash.tools.focusAdjust(phaseRow.modelData.k, -1) }
+                                    }
+                                    Mono {
+                                        text: phaseRow.mins + "m"
+                                        font.pixelSize: 11
+                                        Layout.preferredWidth: 30
+                                        horizontalAlignment: Text.AlignHCenter
+                                    }
+                                    Glyph {
+                                        text: "+"; font.pixelSize: 14
+                                        Layout.preferredWidth: 18
+                                        horizontalAlignment: Text.AlignHCenter
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: dash.tools.focusAdjust(phaseRow.modelData.k, 1) }
+                                    }
+                                }
+                            }
+                        }
+                        Item { Layout.fillHeight: true }
+                        CardTitle { text: "TODAY" }
+                        RowLayout {
+                            spacing: 8
+                            Mono { text: String(dash.tools.focusDoneToday); font.pixelSize: 26; font.bold: true }
+                            Mono {
+                                text: (dash.tools.focusDoneToday === 1 ? "session" : "sessions")
+                                      + "\n" + dash.tools.focusMinToday + " min focused"
+                                color: dash.dim
+                                font.pixelSize: 10
+                            }
+                        }
+                    }
+                }
+            }
+                }   // toolStack
             }
 
             // ════ WALLPAPERS ══════════════════════════════════════════════
@@ -1290,7 +2127,7 @@ Item {
                     implicitHeight: 30
                     radius: 15
                     color: primary ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.18)
-                         : wbHover.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                         : wbHover.hovered ? dash.surf(0.10) : dash.surf(0.05)
                     Behavior on color { ColorAnimation { duration: 120 } }
                     HoverHandler { id: wbHover; cursorShape: Qt.PointingHandCursor }
                     scale: wbTap.pressed ? 0.93 : wbHover.hovered ? 1.04 : 1
@@ -1362,7 +2199,7 @@ Item {
                                 anchors.fill: parent
                                 anchors.margins: 6
                                 radius: 14
-                                color: Qt.rgba(1, 1, 1, 0.04)
+                                color: dash.surf(0.04)
                                 border.width: wallCell.current ? 2 : 1
                                 border.color: wallCell.current ? dash.accent : dash.cardBr
                                 Behavior on border.color { ColorAnimation { duration: 150 } }
@@ -1453,10 +2290,11 @@ Item {
                         Mono { text: wpPage.dynOn ? "On" : "Off"; color: dash.dim; font.pixelSize: 11 }
                         Rectangle {   // enable pill
                             width: 42; height: 23; radius: 12
-                            color: wpPage.dynOn ? dash.accent : Qt.rgba(1, 1, 1, 0.18)
+                            color: wpPage.dynOn ? dash.accent : dash.surf(0.18)
                             Behavior on color { ColorAnimation { duration: 120 } }
                             Rectangle {
-                                width: 19; height: 19; radius: 10; color: "white"; y: 2
+                                width: 19; height: 19; radius: 10; y: 2
+                                color: (wpPage.dynOn || !dash.light) ? "white" : dash.fg
                                 x: wpPage.dynOn ? 21 : 2
                                 Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
                             }
@@ -1486,7 +2324,7 @@ Item {
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true; height: 30; radius: 8
-                                    color: Qt.rgba(1, 1, 1, 0.08)
+                                    color: dash.surf(0.08)
                                     TextInput {
                                         anchors.fill: parent; anchors.margins: 2
                                         horizontalAlignment: TextInput.AlignHCenter
@@ -1513,7 +2351,7 @@ Item {
                         Item { Layout.fillWidth: true }
                         Rectangle {
                             Layout.preferredWidth: 160; height: 28; radius: 8
-                            color: Qt.rgba(1, 1, 1, 0.08)
+                            color: dash.surf(0.08)
                             TextInput {
                                 id: newGroupField
                                 anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
@@ -1580,7 +2418,7 @@ Item {
                             // the bounds: a brighter fill + an accent ring (the ring
                             // is drawn inset by QML so it never overruns the edges).
                             color: active ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.16)
-                                          : grpHov.hovered ? Qt.rgba(1, 1, 1, 0.09) : Qt.rgba(1, 1, 1, 0.05)
+                                          : grpHov.hovered ? dash.surf(0.09) : dash.surf(0.05)
                             Behavior on color { ColorAnimation { duration: 140 } }
                             border.width: active ? 2 : (grpHov.hovered ? 1 : 0)
                             border.color: active ? dash.accent
@@ -1631,7 +2469,7 @@ Item {
                                             id: slotTile
                                             required property var modelData
                                             Layout.fillWidth: true; Layout.fillHeight: true
-                                            radius: 7; color: Qt.rgba(1, 1, 1, 0.07)
+                                            radius: 7; color: dash.surf(0.07)
                                             HoverHandler { id: slotHov; cursorShape: Qt.PointingHandCursor }
                                             scale: slotTap.pressed ? 0.94 : slotHov.hovered ? 1.06 : 1
                                             Behavior on scale { SpringAnimation { spring: 8.0; damping: 0.55; mass: 0.5; epsilon: 0.003 } }
@@ -1709,7 +2547,7 @@ Item {
                             ClippingRectangle {
                                 id: pickTile
                                 anchors.fill: parent; anchors.margins: 5; radius: 10
-                                color: Qt.rgba(1, 1, 1, 0.05)
+                                color: dash.surf(0.05)
                                 HoverHandler { id: pickHov; cursorShape: Qt.PointingHandCursor }
                                 scale: pickTap.pressed ? 0.95 : pickHov.hovered ? 1.04 : 1
                                 Behavior on scale { SpringAnimation { spring: 8.0; damping: 0.56; mass: 0.5; epsilon: 0.003 } }
@@ -1751,6 +2589,9 @@ Item {
                             anchors.margins: 16
                             spacing: 10
                             CardTitle { text: "THEME" }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 12
                             GridLayout {
                                 Layout.fillWidth: true
                                 columns: 3
@@ -1770,10 +2611,10 @@ Item {
                                         required property var modelData
                                         property bool current: dash.themeNow === modelData.id
                                         Layout.fillWidth: true
-                                        implicitHeight: 52
+                                        implicitHeight: 46
                                         radius: 12
                                         color: current ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.16)
-                                             : thHover.hovered ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.04)
+                                             : thHover.hovered ? dash.surf(0.08) : dash.surf(0.04)
                                         Behavior on color { ColorAnimation { duration: 120 } }
                                         border.width: 1
                                         border.color: current
@@ -1796,7 +2637,7 @@ Item {
                                                         width: 12; height: 12; radius: 6
                                                         color: modelData
                                                         border.width: 1
-                                                        border.color: Qt.rgba(1, 1, 1, 0.18)
+                                                        border.color: dash.surf(0.18)
                                                     }
                                                 }
                                             }
@@ -1815,6 +2656,53 @@ Item {
                                         }
                                     }
                                 }
+                            }
+                            // Bar tint, beside the swatches: a theme picks the accent, this picks
+                            // the surface it sits on. Separate from `vendi appearance`, which
+                            // themes GTK apps rather than the bar.
+                            ColumnLayout {
+                                Layout.preferredWidth: 74
+                                Layout.alignment: Qt.AlignVCenter
+                                spacing: 6
+                                Glyph {
+                                    text: dash.light ? "󰖨" : "󰖔"
+                                    color: dash.accent
+                                    font.pixelSize: 14
+                                    Layout.alignment: Qt.AlignHCenter
+                                }
+                                Mono {
+                                    text: "Light bar"
+                                    font.pixelSize: 10
+                                    Layout.alignment: Qt.AlignHCenter
+                                }
+                                Rectangle {
+                                    id: tintTrack
+                                    Layout.alignment: Qt.AlignHCenter
+                                    implicitWidth: 40
+                                    implicitHeight: 22
+                                    radius: 11
+                                    color: dash.light ? dash.accent : dash.surf(0.10)
+                                    Behavior on color { ColorAnimation { duration: 140 } }
+                                    border.width: 1
+                                    border.color: dash.light
+                                        ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.55)
+                                        : dash.cardBr
+                                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                                    TapHandler {
+                                        onTapped: Quickshell.execDetached(
+                                            ["vendi", "bar", dash.light ? "dark" : "light"])
+                                    }
+                                    Rectangle {
+                                        width: 16; height: 16; radius: 8
+                                        y: 3
+                                        x: dash.light ? tintTrack.width - width - 3 : 3
+                                        color: dash.light ? "#ffffff" : dash.fg
+                                        Behavior on x {
+                                            NumberAnimation { duration: 170; easing.type: Easing.OutCubic }
+                                        }
+                                    }
+                                }
+                            }
                             }
                         }
                     }
@@ -1844,7 +2732,7 @@ Item {
                                         implicitHeight: 50
                                         radius: 12
                                         color: current ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.16)
-                                             : barHover.hovered ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.04)
+                                             : barHover.hovered ? dash.surf(0.08) : dash.surf(0.04)
                                         border.width: 1
                                         border.color: current
                                             ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.5) : dash.cardBr
@@ -1876,8 +2764,9 @@ Item {
 
                     Card {
                         Layout.fillWidth: true
-                        Layout.fillHeight: true
+                        Layout.preferredHeight: sysCol.implicitHeight + 32
                         ColumnLayout {
+                            id: sysCol
                             anchors.fill: parent
                             anchors.margins: 16
                             spacing: 8
@@ -1889,7 +2778,7 @@ Item {
                                 Layout.fillWidth: true
                                 implicitHeight: 36
                                 radius: 10
-                                color: cfgHover.hovered ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.04)
+                                color: cfgHover.hovered ? dash.surf(0.08) : dash.surf(0.04)
                                 Behavior on color { ColorAnimation { duration: 120 } }
                                 HoverHandler { id: cfgHover; cursorShape: Qt.PointingHandCursor }
                                 TapHandler { onTapped: run() }
@@ -1957,9 +2846,78 @@ Item {
                                     }
                                 }
                             }
-                            Item { Layout.fillHeight: true }
                         }
                     }
+
+                    Card {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: appCol.implicitHeight + 32
+                        ColumnLayout {
+                            id: appCol
+                            anchors.fill: parent
+                            anchors.margins: 16
+                            spacing: 10
+                            CardTitle { text: "APPEARANCE" }
+                            Mono {
+                                Layout.fillWidth: true
+                                text: "Light or dark for GTK apps — Files, Firefox, settings."
+                                color: dash.dim
+                                font.pixelSize: 9
+                                wrapMode: Text.WordWrap
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Repeater {
+                                    // `auto` is a real mode in `vendi appearance`
+                                    // (it follows the wallpaper's luminance), so
+                                    // it belongs here — without it the card would
+                                    // show nothing selected whenever auto is set.
+                                    model: [
+                                        { id: "light", name: "Light", glyph: "󰖨" },
+                                        { id: "dark",  name: "Dark",  glyph: "󰖔" },
+                                        { id: "auto",  name: "Auto",  glyph: "󰔎" },
+                                    ]
+                                    Rectangle {
+                                        id: appCard
+                                        required property var modelData
+                                        property bool current: dash.appearanceNow === modelData.id
+                                        Layout.fillWidth: true
+                                        implicitHeight: 46
+                                        radius: 12
+                                        color: current ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.16)
+                                             : appHover.hovered ? dash.surf(0.08) : dash.surf(0.04)
+                                        Behavior on color { ColorAnimation { duration: 120 } }
+                                        border.width: 1
+                                        border.color: current
+                                            ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.5) : dash.cardBr
+                                        HoverHandler { id: appHover; cursorShape: Qt.PointingHandCursor }
+                                        TapHandler {
+                                            onTapped: Quickshell.execDetached(
+                                                ["vendi", "appearance", appCard.modelData.id])
+                                        }
+                                        ColumnLayout {
+                                            anchors.centerIn: parent
+                                            spacing: 3
+                                            Glyph {
+                                                text: appCard.modelData.glyph
+                                                color: appCard.current ? dash.accent : dash.dim
+                                                font.pixelSize: 13
+                                                Layout.alignment: Qt.AlignHCenter
+                                            }
+                                            Mono {
+                                                text: appCard.modelData.name
+                                                font.pixelSize: 10
+                                                Layout.alignment: Qt.AlignHCenter
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Item { Layout.fillHeight: true }
                 }
 
                 Card {
@@ -2007,7 +2965,7 @@ Item {
                                     implicitWidth: kbKey.implicitWidth + 16
                                     implicitHeight: 22
                                     radius: 6
-                                    color: Qt.rgba(1, 1, 1, 0.07)
+                                    color: dash.surf(0.07)
                                     border.width: 1
                                     border.color: dash.cardBr
                                     Mono {
@@ -2089,7 +3047,7 @@ Item {
                                     y: dmap.oy + (modelData.y - dmap.bb.y0) * dmap.k
                                     radius: 7
                                     color: sel ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.22)
-                                               : Qt.rgba(1, 1, 1, 0.06)
+                                               : dash.surf(0.06)
                                     border.width: sel ? 2 : 1
                                     border.color: sel ? dash.accent : dash.cardBr
                                     Column {
@@ -2137,6 +3095,25 @@ Item {
                             visible: dash.selOut !== ""
                             Glyph { text: "󰍹"; font.pixelSize: 12 }
                             Mono { text: dash.selOut; font.pixelSize: 10 }
+                            // which monitor carries the bar
+                            Rectangle {
+                                readonly property bool on: (dash.bar?.primaryScreen ?? "") === dash.selOut
+                                implicitWidth: primRow.implicitWidth + 16; implicitHeight: 22; radius: 7
+                                color: on ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.22)
+                                     : primHov.hovered ? dash.surf(0.10) : dash.surf(0.05)
+                                border.width: 1
+                                border.color: on ? dash.accent : dash.cardBr
+                                HoverHandler { id: primHov; cursorShape: parent.on ? Qt.ArrowCursor : Qt.PointingHandCursor }
+                                TapHandler { onTapped: if (!parent.on) dash.bar.setPrimary(dash.selOut) }
+                                RowLayout {
+                                    id: primRow
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Glyph { text: "󰍜"; font.pixelSize: 10; color: parent.parent.on ? dash.accent : dash.dim }
+                                    Mono { text: parent.parent.on ? "Primary" : "Make primary"; font.pixelSize: 9
+                                           color: parent.parent.on ? dash.accent : dash.fg }
+                                }
+                            }
                             Item { Layout.fillWidth: true }
                             Mono { text: "Scale"; color: dash.dim; font.pixelSize: 9 }
                             Repeater {
@@ -2144,10 +3121,10 @@ Item {
                                 Rectangle {
                                     required property var modelData
                                     property var cur: dash.outputs.find(o => o.name === dash.selOut)
-                                    property bool on: cur && Math.abs(cur.scale - modelData) < 0.01
+                                    property bool on: !!cur && Math.abs(cur.scale - modelData) < 0.01
                                     implicitWidth: 36; implicitHeight: 22; radius: 7
                                     color: on ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.22)
-                                         : scHov.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                                         : scHov.hovered ? dash.surf(0.10) : dash.surf(0.05)
                                     border.width: 1
                                     border.color: on ? dash.accent : dash.cardBr
                                     HoverHandler { id: scHov; cursorShape: Qt.PointingHandCursor }
@@ -2180,7 +3157,7 @@ Item {
                     Rectangle {
                         visible: (dash.bar?.currentScreensaver ?? "") !== ""
                         implicitWidth: ssPvRow.implicitWidth + 26; implicitHeight: 30; radius: 15
-                        color: ssPvHover.hovered ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                        color: ssPvHover.hovered ? dash.surf(0.10) : dash.surf(0.05)
                         Behavior on color { ColorAnimation { duration: 120 } }
                         HoverHandler { id: ssPvHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler {
@@ -2199,10 +3176,11 @@ Item {
                         property bool on: (dash.bar?.currentScreensaver ?? "") !== ""
                         implicitWidth: 50; implicitHeight: 30; radius: 15
                         color: on ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.9)
-                                  : Qt.rgba(1, 1, 1, 0.10)
+                                  : dash.surf(0.10)
                         Behavior on color { ColorAnimation { duration: 150 } }
                         Rectangle {
-                            width: 24; height: 24; radius: 12; color: "#ffffff"
+                            width: 24; height: 24; radius: 12
+                            color: (ssTabToggle.on || !dash.light) ? "#ffffff" : dash.fg
                             y: 3
                             x: ssTabToggle.on ? parent.width - width - 3 : 3
                             Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
@@ -2236,7 +3214,7 @@ Item {
                         height: 48
                         radius: 12
                         color: current ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.16)
-                             : ssRowHover.hovered ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.04)
+                             : ssRowHover.hovered ? dash.surf(0.08) : dash.surf(0.04)
                         Behavior on color { ColorAnimation { duration: 120 } }
                         border.width: 1
                         border.color: current ? Qt.rgba(dash.accent.r, dash.accent.g, dash.accent.b, 0.5)

@@ -10,6 +10,11 @@ import QtQuick
 
 Rectangle {
     id: wc
+
+    // Light bar tint, mirrored from the shell root: hover/surface overlays flip
+    // from translucent white to translucent black (see shell.qml's surf()).
+    property bool light: false
+    function surf(a: real): color { return light ? Qt.rgba(0, 0, 0, a * 0.9) : Qt.rgba(1, 1, 1, a); }
     property var card: ({})
     property string mono: "JetBrainsMonoNL Nerd Font"
 
@@ -48,7 +53,7 @@ Rectangle {
         anchors { left: parent.left; right: parent.right; top: parent.top }
         height: parent.height / 2; radius: parent.radius
         gradient: Gradient {
-            GradientStop { position: 0.0; color: Qt.rgba(1, 1, 1, 0.10) }
+            GradientStop { position: 0.0; color: wc.surf(0.10) }
             GradientStop { position: 1.0; color: "transparent" }
         }
     }
@@ -61,7 +66,7 @@ Rectangle {
             text: wc.card.city && String(wc.card.city).length ? wc.card.city : "Weather"
             color: "white"; font.family: wc.mono; font.pixelSize: 15; font.weight: Font.DemiBold
         }
-        Text { text: "➤"; color: Qt.rgba(1,1,1,0.85); font.pixelSize: 11; rotation: -45
+        Text { text: "➤"; color: wc.surf(0.85); font.pixelSize: 11; rotation: -45
                anchors.verticalCenter: parent.verticalCenter }
     }
 
@@ -85,7 +90,7 @@ Rectangle {
                font.family: wc.mono; font.pixelSize: 14; anchors.right: parent.right }
         Text {
             text: (wc.card.hi ? "H:" + wc.card.hi : "") + (wc.card.lo ? "  L:" + wc.card.lo : "")
-            color: Qt.rgba(1,1,1,0.82); font.family: wc.mono; font.pixelSize: 12
+            color: wc.surf(0.82); font.family: wc.mono; font.pixelSize: 12
             anchors.right: parent.right
         }
     }

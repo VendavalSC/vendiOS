@@ -25,6 +25,11 @@ import QtQuick.Layouts
 Item {
     id: win
 
+    // Light bar tint, mirrored from the shell root: hover/surface overlays flip
+    // from translucent white to translucent black (see shell.qml's surf()).
+    property bool light: false
+    function surf(a: real): color { return light ? Qt.rgba(0, 0, 0, a * 0.9) : Qt.rgba(1, 1, 1, a); }
+
     // Driven by shell.qml (bound to the notch's search state).
     property bool active: false
     property string mode: "search"      // search | actions
@@ -396,7 +401,7 @@ Item {
             Layout.leftMargin: -6
             Layout.rightMargin: -6
             height: 1
-            color: Qt.rgba(1, 1, 1, 0.07)
+            color: win.surf(0.07)
             visible: list.count > 0
         }
 

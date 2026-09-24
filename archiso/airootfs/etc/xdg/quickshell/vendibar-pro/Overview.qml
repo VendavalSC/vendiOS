@@ -16,6 +16,11 @@ import QtQuick.Layouts
 
 PanelWindow {
     id: ov
+
+    // Light bar tint, mirrored from the shell root: hover/surface overlays flip
+    // from translucent white to translucent black (see shell.qml's surf()).
+    property bool light: bar?.light ?? false
+    function surf(a: real): color { return light ? Qt.rgba(0, 0, 0, a * 0.9) : Qt.rgba(1, 1, 1, a); }
     required property var bar
 
     color: "transparent"
@@ -31,7 +36,7 @@ PanelWindow {
     readonly property color dim:    bar?.dim ?? "#717189"
     readonly property string mono:  bar?.mono ?? "JetBrainsMonoNL Nerd Font"
     readonly property color glass:  Qt.rgba(0.043, 0.043, 0.071, 0.92)
-    readonly property color hair:   Qt.rgba(1, 1, 1, 0.08)
+    readonly property color hair:   ov.surf(0.08)
 
     // Only the strip + hint are interactive; everything else clicks through to
     // the compositor's exposé (click a thumbnail to focus that window).
@@ -64,7 +69,7 @@ PanelWindow {
                     height: 30
                     radius: 15
                     color: current ? ov.accent
-                         : wsHov.hovered ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(1, 1, 1, 0.05)
+                         : wsHov.hovered ? ov.surf(0.12) : ov.surf(0.05)
                     Behavior on color { ColorAnimation { duration: 120 } }
                     HoverHandler { id: wsHov; cursorShape: Qt.PointingHandCursor }
                     TapHandler {

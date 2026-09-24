@@ -15,6 +15,11 @@ import Quickshell.Io
 Item {
     id: ai
 
+    // Light bar tint, mirrored from the shell root: hover/surface overlays flip
+    // from translucent white to translucent black (see shell.qml's surf()).
+    property bool light: false
+    function surf(a: real): color { return light ? Qt.rgba(0, 0, 0, a * 0.9) : Qt.rgba(1, 1, 1, a); }
+
     property bool active: false
     property color accent:     "#cba6f7"
     property color panelColor: "#0b0b12"
@@ -119,18 +124,18 @@ Item {
                             width: threadCol.width
                             WeatherCard {
                                 visible: parent.modelData.type === "weather"
-                                width: parent.width; card: parent.modelData; mono: ai.mono
+                                width: parent.width; light: ai.light; card: parent.modelData; mono: ai.mono
                                 height: visible ? implicitHeight : 0
                             }
                             MatchCard {
                                 visible: parent.modelData.type === "match"
-                                width: parent.width; card: parent.modelData
+                                width: parent.width; light: ai.light; card: parent.modelData
                                 fg: ai.fg; dim: ai.dim; accent: ai.accent; mono: ai.mono
                                 height: visible ? implicitHeight : 0
                             }
                             InfoCard {
                                 visible: parent.modelData.type !== "weather" && parent.modelData.type !== "match"
-                                width: parent.width; card: parent.modelData
+                                width: parent.width; light: ai.light; card: parent.modelData
                                 accent: ai.accent; fg: ai.fg; dim: ai.dim; mono: ai.mono
                                 height: visible ? implicitHeight : 0
                             }
@@ -169,18 +174,18 @@ Item {
                         width: threadCol.width
                         WeatherCard {
                             visible: parent.modelData.type === "weather"
-                            width: parent.width; card: parent.modelData; mono: ai.mono
+                            width: parent.width; light: ai.light; card: parent.modelData; mono: ai.mono
                             height: visible ? implicitHeight : 0
                         }
                         MatchCard {
                             visible: parent.modelData.type === "match"
-                            width: parent.width; card: parent.modelData
+                            width: parent.width; light: ai.light; card: parent.modelData
                             fg: ai.fg; dim: ai.dim; accent: ai.accent; mono: ai.mono
                             height: visible ? implicitHeight : 0
                         }
                         InfoCard {
                             visible: parent.modelData.type !== "weather" && parent.modelData.type !== "match"
-                            width: parent.width; card: parent.modelData
+                            width: parent.width; light: ai.light; card: parent.modelData
                             accent: ai.accent; fg: ai.fg; dim: ai.dim; mono: ai.mono
                             height: visible ? implicitHeight : 0
                         }
@@ -215,7 +220,7 @@ Item {
                             spacing: 8
                             Rectangle {
                                 width: 84; height: 30; radius: 9
-                                color: Qt.rgba(1, 1, 1, denyHover.hovered ? 0.12 : 0.06)
+                                color: ai.surf(denyHover.hovered ? 0.12 : 0.06)
                                 Text { anchors.centerIn: parent; text: "Deny"; color: ai.dim
                                        font.family: ai.mono; font.pixelSize: 12 }
                                 HoverHandler { id: denyHover }
@@ -263,10 +268,10 @@ Item {
         anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
         anchors.leftMargin: 18; anchors.rightMargin: 18; anchors.bottomMargin: 16
         height: 46; radius: 14
-        color: Qt.rgba(1, 1, 1, 0.05)
+        color: ai.surf(0.05)
         border.width: 1
         border.color: input.activeFocus ? Qt.rgba(ai.accent.r, ai.accent.g, ai.accent.b, 0.5)
-                                        : Qt.rgba(1, 1, 1, 0.08)
+                                        : ai.surf(0.08)
         Behavior on border.color { ColorAnimation { duration: 150 } }
 
         Text {
