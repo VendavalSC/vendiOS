@@ -1257,7 +1257,7 @@ cmd_help() {
     _cmd "night"    "night light — on/off/toggle/warmer/cooler/<kelvin>"
     _cmd "voice"    "local voice typing (whisper.cpp → types into focused field)"
     _cmd "dnd"      "do not disturb — silence notifications (on/off/toggle)"
-    _cmd "claude"   "show Claude Code usage/model + working state in the bar"
+    command -v vendi-claude-status >/dev/null && _cmd "claude"   "show Claude Code usage/model + working state in the bar"
     _cmd "fingerprint" "enroll a fingerprint to unlock (swipe at the lock)"
     _cmd "fetch"    "show system info with vendiOS logo"
     _cmd "info"     "show distro version and system summary"

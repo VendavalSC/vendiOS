@@ -1,0 +1,53 @@
+/* Hallmark · tokens · theme: custom (vendiOS brand — mocha night + mauve)
+ * axes: dark / grotesk-sans / chromatic-other (mauve, hue 300)
+ */
+:root {
+  /* colour — cool near-black tinted toward the logo's mauve */
+  --color-paper:   oklch(17% 0.012 295);
+  --color-paper-2: oklch(20.5% 0.014 295);
+  --color-paper-3: oklch(24% 0.016 295);
+  --color-ink:     oklch(93% 0.010 295);
+  --color-ink-2:   oklch(76% 0.018 295);
+  --color-ink-3:   oklch(62% 0.020 295);
+  --color-rule:    oklch(30% 0.016 295);
+  --color-accent:  oklch(80% 0.11 305);   /* the shard / catppuccin mauve */
+  --color-accent-ink: oklch(20% 0.03 305); /* text on an accent fill */
+  --color-accent-soft: oklch(80% 0.11 305 / 0.14);
+  --color-focus:   oklch(86% 0.13 305);
+  --color-warn:    oklch(84% 0.12 80);
+
+  /* type */
+  --font-display: "Schibsted Grotesk", "IBM Plex Sans", system-ui, sans-serif;
+  --font-body:    "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, monospace;
+
+  --text-xs:   0.8125rem;
+  --text-sm:   0.9rem;
+  --text-base: 1.0625rem;
+  --text-lg:   1.25rem;
+  --text-xl:   1.6rem;
+  --text-2xl:  2rem;
+  --text-display: clamp(3rem, 2rem + 6vw, 5.5rem);
+
+  /* space — 4pt scale */
+  --space-2xs: 0.25rem;
+  --space-xs:  0.5rem;
+  --space-sm:  0.75rem;
+  --space-md:  1rem;
+  --space-lg:  1.5rem;
+  --space-xl:  2.25rem;
+  --space-2xl: 3.5rem;
+  --space-3xl: 5.5rem;
+  --space-4xl: 8rem;
+
+  --measure: 64ch;
+  --rule-1: 1px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+
+  --ease-out:    cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in:     cubic-bezier(0.55, 0, 1, 0.45);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+}
