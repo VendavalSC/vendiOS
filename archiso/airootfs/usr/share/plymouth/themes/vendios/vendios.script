@@ -1,5 +1,11 @@
 # vendiOS Plymouth theme — Catppuccin Mocha, Mauve accent
 # Obsidian-shard logo + wordmark + LUKS password prompt. Nothing else.
+#
+# Multi-monitor: every display gets its own copy of the splash, centered on
+# that display, and the layout is redone whenever a display's size changes.
+# (Centering once on "the" window put everything top-left: with two monitors
+# the boot framebuffer starts at a small shared mode, then each screen
+# switches to its native resolution after the splash had already laid out.)
 
 # ── colors ────────────────────────────────────────────────────────────────────
 # Base    #1E1E2E  (0.117, 0.117, 0.180)
@@ -10,72 +16,109 @@
 Window.SetBackgroundTopColor   (0.117, 0.117, 0.180);
 Window.SetBackgroundBottomColor(0.117, 0.117, 0.180);
 
-cx = Window.GetX() + Window.GetWidth()  / 2;
-cy = Window.GetY() + Window.GetHeight() / 2;
-
-# ── logo (obsidian shard) ─────────────────────────────────────────────────────
 logo.image  = Image("logo.png");
-logo.sprite = Sprite(logo.image);
-logo.sprite.SetX(cx - logo.image.GetWidth()  / 2);
-logo.sprite.SetY(cy - logo.image.GetHeight() - 64);
-
-# ── brand wordmark ────────────────────────────────────────────────────────────
-brand.image  = Image.Text("vendiOS", 0.796, 0.651, 0.969, 1, "Sans Bold 40");
-brand.sprite = Sprite(brand.image);
-brand.sprite.SetX(cx - brand.image.GetWidth()  / 2);
-brand.sprite.SetY(cy + 8);
-
-# ── tagline ───────────────────────────────────────────────────────────────────
-tag.image  = Image.Text("Minimal. Modern. Yours.",
-                         0.424, 0.439, 0.525, 1, "Sans 13");
-tag.sprite = Sprite(tag.image);
-tag.sprite.SetX(cx - tag.image.GetWidth() / 2);
-tag.sprite.SetY(cy + 84);
-
-# ── password prompt ───────────────────────────────────────────────────────────
+brand.image = Image.Text("vendiOS", 0.796, 0.651, 0.969, 1, "Sans Bold 40");
+tag.image   = Image.Text("Minimal. Modern. Yours.", 0.424, 0.439, 0.525, 1, "Sans 13");
+prompt.image = Image.Text("Enter passphrase", 0.651, 0.678, 0.784, 1, "Sans 14");
 # The dots are drawn from dot.png (one per typed char) — never as a font glyph,
 # so they can't render as tofu when the initramfs font lacks the bullet.
-prompt.sprite = NULL;
-dot.image     = Image("dot.png");
-dot_w         = dot.image.GetWidth();
-dots          = [];
+dot.image   = Image("dot.png");
+dot_w       = dot.image.GetWidth();
 
-fun clear_dots() {
-    i = 0;
-    while (dots[i]) {
-        dots[i] = NULL;
-        i++;
+MAX_HEADS = 8;
+heads = 0;          # displays laid out last time
+sig   = "";         # their geometry, to notice changes
+logos = []; brands = []; tags = [];
+prompting = 0;      # a passphrase prompt is up
+dot_count = 0;
+prompts = []; dots = [];
+
+fun head_count() {
+    n = 0;
+    while (n < MAX_HEADS && Window.GetWidth(n) > 0) n++;
+    if (n == 0) n = 1;
+    return n;
+}
+
+fun geometry_sig() {
+    s = "";
+    for (i = 0; i < head_count(); i++)
+        s += Window.GetX(i) + "," + Window.GetY(i) + "," + Window.GetWidth(i) + "," + Window.GetHeight(i) + ";";
+    return s;
+}
+
+fun cx_of(i) { return Window.GetX(i) + Window.GetWidth(i)  / 2; }
+fun cy_of(i) { return Window.GetY(i) + Window.GetHeight(i) / 2; }
+
+fun draw_prompt() {
+    # drop the old prompt + dots on every head
+    for (i = 0; i < MAX_HEADS; i++) {
+        global.prompts[i] = NULL;
+        j = 0;
+        while (global.dots[i * 64 + j]) { global.dots[i * 64 + j] = NULL; j++; }
     }
-    dots = [];
+    if (!prompting) return;
+    gap = 8;
+    for (i = 0; i < heads; i++) {
+        cx = cx_of(i); cy = cy_of(i);
+        global.prompts[i] = Sprite(prompt.image);
+        global.prompts[i].SetX(cx - prompt.image.GetWidth() / 2);
+        global.prompts[i].SetY(cy + 138);
+        total = dot_count * dot_w + (dot_count - 1) * gap;
+        startx = cx - total / 2;
+        for (j = 0; j < dot_count && j < 64; j++) {
+            s = Sprite(dot.image);
+            s.SetX(startx + j * (dot_w + gap));
+            s.SetY(cy + 176);
+            global.dots[i * 64 + j] = s;
+        }
+    }
+}
+
+fun layout() {
+    global.heads = head_count();
+    global.sig = geometry_sig();
+    for (i = 0; i < MAX_HEADS; i++) {
+        if (i < heads) {
+            if (!global.logos[i])  global.logos[i]  = Sprite(logo.image);
+            if (!global.brands[i]) global.brands[i] = Sprite(brand.image);
+            if (!global.tags[i])   global.tags[i]   = Sprite(tag.image);
+            cx = cx_of(i); cy = cy_of(i);
+            global.logos[i].SetX(cx - logo.image.GetWidth() / 2);
+            global.logos[i].SetY(cy - logo.image.GetHeight() - 64);
+            global.brands[i].SetX(cx - brand.image.GetWidth() / 2);
+            global.brands[i].SetY(cy + 8);
+            global.tags[i].SetX(cx - tag.image.GetWidth() / 2);
+            global.tags[i].SetY(cy + 84);
+        } else {
+            global.logos[i] = NULL; global.brands[i] = NULL; global.tags[i] = NULL;
+        }
+    }
+    draw_prompt();
+}
+
+layout();
+
+# re-center when a display appears or changes resolution mid-boot
+fun refresh_callback() {
+    if (geometry_sig() != sig) layout();
 }
 
 fun display_password_callback(label, count) {
     # Always a clean prompt — ignore cryptsetup's verbose label.
-    prompt.image  = Image.Text("Enter passphrase", 0.651, 0.678, 0.784, 1, "Sans 14");
-    prompt.sprite = Sprite(prompt.image);
-    prompt.sprite.SetX(cx - prompt.image.GetWidth() / 2);
-    prompt.sprite.SetY(cy + 138);
-
-    clear_dots();
-    gap   = 8;
-    total = count * dot_w + (count - 1) * gap;
-    startx = cx - total / 2;
-    i = 0;
-    while (i < count) {
-        s = Sprite(dot.image);
-        s.SetX(startx + i * (dot_w + gap));
-        s.SetY(cy + 176);
-        dots[i] = s;
-        i++;
-    }
+    global.prompting = 1;
+    global.dot_count = count;
+    draw_prompt();
 }
 
 fun display_normal_callback() {
-    prompt.sprite = NULL;
-    clear_dots();
+    global.prompting = 0;
+    global.dot_count = 0;
+    draw_prompt();
 }
 
 # Swallow everything else — splash stays clean from boot to handoff.
+Plymouth.SetRefreshFunction        (refresh_callback);
 Plymouth.SetDisplayPasswordFunction(display_password_callback);
 Plymouth.SetDisplayNormalFunction  (display_normal_callback);
 Plymouth.SetMessageFunction        (fun(t)        {});

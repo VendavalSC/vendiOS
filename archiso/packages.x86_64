@@ -24,6 +24,8 @@ util-linux
 networkmanager
 wpa_supplicant
 iwd
+wireless-regdb
+iw
 inetutils
 dnsutils
 openssh
@@ -78,6 +80,8 @@ git
 curl
 wget
 python
+python-gobject
+webkit2gtk-4.1
 python-pyparted
 
 # ── desktop (temp: hyprland until vendiWM) ───────────────────
@@ -99,8 +103,10 @@ kitty
 brightnessctl
 fprintd
 playerctl
+cava
 grim
 libnotify
+sound-theme-freedesktop
 slurp
 wf-recorder
 swaylock

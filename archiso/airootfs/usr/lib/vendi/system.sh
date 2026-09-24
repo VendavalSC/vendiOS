@@ -33,6 +33,8 @@ BASE_PKGS=(
     xorg-xwayland
     brightnessctl playerctl grim slurp wl-clipboard swaylock
     libnotify   # notify-send: vendi/vendiwm toasts are silent without it
+    sound-theme-freedesktop   # chimes (focus timer, …) played via pw-play
+    webkit2gtk-4.1 python-gobject   # vendi webapp (websites as apps)
     polkit-kde-agent qt5-wayland qt6-wayland
     gtk3 gtk4 gtk4-layer-shell
     # default browser
@@ -365,6 +367,19 @@ EOF
     chroot_run systemctl enable systemd-oomd
 }
 
+# ── power-profiles-daemon: AC-aware auto switching ────────────────────────────
+sys_install_power_profile() {
+    # power-profiles-daemon (already installed+enabled) has no built-in AC/
+    # battery awareness — it just stays on whatever profile was last set, even
+    # fully unplugged. A tiny udev rule closes that gap on any Mains-type
+    # power supply, not hardcoded to one device name.
+    mkdir -p /mnt/etc/udev/rules.d
+    cat > /mnt/etc/udev/rules.d/90-vendi-power-profile.rules <<'EOF'
+ACTION=="change", SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ATTR{online}=="0", RUN+="/usr/bin/powerprofilesctl set power-saver"
+ACTION=="change", SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ATTR{online}=="1", RUN+="/usr/bin/powerprofilesctl set balanced"
+EOF
+}
+
 # ── mkinitcpio compression: zstd is faster and smaller than gzip ─────────────
 sys_initramfs_polish() {
     sed -i -E 's|^#?COMPRESSION=.*|COMPRESSION="zstd"|' /mnt/etc/mkinitcpio.conf
@@ -571,12 +586,14 @@ VENDIOS_DEFAULT_SHELL=zsh
 VENDIOS_ACCENT_COLOR="203;166;247"
 VENDIOS_SNAPSHOT_MAX=10
 EOF
-    # copy the branding art (wordmark + shard logo)
+    # Copy /usr/share/vendios wholesale (branding art + vendiVim's config,
+    # anything else added there later) — not an enumerated file list, which
+    # silently drifts every time something new lands in this tree (this is
+    # exactly how vendivim/init.lua ended up missing from every real install:
+    # `vendi dev vim` failed outright with "vendiVim config not found",
+    # since the old list only knew about logo.txt/shard.txt).
     mkdir -p /mnt/usr/share/vendios
-    for art in logo.txt shard.txt; do
-        [[ -f /usr/share/vendios/$art ]] && \
-            cp "/usr/share/vendios/$art" /mnt/usr/share/vendios/
-    done
+    cp -a /usr/share/vendios/. /mnt/usr/share/vendios/
     # Default app associations (files/images/PDF/text/archives/media/web) so
     # double-clicking or `xdg-open` always lands in the matched GTK4 app.
     if [[ -f /etc/xdg/mimeapps.list ]]; then
@@ -591,10 +608,14 @@ sys_install_vendi_cli() {
     # Bash CLIs + the session launcher + the Rust binaries (vendiwm compositor,
     # vendi-ctl IPC, vendi-demo test client). All shipped from the live ISO's
     # /usr/bin since the airootfs is built with them in place.
-    for bin in vendi vendi-install vendi-boot vendi-welcome vendi-session \
-               vendiwm vendi-ctl vendi-demo vendibar vendi-menu vendi-launcher \
-               vendi-claude-status; do
-        [[ -f /usr/bin/$bin ]] && install -m 755 /usr/bin/$bin /mnt/usr/bin/$bin
+    #
+    # Glob, not a maintained list: an enumerated list silently drifts out of
+    # sync every time a new vendi-* tool is added to the live ISO (this is how
+    # vendi-weather and vendi-screensaver ended up missing from every real
+    # install while working fine live) — a glob can't go stale.
+    local bin
+    for bin in /usr/bin/vendi /usr/bin/vendi-* /usr/bin/vendiwm /usr/bin/vendibar; do
+        [[ -f "$bin" ]] && install -m 755 "$bin" "/mnt/usr/bin/$(basename "$bin")"
     done
     for lib in ui.sh disk.sh system.sh; do
         [[ -f /usr/lib/vendi/$lib ]] && \
@@ -610,14 +631,27 @@ sys_install_vendi_cli() {
     #   waybar/      → Hyprland-fallback bar config
     #   *-portal*    → screen-share / portal routing for wlroots
     #   vendios/     → branding art (shard/logo)
+    #   systemd/user → vendi's own --user units (day/night wallpaper timer);
+    #                  these aren't part of any package, so an offline/online
+    #                  install both need them copied explicitly like the rest
+    #                  of this tree list, or they only ever exist in the live ISO.
     local tree
     for tree in /etc/xdg/quickshell /etc/xdg/waybar \
                 /etc/xdg/xdg-desktop-portal-wlr /etc/xdg-desktop-portal \
-                /usr/share/vendios; do
+                /usr/share/vendios /usr/lib/systemd/user; do
         [[ -d "$tree" ]] || continue
         mkdir -p "/mnt${tree}"
         cp -a "${tree}/." "/mnt${tree}/"
     done
+
+    # Enable vendi's --user units globally (works pre-boot in the chroot via
+    # `--global`, which writes /etc/systemd/user/*.wants symlinks — unlike a
+    # plain `enable`, it doesn't need a running --user session/bus). Harmless
+    # to enable even before a wallpaper group is configured: the timer's
+    # target no-ops until `vendi wallpaper dynamic on` has a group to apply.
+    if [[ -f /mnt/usr/lib/systemd/user/vendi-wallpaper-dynamic.timer ]]; then
+        chroot_run systemctl --global enable vendi-wallpaper-dynamic.timer 2>/dev/null || true
+    fi
 }
 
 sys_install_aur_helper() {

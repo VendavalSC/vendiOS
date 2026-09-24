@@ -121,6 +121,15 @@ spawn_desktop() {
     # Claude Code gadget: install the working/idle hooks (idempotent, silent) so
     # the bar's auto-detected Claude island also shows the live "Cooking" state.
     command -v vendi >/dev/null && vendi claude setup-quiet >/dev/null 2>&1 || true
+    # vendi-buds: watches for a connected Bluetooth headset (AirPods get full
+    # noise-control + battery; anything else shows up generically) and writes
+    # ~/.config/vendi/buds-state.json for the bar to poll. One instance per
+    # session — pkill any stale one first (e.g. a crash-restart of the bar
+    # shouldn't ever leave two competing for the same L2CAP connection).
+    if command -v vendi-buds >/dev/null; then
+        pkill -x vendi-buds 2>/dev/null || true
+        vendi-buds >>"$LOG" 2>&1 &
+    fi
     # Night light: the CRTC gamma LUT resets on every compositor start, so
     # First login: the hands-on quickstart tour (quickshell config vendi-tour). It writes
     # ~/.config/vendi/welcomed when finished or skipped, so an interrupted

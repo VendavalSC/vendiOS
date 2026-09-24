@@ -1,0 +1,8 @@
+[Unit]
+Description=Apply the vendiOS day/night dynamic wallpaper for the current time
+# Needs the running compositor (vendi-ctl talks to it over WAYLAND_DISPLAY).
+After=vendiwm-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/vendi wallpaper dynamic apply

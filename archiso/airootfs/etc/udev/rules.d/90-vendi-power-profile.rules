@@ -1,0 +1,7 @@
+# Auto-switch power-profiles-daemon on AC online/offline — power-profiles-daemon
+# has no built-in AC/battery awareness of its own, so without this a laptop
+# stays on "balanced" (or whatever was last set) permanently, even fully
+# unplugged. Matches by ATTR{type}=="Mains" rather than a hardcoded device
+# name (e.g. "AC") so it isn't tied to this exact hardware's power_supply naming.
+ACTION=="change", SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ATTR{online}=="0", RUN+="/usr/bin/powerprofilesctl set power-saver"
+ACTION=="change", SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ATTR{online}=="1", RUN+="/usr/bin/powerprofilesctl set balanced"

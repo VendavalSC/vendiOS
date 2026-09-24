@@ -1,0 +1,14 @@
+[Unit]
+Description=vendiOS day/night dynamic wallpaper schedule
+
+[Timer]
+# Poll every minute so the wallpaper crosses sunrise/day/afternoon/night within
+# ~60s of the configured time (the apply is a cheap no-op until the slot
+# actually changes). Persistent catches a missed window after sleep.
+OnActiveSec=15s
+OnUnitActiveSec=1min
+Persistent=true
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

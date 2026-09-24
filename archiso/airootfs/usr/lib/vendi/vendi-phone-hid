@@ -1,0 +1,915 @@
+#!/usr/bin/env python3
+# vendi-phone-hid — this computer becomes a Bluetooth keyboard + mouse for
+# your iPhone, driven by the phone mirror window (`vendi phone control`).
+#
+# vendiwm decides what goes to the phone: clicks/drags inside the iPhone
+# mirror, the wheel over it, and keys typed while it has focus. They arrive
+# here over vendiwm's IPC ("phone" events) and leave as Bluetooth HID reports.
+#
+# iOS only takes a RELATIVE mouse (AssistiveTouch pointer), so every tap is
+# made absolute: slam the pointer into the top-left corner (it stops at the
+# edge, so its position is known), then move to the target at a constant
+# speed — constant speed keeps iOS's pointer acceleration linear, so one
+# calibration (`vendi phone calibrate`: click where the pointer landed) maps
+# mirror coordinates to pointer movement. Calibration also probes whether iOS
+# accepts an absolute pointer; if it does, taps are exact with no reset.
+#
+# Runs as root (HID's L2CAP ports need it). While it runs, bluetoothd runs
+# without its `input` plugin (which otherwise owns those ports); put back on
+# exit, even on a crash.
+
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+try:
+    gi.require_version("GLibUnix", "2.0")
+    from gi.repository import GLibUnix
+    GLibUnix_signal_add = GLibUnix.signal_add
+except (ValueError, ImportError):
+    GLibUnix_signal_add = GLib.unix_signal_add
+
+HID_UUID = "00001124-0000-1000-8000-00805f9b34fb"
+STATE_FILE = "/var/lib/vendi/phone-hid.json"
+RUN = "/run/vendi-phone"
+DROPIN_DIR = "/run/systemd/system/bluetooth.service.d"
+DROPIN = os.path.join(DROPIN_DIR, "vendi-phone.conf")
+PSM_CTRL, PSM_INTR = 0x11, 0x13
+TICK_MS = 8           # one mouse report per tick → constant pointer speed
+STEP = 24             # HID units per movement report (constant speed)
+PRESS_TICKS = 8       # hold a click at least this many ticks (~64ms) — iOS ignores blips
+HOME = 0x0223         # consumer page: AC Home
+CAL_VERSION = 2       # bump when calibration changes: older results are redone
+MAX_DIALS = 3         # reconnect attempts before waiting for the iPhone instead
+EDGE = 0.03           # mouse this close to a mirror edge → drive the pointer onto the edge
+EDGE_PUSH = 0.06      # how far past the edge to aim (the phone clamps it)
+RESET_REPORTS = 25    # reports of (-127,-127): enough to hit the corner from anywhere
+
+# Report 1: keyboard · 2: relative mouse (5 buttons) + wheel + pan ·
+# 4: consumer keys (Home, media). (An absolute pointer was tried as report 3:
+# iOS ignores it for movement, and with two pointing devices on offer it took
+# no clicks at all — one plain mouse only.)
+DESCRIPTOR = bytes.fromhex(
+    "05010906a1018501"
+    "050719e029e71500250175019508810295017508810195067508150025650507190029658100"
+    "c0"
+    "05010902a10185020901a100"
+    "050919012905150025019505750181029501750381010501093009310938"
+    "1581257f750895038106050c0a38021581257f750895018106"
+    "c0c0"
+    # Report 4: consumer control (Home = AC Home 0x223, volume, play/pause)
+    "050c0901a1018504150026ff0319002aff03751095018100c0"
+)
+
+SDP_RECORD = f"""<?xml version="1.0" encoding="UTF-8" ?>
+<record>
+  <attribute id="0x0001"><sequence><uuid value="0x1124" /></sequence></attribute>
+  <attribute id="0x0004"><sequence>
+    <sequence><uuid value="0x0100" /><uint16 value="0x0011" /></sequence>
+    <sequence><uuid value="0x0011" /></sequence></sequence></attribute>
+  <attribute id="0x0005"><sequence><uuid value="0x1002" /></sequence></attribute>
+  <attribute id="0x0006"><sequence><uint16 value="0x656e" /><uint16 value="0x006a" /><uint16 value="0x0100" /></sequence></attribute>
+  <attribute id="0x0009"><sequence><sequence><uuid value="0x1124" /><uint16 value="0x0100" /></sequence></sequence></attribute>
+  <attribute id="0x000d"><sequence><sequence>
+    <sequence><uuid value="0x0100" /><uint16 value="0x0013" /></sequence>
+    <sequence><uuid value="0x0011" /></sequence></sequence></sequence></attribute>
+  <attribute id="0x0100"><text value="vendiOS" /></attribute>
+  <attribute id="0x0101"><text value="Keyboard and mouse" /></attribute>
+  <attribute id="0x0102"><text value="vendiOS" /></attribute>
+  <attribute id="0x0200"><uint16 value="0x0100" /></attribute>
+  <attribute id="0x0201"><uint16 value="0x0111" /></attribute>
+  <attribute id="0x0202"><uint8 value="0xC0" /></attribute>
+  <attribute id="0x0203"><uint8 value="0x00" /></attribute>
+  <attribute id="0x0204"><boolean value="true" /></attribute>
+  <attribute id="0x0205"><boolean value="true" /></attribute>
+  <attribute id="0x0206"><sequence><sequence><uint8 value="0x22" /><text encoding="hex" value="{DESCRIPTOR.hex()}" /></sequence></sequence></attribute>
+  <attribute id="0x0207"><sequence><sequence><uint16 value="0x0409" /><uint16 value="0x0100" /></sequence></sequence></attribute>
+  <attribute id="0x020b"><uint16 value="0x0100" /></attribute>
+  <attribute id="0x020c"><uint16 value="0x0c80" /></attribute>
+  <attribute id="0x020d"><boolean value="false" /></attribute>
+  <attribute id="0x020e"><boolean value="false" /></attribute>
+  <attribute id="0x020f"><uint16 value="0x0640" /></attribute>
+  <attribute id="0x0210"><uint16 value="0x0320" /></attribute>
+</record>
+"""
+
+# evdev keycode → HID usage (keyboard page)
+KEYMAP = {
+    **{c: u for c, u in zip([30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25,
+                             16, 19, 31, 20, 22, 47, 17, 45, 21, 44], range(0x04, 0x1e))},   # a..z
+    **{c: u for c, u in zip(range(2, 11), range(0x1e, 0x27))}, 11: 0x27,                    # 1..9, 0
+    28: 0x28, 1: 0x29, 14: 0x2a, 15: 0x2b, 57: 0x2c, 12: 0x2d, 13: 0x2e, 26: 0x2f, 27: 0x30,
+    43: 0x31, 39: 0x33, 40: 0x34, 41: 0x35, 51: 0x36, 52: 0x37, 53: 0x38, 58: 0x39,
+    **{c: u for c, u in zip(range(59, 69), range(0x3a, 0x44))}, 87: 0x44, 88: 0x45,         # F1..F12
+    110: 0x49, 102: 0x4a, 104: 0x4b, 111: 0x4c, 107: 0x4d, 109: 0x4e,
+    106: 0x4f, 105: 0x50, 108: 0x51, 103: 0x52, 86: 0x64,
+    113: 0x7f, 115: 0x80, 114: 0x81,
+}
+MODS = {29: 0x01, 42: 0x02, 56: 0x04, 125: 0x08, 97: 0x10, 54: 0x20, 100: 0x40, 126: 0x80}
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+def notify(title, body=""):
+    """A desktop notification in the invoking user's session."""
+    user = os.environ.get("SUDO_USER")
+    uid = os.environ.get("SUDO_UID")
+    if not user or not uid:
+        return
+    subprocess.Popen(["sudo", "-u", user, "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+                      "notify-send", "-a", "Phone", "-i", "phone", title, body],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def load_state():
+    try:
+        return json.load(open(STATE_FILE))
+    except Exception:
+        return {}
+
+
+def save_state(st):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    json.dump(st, open(STATE_FILE, "w"), indent=1)
+
+
+# ── bluetoothd takeover ──────────────────────────────────────────────────────
+
+def systemctl(*args):
+    subprocess.run(["systemctl", *args], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def bt_takeover():
+    os.makedirs(RUN, exist_ok=True)
+    os.makedirs(DROPIN_DIR, exist_ok=True)
+    try:
+        conf = open("/etc/bluetooth/main.conf").read()
+    except OSError:
+        conf = "[General]\n"
+    # (the device class stays "laptop": as a keyboard, iOS demands passkey
+    # entry — typing a code shown on the phone — and rejects just-works
+    # pairing with "Pairing Unsuccessful"; as a computer it pairs cleanly and
+    # still uses the HID service below)
+    open(os.path.join(RUN, "main.conf"), "w").write(conf)
+    open(DROPIN, "w").write(
+        "# vendi phone control is running — restored when it stops\n"
+        "[Service]\nExecStart=\n"
+        f"ExecStart=/usr/lib/bluetooth/bluetoothd -P input -f {RUN}/main.conf\n")
+    systemctl("daemon-reload")
+    systemctl("restart", "bluetooth")
+
+
+def bt_restore():
+    try:
+        os.remove(DROPIN)
+    except FileNotFoundError:
+        pass
+    systemctl("daemon-reload")
+    systemctl("restart", "bluetooth")
+
+
+# ── D-Bus: agent + HID profile ───────────────────────────────────────────────
+
+AGENT_XML = """<node><interface name="org.bluez.Agent1">
+<method name="Release"/>
+<method name="RequestPinCode"><arg type="o" direction="in"/><arg type="s" direction="out"/></method>
+<method name="DisplayPinCode"><arg type="o" direction="in"/><arg type="s" direction="in"/></method>
+<method name="RequestPasskey"><arg type="o" direction="in"/><arg type="u" direction="out"/></method>
+<method name="DisplayPasskey"><arg type="o" direction="in"/><arg type="u" direction="in"/><arg type="q" direction="in"/></method>
+<method name="RequestConfirmation"><arg type="o" direction="in"/><arg type="u" direction="in"/></method>
+<method name="RequestAuthorization"><arg type="o" direction="in"/></method>
+<method name="AuthorizeService"><arg type="o" direction="in"/><arg type="s" direction="in"/></method>
+<method name="Cancel"/>
+</interface></node>"""
+
+PROFILE_XML = """<node><interface name="org.bluez.Profile1">
+<method name="Release"/>
+<method name="NewConnection"><arg type="o" direction="in"/><arg type="h" direction="in"/><arg type="a{sv}" direction="in"/></method>
+<method name="RequestDisconnection"><arg type="o" direction="in"/></method>
+</interface></node>"""
+
+
+class Bluez:
+    def __init__(self):
+        self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        self.adapter = "/org/bluez/hci0"
+
+    def call(self, path, iface, method, args=None, sig=None):
+        return self.bus.call_sync("org.bluez", path, iface, method,
+                                  GLib.Variant(sig, args) if sig else None,
+                                  None, Gio.DBusCallFlags.NONE, -1, None)
+
+    def set_prop(self, name, value):
+        self.bus.call_sync("org.bluez", self.adapter, "org.freedesktop.DBus.Properties", "Set",
+                           GLib.Variant("(ssv)", ("org.bluez.Adapter1", name, value)),
+                           None, Gio.DBusCallFlags.NONE, -1, None)
+
+    def get_prop(self, name):
+        r = self.bus.call_sync("org.bluez", self.adapter, "org.freedesktop.DBus.Properties", "Get",
+                               GLib.Variant("(ss)", ("org.bluez.Adapter1", name)),
+                               None, Gio.DBusCallFlags.NONE, -1, None)
+        return r.unpack()[0]
+
+    def export(self, path, xml, handler):
+        info = Gio.DBusNodeInfo.new_for_xml(xml).interfaces[0]
+        self.bus.register_object(path, info, handler, None, None)
+
+    def wait_adapter(self, timeout=15):
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                self.set_prop("Powered", GLib.Variant("b", True))
+                if self.get_prop("Powered"):
+                    return True
+            except GLib.Error:
+                pass
+            time.sleep(0.3)
+        return False
+
+    def setup(self, paired):
+        def agent_call(conn, sender, path, iface, method, params, inv):
+            log("agent:", method)
+            if method == "RequestPinCode":
+                inv.return_value(GLib.Variant("(s)", ("0000",)))
+            elif method == "RequestPasskey":
+                inv.return_value(GLib.Variant("(u)", (0,)))
+            else:
+                inv.return_value(None)
+
+        def profile_call(conn, sender, path, iface, method, params, inv):
+            log("profile:", method)
+            inv.return_value(None)
+
+        self.export("/vendi/phone/agent", AGENT_XML, agent_call)
+        self.export("/vendi/phone/profile", PROFILE_XML, profile_call)
+        self.call("/org/bluez", "org.bluez.AgentManager1", "RegisterAgent",
+                  ("/vendi/phone/agent", "NoInputNoOutput"), "(os)")
+        self.call("/org/bluez", "org.bluez.AgentManager1", "RequestDefaultAgent",
+                  ("/vendi/phone/agent",), "(o)")
+        opts = {
+            "ServiceRecord": GLib.Variant("s", SDP_RECORD),
+            "Role": GLib.Variant("s", "server"),
+            "RequireAuthentication": GLib.Variant("b", True),
+            "RequireAuthorization": GLib.Variant("b", False),
+            "AutoConnect": GLib.Variant("b", True),
+        }
+        self.call("/org/bluez", "org.bluez.ProfileManager1", "RegisterProfile",
+                  ("/vendi/phone/profile", HID_UUID, opts), "(osa{sv})")
+        self.set_prop("Alias", GLib.Variant("s", "vendiOS"))
+        self.set_prop("Pairable", GLib.Variant("b", True))
+        if not paired:
+            self.set_prop("DiscoverableTimeout", GLib.Variant("u", 0))
+            self.set_prop("Discoverable", GLib.Variant("b", True))
+
+    def address(self):
+        return self.get_prop("Address")
+
+    def remove(self, addr):
+        """Forget a paired device (its keys) on our side."""
+        path = f"{self.adapter}/dev_{addr.replace(':', '_')}"
+        try:
+            self.call(self.adapter, "org.bluez.Adapter1", "RemoveDevice", (path,), "(o)")
+        except GLib.Error as e:
+            log("remove failed:", e.message)
+
+    def trust(self, addr):
+        """Trusted devices connect without an authorization round-trip."""
+        path = f"{self.adapter}/dev_{addr.replace(':', '_')}"
+        try:
+            self.bus.call_sync("org.bluez", path, "org.freedesktop.DBus.Properties", "Set",
+                               GLib.Variant("(ssv)", ("org.bluez.Device1", "Trusted", GLib.Variant("b", True))),
+                               None, Gio.DBusCallFlags.NONE, -1, None)
+        except GLib.Error as e:
+            log("trust failed:", e.message)
+
+
+# ── the HID device ───────────────────────────────────────────────────────────
+
+class Device:
+    def __init__(self, state):
+        self.state = state
+        self.ctrl = None
+        self.intr = None
+        self.queue = []            # pending mouse reports, sent one per tick
+        self.mods = 0
+        self.keys = []
+        self.buttons = 0
+        self.last = None           # last known pointer target (0..1, 0..1)
+        self.calibrating = None    # None | "abs" | "rel"
+        self.cur = None            # estimated phone pointer position (0..1) — None: unknown
+        self.target = None         # where the mouse is on the mirror
+        self.pending = []          # button changes waiting for the pointer to arrive
+        self.hold = 0              # ticks left before a pending release may go
+        self.pending_since = 0.0   # when the oldest pending button change was queued
+        self.pinned = [False, False]   # pointer shoved onto an edge (x, y) — see tick
+        self.ipc = None            # vendiwm subscription — only while the phone is connected
+        self.bz = None             # Bluez handle (to forget a stale pairing)
+        self.dials = 0             # reconnect attempts since start / last drop
+
+    @property
+    def connected(self):
+        return self.intr is not None
+
+    # ── connections ──
+    def listen(self, addr):
+        self.srv = []
+        for psm in (PSM_CTRL, PSM_INTR):
+            s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((addr, psm))
+            s.listen(1)
+            GLib.io_add_watch(s.fileno(), GLib.IO_IN, self.on_accept, s, psm)
+            self.srv.append(s)
+
+    def on_accept(self, _fd, _cond, s, psm):
+        conn, addr = s.accept()
+        peer = addr[0]                   # (bdaddr, psm[, cid]) — just the address
+        log("connection", hex(psm), "from", peer)
+        if psm == PSM_CTRL:
+            self.ctrl = conn
+            GLib.io_add_watch(conn.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.on_ctrl)
+            self.state["phone"] = peer
+            save_state(self.state)
+        else:
+            self.intr = conn
+            self.linked()
+        return True
+
+    def reconnect(self):
+        """We were paired before: dial the phone a few times instead of only
+        waiting for it. Never hammer it — every failed attempt is a security
+        failure in the iPhone's eyes, and enough of them make iOS say
+        "can no longer connect, forget this device". After MAX_DIALS, just
+        wait: tapping vendiOS on the iPhone connects it."""
+        peer = self.state.get("phone")
+        if not peer or self.connected:
+            return False
+        self.dials += 1
+        if self.dials > MAX_DIALS:
+            log("not dialing again — waiting for the iPhone to connect")
+            notify("Tap vendiOS on your iPhone", "Settings → Bluetooth → vendiOS connects it.")
+            return False
+        try:
+            c = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+            c.settimeout(3)
+            c.connect((peer, PSM_CTRL))
+            i = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+            i.settimeout(3)
+            i.connect((peer, PSM_INTR))
+            c.settimeout(None); i.settimeout(None)
+            self.ctrl, self.intr = c, i
+            GLib.io_add_watch(c.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.on_ctrl)
+            log("reconnected to", peer)
+            self.linked()
+        except OSError as e:
+            if e.errno == 13:
+                # authentication refused: the iPhone no longer has our keys.
+                # Drop our stale half too, so the next pairing starts clean.
+                log("iPhone refused our pairing keys — clearing the stale pairing")
+                self.forget_phone(peer)
+                return False
+            log("reconnect failed:", e, f"(attempt {self.dials}/{MAX_DIALS})")
+            return True          # GLib timeout: try again
+        return False
+
+    def forget_phone(self, peer):
+        self.state.pop("phone", None)
+        save_state(self.state)
+        if self.bz:
+            self.bz.remove(peer)
+            try:
+                self.bz.set_prop("Discoverable", GLib.Variant("b", True))
+            except GLib.Error:
+                pass
+        notify("Pair your iPhone again",
+               "On the iPhone: Settings → Bluetooth → ⓘ vendiOS → Forget This Device, then tap vendiOS.")
+
+    def on_ctrl(self, _fd, cond):
+        if cond & (GLib.IO_HUP | GLib.IO_ERR):
+            return self.drop()
+        try:
+            msg = self.ctrl.recv(64)
+        except OSError:
+            return self.drop()
+        if not msg:
+            return self.drop()
+        kind = msg[0] >> 4
+        if kind == 0x1 and (msg[0] & 0x0f) == 0x5:     # HID_CONTROL: virtual cable unplug
+            return self.drop()
+        if kind in (0x5, 0x7, 0x9):                      # SET_REPORT / SET_PROTOCOL / SET_IDLE
+            self.ctrl.send(b"\x00")                      # HANDSHAKE: successful
+        elif kind == 0x4:                                # GET_REPORT
+            self.ctrl.send(b"\xa1\x01" + bytes(8))
+        return True
+
+    def linked(self):
+        """The phone is connected: only now does vendiwm start routing the
+        mirror's clicks and keys here (subscribing is what turns it on)."""
+        if self.ipc is None:
+            self.ipc = connect_vendiwm(self)
+        if self.calibration_stale():
+            # calibrate on our own (vision) once the connection has settled
+            GLib.timeout_add_seconds(4, lambda: (self.auto_calibrate(), False)[1])
+        else:
+            notify("iPhone connected", "Point, click, scroll and type on the mirror. Esc = Home.")
+
+    def drop(self):
+        log("phone disconnected")
+        self.dials = 0
+        # hand the mouse + keyboard straight back to the laptop
+        if self.ipc is not None:
+            try:
+                self.ipc.close()
+            except OSError:
+                pass
+            self.ipc = None
+        for s in (self.ctrl, self.intr):
+            try:
+                s.close()
+            except Exception:
+                pass
+        self.ctrl = self.intr = None
+        GLib.timeout_add_seconds(4, self.reconnect)
+        return False
+
+    def send(self, report):
+        if not self.intr:
+            return
+        try:
+            self.intr.send(b"\xa1" + report)
+        except OSError:
+            self.drop()
+
+    # ── keyboard ──
+    def consumer(self, usage, pressed):
+        self.send(bytes([0x04, usage & 0xff, usage >> 8]) if pressed else bytes([0x04, 0, 0]))
+
+    def key(self, code, pressed):
+        # Esc is the phone's Home button (twice quickly: the app switcher)
+        if code == 1:
+            log("home", "down" if pressed else "up")
+            return self.consumer(HOME, pressed)
+        if code in (113, 114, 115, 164):          # mute, vol-, vol+, play/pause
+            usage = {113: 0xe2, 114: 0xea, 115: 0xe9, 164: 0xcd}[code]
+            return self.consumer(usage, pressed)
+        if code in MODS:
+            self.mods = (self.mods | MODS[code]) if pressed else (self.mods & ~MODS[code])
+        elif code in KEYMAP:
+            u = KEYMAP[code]
+            if pressed and u not in self.keys:
+                self.keys = (self.keys + [u])[-6:]
+            elif not pressed and u in self.keys:
+                self.keys.remove(u)
+        else:
+            return
+        self.send(bytes([0x01, self.mods, 0]) + bytes((self.keys + [0] * 6)[:6]))
+
+    # ── pointer ──
+    # A tiny controller: `cur` is where we believe the phone's pointer is
+    # (None = unknown), `target` is where the mouse is on the mirror. Every
+    # tick moves the pointer toward the target by at most STEP units — the
+    # constant speed keeps iOS's acceleration linear, so `gain` (calibrated)
+    # maps mirror fractions to HID units. Buttons wait until it has arrived.
+    def rel(self, dx=0, dy=0, wheel=0, pan=0):
+        c = lambda v: max(-127, min(127, int(v))) & 0xff
+        return bytes([0x02, self.buttons, c(dx), c(dy), c(wheel), c(pan)])
+
+    def abs_report(self, x, y):
+        X, Y = int(x * 32767), int(y * 32767)
+        return bytes([0x03, self.buttons, X & 0xff, X >> 8, Y & 0xff, Y >> 8])
+
+    def moves(self, units_x, units_y):
+        """Constant-speed steps covering (units_x, units_y) — calibration."""
+        n = int(max(abs(units_x), abs(units_y)) / STEP) + 1
+        out, sx, sy = [], 0.0, 0.0
+        for i in range(1, n + 1):
+            tx, ty = units_x * i / n, units_y * i / n
+            out.append(self.rel(round(tx - sx), round(ty - sy)))
+            sx, sy = sx + round(tx - sx), sy + round(ty - sy)
+        return out
+
+    @property
+    def gain(self):
+        return self.state.get("gain", [900.0, 1950.0])
+
+    def calibration_stale(self):
+        """Gain is measured at one pointer speed; a different STEP needs a redo."""
+        return self.state.get("step") != STEP or self.state.get("cal") != CAL_VERSION
+
+    def resync(self):
+        """Slam into the top-left corner: the pointer's position is known after."""
+        self.cur = None
+        self.pinned = [False, False]
+        self.queue += [self.rel(-127, -127)] * RESET_REPORTS
+        self.queue.append("at-origin")
+
+    def pointer(self, phase, x, y, button):
+        if self.calibrating:
+            if phase == "down":
+                self.finish_calibration(x, y)
+            return
+        if phase == "leave":
+            return
+        if x < 0 or y < 0:
+            x, y = self.target or (0.5, 0.5)
+        self.target = (x, y)
+        if self.state.get("absolute"):
+            self.cur = self.target
+            self.queue.append(self.abs_report(x, y))
+        elif phase == "enter" or (self.cur is None and "at-origin" not in self.queue):
+            self.resync()
+        bit = 1 << (max(1, min(5, button)) - 1) if button else 0
+        if phase in ("down", "up"):
+            log("click", phase, button, f"at {x:.2f},{y:.2f}")
+        if phase in ("down", "up") and not self.pending:
+            self.pending_since = time.monotonic()
+        if phase == "down":
+            self.pending.append(("press", bit))
+        elif phase == "up":
+            self.pending.append(("release", bit))
+
+    def scroll(self, dx, dy):
+        def notches(v):
+            if not v:
+                return 0
+            n = max(1, round(abs(v)))
+            return n if v > 0 else -n
+        self.queue.append(self.rel(wheel=-notches(dy), pan=notches(dx)))
+
+    def tick(self):
+        if not self.connected:
+            self.queue.clear(); self.pending.clear()
+            return True
+        # raw reports first (corner reset, calibration moves, scroll)
+        while self.queue:
+            item = self.queue.pop(0)
+            if item == "at-origin":
+                self.cur = tuple(self.state.get("origin", [0.0, 0.0]))
+                continue
+            self.send(item)
+            return True
+        if self.calibrating or self.cur is None or self.target is None:
+            return True
+        # step toward the mouse at constant speed. Near an edge, aim past it:
+        # iOS stops its pointer hard at the screen edge, so it always gets
+        # there, and once it's pinned we know that coordinate exactly — every
+        # trip to an edge wipes out the dead-reckoning drift.
+        gx, gy = self.gain
+        tx, ty = self.target
+        tx = -EDGE_PUSH if tx <= EDGE else 1 + EDGE_PUSH if tx >= 1 - EDGE else tx
+        ty = -EDGE_PUSH if ty <= EDGE else 1 + EDGE_PUSH if ty >= 1 - EDGE else ty
+        ux = (tx - self.cur[0]) * gx
+        uy = (ty - self.cur[1]) * gy
+        # the estimate reached the edge: the real pointer may still be short
+        # of it (calibration error), so shove it well past once — then it's
+        # truly pinned and the estimate is exact on that axis
+        for axis, want in ((0, tx), (1, ty)):
+            at_edge = (want < 0 and self.cur[axis] <= 0) or (want > 1 and self.cur[axis] >= 1)
+            if not at_edge:
+                self.pinned[axis] = False
+            elif not self.pinned[axis]:
+                self.pinned[axis] = True
+                extra = 0.15 * (gx if axis == 0 else gy) * (-1 if want < 0 else 1)
+                self.queue += self.moves(extra, 0) if axis == 0 else self.moves(0, extra)
+                return True
+        if (tx < 0 and self.cur[0] <= 0) or (tx > 1 and self.cur[0] >= 1):
+            ux = 0
+        if (ty < 0 and self.cur[1] <= 0) or (ty > 1 and self.cur[1] >= 1):
+            uy = 0
+        dist = max(abs(ux), abs(uy))
+        waited = self.pending and time.monotonic() - self.pending_since > 0.2
+        if dist >= 1 and not waited:
+            k = min(1.0, STEP / dist)
+            sx, sy = round(ux * k), round(uy * k)
+            self.send(self.rel(sx, sy))
+            # the phone clamps at its edges; so does our estimate
+            self.cur = (min(1.0, max(0.0, self.cur[0] + sx / gx)),
+                        min(1.0, max(0.0, self.cur[1] + sy / gy)))
+            return True
+        # arrived (or waited long enough): now the buttons — a press is held a
+        # few ticks before its release
+        if self.hold > 0:
+            self.hold -= 1
+            return True
+        if self.pending:
+            what, bit = self.pending.pop(0)
+            self.buttons = (self.buttons | bit) if what == "press" else (self.buttons & ~bit)
+            self.send(self.rel())
+            log("sent", what, f"buttons={self.buttons:#04x}", "arrived" if not waited else "timeout")
+            if what == "press":
+                self.hold = PRESS_TICKS
+            self.pending_since = time.monotonic()
+        return True
+
+    # ── automatic calibration (vision) ──
+    # Screenshots of the mirror show where the phone's pointer really is, so
+    # nobody has to chase it with the mouse: park it in the corner, move it a
+    # known amount, and find it by what changed between the frames.
+    def auto_calibrate(self):
+        import threading
+        if not self.connected:
+            notify("iPhone not connected", "Connect it first (tap vendiOS in the iPhone's Bluetooth).")
+            return
+        if self.calibrating:
+            return
+        self.calibrating = "auto"
+        threading.Thread(target=self._auto_calibrate, daemon=True).start()
+
+    def _settle(self, extra=0.7):
+        """Wait for queued reports to go out, then for the mirror to catch up."""
+        while self.queue:
+            time.sleep(0.02)
+        time.sleep(extra)
+
+    def _auto_calibrate(self):
+        try:
+            # the mirror may not be up yet (connected before mirroring started):
+            # wait for it rather than calibrating against nothing
+            rect = None
+            for i in range(24):
+                rect = phone_rect()
+                if rect or not self.connected:
+                    break
+                if i == 0:
+                    notify("Waiting for the mirror", "Start mirroring (vendi phone) — calibration runs once it's on screen.")
+                time.sleep(5)
+            log("auto-calibration: mirror at", rect)
+            if not rect:
+                notify("Calibration failed", "Start mirroring first (vendi phone), then: vendi phone calibrate")
+                return
+            time.sleep(1.5)   # let the stream settle
+            notify("Calibrating…", "Hands off the mouse for a few seconds.")
+            # corner, then two known moves (U and 2U): the difference between
+            # where the pointer lands gives the gain, and the rest is where
+            # iOS really parks it after a corner reset (not exactly 0,0)
+            self.cur = None
+            units = [200.0, 400.0]
+            for _ in range(3):
+                pts = []
+                for mult in (1, 2):
+                    self.queue += [self.rel(-127, -127)] * RESET_REPORTS
+                    self._settle()
+                    a = capture(rect)
+                    self.queue += self.moves(units[0] * mult, units[1] * mult)
+                    self._settle()
+                    b, c = capture(rect), capture(rect)
+                    pts.append(find_pointer(a, b, c))
+                log("probes", units, "→", pts)
+                if None in pts:
+                    continue
+                (x1, y1), (x2, y2) = pts
+                if x2 > 0.93 or y2 > 0.93:
+                    units = [units[0] / 2, units[1] / 2]
+                    continue
+                if x2 - x1 < 0.02 or y2 - y1 < 0.02:
+                    continue
+                gx, gy = units[0] / (x2 - x1), units[1] / (y2 - y1)
+                self.state["gain"] = [gx, gy]
+                self.state["origin"] = [max(0.0, x1 - units[0] / gx), max(0.0, y1 - units[1] / gy)]
+                self.state["step"] = STEP
+                self.state["cal"] = CAL_VERSION
+                save_state(self.state)
+                self.cur = (x2, y2)
+                log("calibrated gain", self.state["gain"], "origin", self.state["origin"])
+                notify("Calibrated", "The phone's pointer now follows your mouse.")
+                return
+            log("auto-calibration: pointer not found")
+            notify("Couldn't find the pointer",
+                   "Is AssistiveTouch on? Try on a calm screen (home screen), or: vendi phone calibrate manual")
+        except Exception as e:
+            log("auto-calibration error:", e)
+            notify("Calibration failed", str(e))
+        finally:
+            if self.calibrating == "auto":
+                self.calibrating = None
+
+    # ── manual calibration (fallback) ──
+    def calibrate(self):
+        """Step 1: can iOS take an absolute pointer? Put it in the middle and
+        ask where it went."""
+        if not self.connected:
+            notify("iPhone not connected", "Connect it first (it should say vendiOS in Bluetooth).")
+            return
+        self.calibrating = "abs"
+        self.cur = None
+        self.queue += [self.rel(-127, -127)] * RESET_REPORTS + [self.rel(20, 20)]
+        self.queue.append(self.abs_report(0.5, 0.5))
+        notify("Calibrating (1/2)", "Click on the phone mirror exactly where the pointer is now.")
+
+    def finish_calibration(self, x, y):
+        if self.calibrating == "abs":
+            if abs(x - 0.5) < 0.08 and abs(y - 0.5) < 0.08:
+                self.state["absolute"] = True
+                save_state(self.state)
+                self.calibrating = None
+                self.cur = (0.5, 0.5)
+                notify("Calibrated", "Your iPhone takes exact positions — taps land where you click.")
+                return
+            self.state["absolute"] = False
+            self.calibrating = "rel"
+            self.cal_units = (400.0, 800.0)
+            self.queue += [self.rel(-127, -127)] * RESET_REPORTS + self.moves(*self.cal_units)
+            notify("Calibrating (2/2)", "Click where the pointer is now.")
+            return
+        ux, uy = self.cal_units
+        if x > 0.93 or y > 0.93:
+            # ran into the screen edge — measure again with a shorter move
+            self.cal_units = (ux / 2, uy / 2)
+            self.queue += [self.rel(-127, -127)] * RESET_REPORTS + self.moves(*self.cal_units)
+            notify("Calibrating (2/2)", "Once more — click where the pointer is now.")
+            return
+        self.state["gain"] = [ux / max(x, 0.02), uy / max(y, 0.02)]
+        self.state["step"] = STEP
+        save_state(self.state)
+        self.calibrating = None
+        self.cur = (x, y)
+        log("calibrated gain", self.state["gain"])
+        notify("Calibrated", "Taps now land where you click. Recalibrate anytime: vendi phone calibrate")
+
+
+# ── vendiwm IPC ──────────────────────────────────────────────────────────────
+
+def connect_vendiwm(dev):
+    path = os.environ.get("VENDIWM_SOCK")
+    if not path:
+        uid = os.environ.get("SUDO_UID", "1000")
+        socks = [f for f in os.listdir(f"/run/user/{uid}") if f.endswith(".ipc.sock") and f.startswith("wayland")]
+        path = f"/run/user/{uid}/{sorted(socks)[0]}" if socks else None
+    if not path:
+        log("no vendiwm IPC socket"); return None
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(path)
+    s.sendall(b'{"cmd":"subscribe","events":["phone"]}\n')
+    buf = bytearray()
+
+    def on_data(_fd, cond):
+        if dev.ipc is not s:
+            return False                     # we dropped this subscription
+        if cond & (GLib.IO_HUP | GLib.IO_ERR):
+            log("vendiwm went away"); loop.quit(); return False
+        try:
+            chunk = s.recv(65536)
+        except OSError:
+            return False
+        if not chunk:
+            log("vendiwm closed the connection"); loop.quit(); return False
+        buf.extend(chunk)
+        while b"\n" in buf:
+            line, _, rest = bytes(buf).partition(b"\n")
+            buf[:] = rest
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            e = ev.get("event")
+            if e == "phone-pointer":
+                dev.pointer(ev["phase"], ev["x"], ev["y"], ev.get("button", 1))
+            elif e == "phone-scroll":
+                dev.scroll(ev.get("dx", 0), ev.get("dy", 0))
+            elif e == "phone-key":
+                dev.key(ev["code"], ev["pressed"])
+        return True
+
+    GLib.io_add_watch(s.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, on_data)
+    log("listening to vendiwm on", path)
+    return s
+
+
+def ipc_path():
+    path = os.environ.get("VENDIWM_SOCK")
+    if path:
+        return path
+    uid = os.environ.get("SUDO_UID", "1000")
+    socks = sorted(f for f in os.listdir(f"/run/user/{uid}") if f.endswith(".ipc.sock") and f.startswith("wayland"))
+    return f"/run/user/{uid}/{socks[0]}" if socks else None
+
+
+def phone_rect():
+    """[x, y, w, h] of the phone mirror on screen, from vendiwm."""
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(3)
+    s.connect(ipc_path())
+    s.sendall(b'{"cmd":"list-windows"}\n')
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    s.close()
+    for w in json.loads(buf).get("windows", []):
+        if w.get("phone") and len(w.get("rect", [])) == 4:
+            return w["rect"]
+    return None
+
+
+_shot = [0]
+
+
+def capture(rect):
+    """Screenshot the mirror as the logged-in user (grim), grayscale, half size."""
+    from PIL import Image
+    uid = os.environ.get("SUDO_UID", "1000")
+    user = os.environ.get("SUDO_USER", "")
+    display = os.path.basename(ipc_path()).removesuffix(".ipc.sock")
+    _shot[0] += 1
+    out = f"/run/user/{uid}/vendi-phone-cal-{_shot[0] % 4}.png"
+    x, y, w, h = rect
+    subprocess.run(["sudo", "-u", user, "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                    f"WAYLAND_DISPLAY={display}", "grim", "-g", f"{x},{y} {w}x{h}", out],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    img = Image.open(out).convert("L")
+    return img.resize((max(1, img.width // 2), max(1, img.height // 2)))
+
+
+def find_pointer(a, b, c):
+    """Where the pointer is in frame b (0..1), given frame a with the pointer
+    parked in the top-left corner and c = b a moment later (to ignore
+    whatever else is animating on the phone). None if it can't be found."""
+    from PIL import ImageChops, ImageFilter
+    w, h = b.size
+    moved = ImageChops.difference(a, b).point(lambda v: 255 if v > 28 else 0)
+    noise = ImageChops.difference(b, c).point(lambda v: 255 if v > 18 else 0).filter(ImageFilter.MaxFilter(9))
+    mask = ImageChops.subtract(moved, noise)
+    px = mask.load()
+    xs, ys = [], []
+    for yy in range(0, h, 2):
+        for xx in range(0, w, 2):
+            if px[xx, yy] and not (xx < w * 0.12 and yy < h * 0.07):   # skip where it was parked
+                xs.append(xx); ys.append(yy)
+    if len(xs) < 6:
+        return None
+    xs.sort(); ys.sort()
+    mx, my = xs[len(xs) // 2], ys[len(ys) // 2]
+    # the pointer is one small blob: most changed pixels must sit near the median
+    near = sum(1 for i in range(len(xs)) if abs(xs[i] - mx) < w * 0.12) / len(xs)
+    if near < 0.6:
+        return None
+    return (mx / w, my / h)
+
+
+loop = GLib.MainLoop()
+
+
+def main():
+    if os.geteuid() != 0:
+        print("vendi-phone-hid needs root (Bluetooth HID ports) — use: vendi phone control", file=sys.stderr)
+        return 1
+    state = load_state()
+    dev = Device(state)
+    restored = False
+    os.makedirs(RUN, exist_ok=True)
+    open(os.path.join(RUN, "pid"), "w").write(str(os.getpid()))
+
+    def cleanup(*_):
+        nonlocal restored
+        if not restored:
+            restored = True
+            log("restoring bluetooth")
+            bt_restore()
+            try:
+                os.remove(os.path.join(RUN, "pid"))
+            except OSError:
+                pass
+        loop.quit()
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        GLibUnix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda *_: (cleanup(), False)[1])
+    GLibUnix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, lambda *_: (dev.auto_calibrate(), True)[1])
+    GLibUnix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR2, lambda *_: (dev.calibrate(), True)[1])
+    try:
+        log("taking over bluetooth")
+        bt_takeover()
+        bz = Bluez()
+        if not bz.wait_adapter():
+            log("bluetooth adapter didn't come back"); cleanup(); return 1
+        bz.setup(paired=bool(state.get("phone")))
+        dev.bz = bz
+        dev.listen(bz.address())
+        GLib.timeout_add(TICK_MS, dev.tick)
+        if state.get("phone"):
+            bz.trust(state["phone"])
+            GLib.timeout_add_seconds(4, dev.reconnect)
+            dev.reconnect()
+            notify("Phone control on", "Connecting to your iPhone…")
+        else:
+            notify("Pair your iPhone",
+                   "On the iPhone: Settings → Bluetooth → tap “vendiOS”. Then: vendi phone calibrate")
+        loop.run()
+    finally:
+        cleanup()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

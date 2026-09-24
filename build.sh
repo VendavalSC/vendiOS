@@ -47,6 +47,12 @@ mkdir -p "$OUT"
 # overlay so mkarchiso picks them up. Built as the invoking user so cargo can
 # use their ~/.cargo cache; copied into archiso/airootfs/usr/bin/ before the
 # squashfs is built.
+#
+# NOTE: vendi-buds (AirPods control) is deliberately NOT built/shipped here —
+# it's a personal, this-machine-only feature (the bar UI stays, but it's
+# inert without the daemon). It bundles a product photo we don't have
+# redistribution rights to, so it must never end up in a public ISO/package.
+# Still fully buildable for local dev: `cargo build -p vendi-buds` in src/.
 RUST_SRC="$(cd "$(dirname "$0")/src" && pwd)"
 RUST_BIN_DIR="${PROFILE}/airootfs/usr/bin"
 BUILD_USER="${SUDO_USER:-$(whoami)}"
@@ -76,6 +82,10 @@ if [[ -d "${RUST_SRC}/vendibar-pro" ]]; then
     mkdir -p "${PROFILE}/airootfs/etc/xdg/quickshell/vendibar-pro"
     cp -a "${RUST_SRC}/vendibar-pro/." \
           "${PROFILE}/airootfs/etc/xdg/quickshell/vendibar-pro/"
+    # vendi-buds is personal/this-machine-only (see the Rust build step above)
+    # — its product photo isn't ours to redistribute, so strip it back out
+    # even though the blanket copy above just brought it along.
+    rm -f "${PROFILE}/airootfs/etc/xdg/quickshell/vendibar-pro/airpods.png"
     echo "  Synced src/vendibar-pro -> airootfs quickshell config."
 fi
 

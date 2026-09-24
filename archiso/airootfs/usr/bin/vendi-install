@@ -232,36 +232,82 @@ step_disk() {
 }
 
 # ── step: partition mode ──────────────────────────────────────────────────────
+_step_delete_partition() {
+    # Build the picker from disk_map (pipe-delimited → reliable even when
+    # fs/label/mount are empty). Free space and mounted partitions are skipped.
+    local entries=() devs=()
+    while IFS='|' read -r kind num start size dev fs label mount; do
+        [[ "$kind" == part ]] || continue
+        [[ -n "$mount" ]] && continue # never delete a mounted partition
+        local desc; printf -v desc "%-12s %9s" "${dev##*/}" "$(disk_human "$size")"
+        [[ -n "$fs" ]]    && desc+="  ${fs}"
+        [[ -n "$label" ]] && desc+="  [${label}]"
+        entries+=("$desc")
+        devs+=("$dev")
+    done < <(disk_map "$CFG_DISK")
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        ui_flash "No deletable (unmounted) partitions found." "$FG_RED"
+        sleep 1.5; return 0
+    fi
+
+    local sel
+    ui_menu "Select Partition to DELETE" 6 "$TOTAL" sel "${entries[@]}" || return 0
+    # map the chosen label back to its device path
+    local part='' i
+    for i in "${!entries[@]}"; do
+        [[ "${entries[$i]}" == "$sel" ]] && { part="${devs[$i]}"; break; }
+    done
+    [[ -z "$part" ]] && return 0
+
+    ui_confirm "DANGER: Delete Partition?" 6 "$TOTAL" \
+        "ALL data on ${part} will be PERMANENTLY LOST. Are you 100% sure?" || return 0
+    
+    echo "[$(date +%T)] Deleting partition ${part}" >> /tmp/vendios-install.log
+    disk_delete_partition "$part"
+    ui_flash "Partition deleted." "$FG_GREEN"
+    sleep 1
+    return 0
+}
+
 step_partmode() {
     ui_clear
     ui_panel_draw 6 "$TOTAL" "Partition Mode"
     ui_hints "Up/Down:navigate" "Enter:select" "Esc:back"
 
-    # show disk visualization
+    # show disk visualization (sets UI_DISK_BAR_ROWS)
     ui_disk_bar "$CFG_DISK" 1
 
     local opts=(
         "Full disk  —  erase ${CFG_DISK} and install (recommended)"
-        "Free space —  install alongside existing OS (dual-boot)"
+        "Free space —  install into existing free space (dual-boot)"
+        "Delete partition — wipe an existing partition to free space"
     )
 
-    # check free space availability for dual-boot option (UEFI only — BIOS
-    # dual-boot would require rewriting an existing MBR partition table)
+    # check free space availability for dual-boot option (UEFI only)
     local has_free=0
     [[ "$FIRMWARE" == 'uefi' ]] && disk_free_ok "$CFG_DISK" 2>/dev/null && has_free=1
+
+    # lay the action list out just beneath the disk map, with a one-row gap
+    local opt_top=$(( 7 + UI_DISK_BAR_ROWS + 1 ))
+    local note_row=$(( opt_top + ${#opts[@]} ))
+    # keep everything inside the panel even on a tiny/odd-geometry disk
+    (( note_row > UI_CONTENT_BOT-1 )) && opt_top=$(( UI_CONTENT_BOT - ${#opts[@]} - 1 ))
+    note_row=$(( opt_top + ${#opts[@]} ))
 
     local cursor=0
     while true; do
         # redraw options
         local i
         for (( i=0; i<${#opts[@]}; i++ )); do
-            local row=$(( UI_ROWS-8+i ))
+            local row=$(( opt_top+i ))
             if [[ $i -eq $cursor ]]; then
                 _at "$row" $(( UI_X+1 ))
                 printf "${BG_SEL}%*s${R}" $(( UI_W-2 )) ''
                 _at "$row" $(( UI_X+3 ))
                 printf "${BG_SEL}${FG_ACCENT}${BOLD}>  ${FG_WHITE}${opts[$i]}${R}"
             else
+                _fill "$row" $(( UI_X+1 )) $(( UI_W-2 ))
                 local c=$FG_WHITE
                 [[ $i -eq 1 && $has_free -eq 0 ]] && c=$FG_DIM
                 _at "$row" $(( UI_X+3 ))
@@ -269,9 +315,10 @@ step_partmode() {
             fi
         done
 
+        _fill "$note_row" $(( UI_X+1 )) $(( UI_W-2 ))
         [[ $has_free -eq 0 ]] && {
-            _at $(( UI_ROWS-5 )) $(( UI_X+3 ))
-            printf "${BG_BASE}${FG_DIM}No free space >= 8 GiB detected for dual-boot${R}${BG_BASE}"
+            _at "$note_row" $(( UI_X+3 ))
+            printf "${BG_BASE}${FG_DIM}No free space ≥ 8 GiB detected for dual-boot${R}${BG_BASE}"
         }
 
         local key; IFS= read -rsn1 key
@@ -293,6 +340,12 @@ step_partmode() {
                         if [[ $has_free -eq 1 ]]; then
                             CFG_MODE='free'; return 0
                         fi ;;
+                    2)
+                        _step_delete_partition
+                        # Refresh free space check
+                        has_free=0
+                        [[ "$FIRMWARE" == 'uefi' ]] && disk_free_ok "$CFG_DISK" 2>/dev/null && has_free=1
+                        ;;
                 esac ;;
         esac
     done
@@ -545,13 +598,46 @@ step_install() {
         else
             disk_partition_full_bios "$CFG_DISK"
         fi
-        partprobe "$CFG_DISK" 2>/dev/null; sleep 1
+        # Notify kernel of new partition table via every available tool;
+        # partprobe alone is unreliable on eMMC (mmcblk) — partx is more
+        # direct for those controllers.
+        partprobe "$CFG_DISK" 2>/dev/null || true
+        partx -u  "$CFG_DISK" 2>/dev/null || true
+        udevadm trigger --action=add --subsystem-match=block 2>/dev/null || true
+        udevadm settle --timeout=15
         # Both layouts: p1 = FAT32 boot, p2 = root
         CFG_EFI_PART=$(disk_part "$CFG_DISK" 1)
         CFG_ROOT_PART=$(disk_part "$CFG_DISK" 2)
+        # Wait up to 10 s for the partition node — eMMC can lag behind udev
+        local _w=0
+        until [[ -b "$CFG_ROOT_PART" ]]; do
+            (( _w++ >= 20 )) && {
+                _log "FATAL: ${CFG_ROOT_PART} never appeared (partitioning failed?)"
+                return 1
+            }
+            sleep 0.5
+        done
+        CFG_IS_NEW_EFI=1
     else
         local parts; parts=$(disk_partition_free_space "$CFG_DISK")
-        read -r CFG_EFI_PART CFG_ROOT_PART <<< "$parts"
+        read -r CFG_EFI_PART CFG_ROOT_PART CFG_IS_NEW_EFI <<< "$parts"
+        if [[ -z "$CFG_EFI_PART" || -z "$CFG_ROOT_PART" ]]; then
+            _log "FATAL: free-space partitioning returned no partitions (sgdisk failed?)"
+            return 1
+        fi
+        # Wait for BOTH new partition nodes — free-space path needs the same
+        # guard as full-disk; the Windows GPT can delay udev node creation
+        local _w=0 _p
+        for _p in "$CFG_EFI_PART" "$CFG_ROOT_PART"; do
+            _w=0
+            until [[ -b "$_p" ]]; do
+                (( _w++ >= 20 )) && {
+                    _log "FATAL: ${_p} never appeared after free-space partitioning"
+                    return 1
+                }
+                sleep 0.5
+            done
+        done
     fi
     _ok 4 "Disk partitioned"
 
@@ -563,8 +649,14 @@ step_install() {
     if [[ $CFG_LUKS -eq 1 ]]; then
         _status 12 "Encrypting root partition"
         _log "cryptsetup luksFormat"
-        disk_luks_format "$CFG_ROOT_PART" "$CFG_LUKS_PASS"  >>"$INSTALL_LOG" 2>&1
-        disk_luks_open   "$CFG_ROOT_PART" "$CFG_LUKS_PASS"  >>"$INSTALL_LOG" 2>&1
+        disk_luks_format "$CFG_ROOT_PART" "$CFG_LUKS_PASS" >>"$INSTALL_LOG" 2>&1 || {
+            _log "FATAL: luksFormat failed on ${CFG_ROOT_PART} — see log"
+            return 1
+        }
+        disk_luks_open "$CFG_ROOT_PART" "$CFG_LUKS_PASS" >>"$INSTALL_LOG" 2>&1 || {
+            _log "FATAL: luksOpen failed on ${CFG_ROOT_PART} — see log"
+            return 1
+        }
         LUKS_UUID=$(disk_luks_uuid "$CFG_ROOT_PART")
         FS_TARGET=/dev/mapper/cryptroot
     fi
@@ -572,7 +664,12 @@ step_install() {
     # ── 3. format ─────────────────────────────────────────────
     _status 15 "Formatting partitions"
     _log "mkfs.${CFG_FS}"
-    [[ -n "$CFG_EFI_PART" ]] && disk_format_boot "$CFG_EFI_PART"
+    
+    # ONLY format boot if it's a new partition (to avoid wiping other OS bootloaders)
+    if [[ -n "$CFG_EFI_PART" && "$CFG_IS_NEW_EFI" == "1" ]]; then
+        disk_format_boot "$CFG_EFI_PART"
+    fi
+
     if [[ "$CFG_FS" == 'btrfs' ]]; then
         disk_format_root_btrfs "$FS_TARGET"
     else
@@ -588,6 +685,10 @@ step_install() {
     else
         disk_mount_ext4 "$FS_TARGET" "$CFG_EFI_PART"
     fi
+    mountpoint -q /mnt || {
+        _log "FATAL: /mnt is not mounted — disk setup failed, aborting before pacstrap"
+        return 1
+    }
     _ok 6 "Filesystems mounted"
 
     # ── 4. mirrors ────────────────────────────────────────────
@@ -675,6 +776,7 @@ step_install() {
     sys_install_time       >>"$INSTALL_LOG" 2>&1
     sys_install_zram
     sys_install_resilience >>"$INSTALL_LOG" 2>&1
+    sys_install_power_profile
     sys_install_smartd     >>"$INSTALL_LOG" 2>&1
     [[ "$CFG_FS" == 'btrfs' ]] && \
         sys_install_snapper "$CFG_FS" >>"$INSTALL_LOG" 2>&1 || true
@@ -728,7 +830,10 @@ step_install() {
     _status 93 "Installing Limine bootloader"
     _log "limine"
     local partuuid; partuuid=$(disk_partuuid "$CFG_ROOT_PART")
-    limine_install "$CFG_DISK" "$FIRMWARE" "$partuuid" "$CFG_FS" "$LUKS_UUID" >>"$INSTALL_LOG" 2>&1
+    if ! limine_install "$CFG_DISK" "$FIRMWARE" "$partuuid" "$CFG_FS" "$LUKS_UUID" >>"$INSTALL_LOG" 2>&1; then
+        _log "FATAL: bootloader install failed — system would not boot (see log)"
+        return 1
+    fi
     _ok 12 "Limine installed"
 
     # ── 18. graphics drivers (AMD / Intel / NVIDIA auto-detect) ──

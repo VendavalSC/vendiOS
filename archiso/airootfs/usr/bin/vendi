@@ -845,6 +845,21 @@ cmd_theme() {
 # `vendi bar <classic|pro>` switches the status bar without touching the
 # compositor: write the choice, kill the running bar, and the session's bar
 # supervisor respawns the right one (and sorts out mako).
+BARLIGHT_FILE="$HOME/.config/vendi/bar-light"
+
+# Bar tint: dark (default) or light. Independent of `vendi appearance`, which
+# is about GTK apps — this is only the bar's own surface. The bar watches the
+# file, so the switch is live: no restart, no pkill.
+_barlight_current() {
+    [[ "$(cat "$BARLIGHT_FILE" 2>/dev/null || true)" == 1 ]] && echo light || echo dark
+}
+
+_barlight_set() {
+    mkdir -p "$HOME/.config/vendi"
+    [[ "$1" == light ]] && echo 1 > "$BARLIGHT_FILE" || echo 0 > "$BARLIGHT_FILE"
+    _ok "bar tint: $1"
+}
+
 cmd_bar() {
     local choice=${1:-}
     local cur
@@ -853,7 +868,8 @@ cmd_bar() {
         "")
             _header "bar"
             _kv "current" "$cur"
-            _info "vendi bar <classic|pro> to switch"
+            _kv "tint" "$(_barlight_current)"
+            _info "vendi bar <classic|pro> to switch, <light|dark> to tint"
             ;;
         classic|pro)
             mkdir -p "$HOME/.config/vendi"
@@ -862,8 +878,12 @@ cmd_bar() {
             pkill -x quickshell 2>/dev/null || true
             _ok "bar: ${choice}"
             ;;
+        light|dark)  _barlight_set "$choice" ;;
+        toggle)
+            [[ "$(_barlight_current)" == light ]] && _barlight_set dark || _barlight_set light ;;
+        tint)        _barlight_current ;;
         *)
-            _err "unknown bar: ${choice} (have: classic pro)"
+            _err "unknown bar: ${choice} (have: classic pro light dark toggle tint)"
             return 1
             ;;
     esac
@@ -960,6 +980,21 @@ cmd_bt() {
         bluetoothctl connect "$mac" >/dev/null && _ok "connected" || _err "connect failed"
     fi
     sleep 1
+}
+
+# ── vendi-buds: AirPods (+ generic BT headset) control ────────────────────────
+# Thin passthrough to the vendi-buds binary — it's already a clean CLI
+# (noise <mode> | status), no reason to reimplement that here. The daemon
+# itself is started by vendi-session; this is just for scripting/the bar.
+cmd_buds() {
+    command -v vendi-buds >/dev/null || { _err "vendi-buds not available"; return 1; }
+    case "${1:-}" in
+        noise)
+            shift
+            vendi-buds noise "$@" && _ok "noise: ${1:-?}" || { _err "failed — is a headset connected?"; return 1; } ;;
+        status) vendi-buds status ;;
+        *) _err "usage: vendi buds <noise <off|anc|transparency|adaptive>|status>"; return 1 ;;
+    esac
 }
 
 cmd_audio() {
@@ -1217,6 +1252,8 @@ cmd_help() {
     _cmd "clip"     "clipboard history — pick, list, delete, wipe"
     _cmd "font"     "switch the terminal monospace font (kitty/foot/alacritty)"
     _cmd "game"     "install the gaming stack; 'game run <cmd>' for gamemode+overlay"
+    _cmd "webapp"   "websites as apps — 'webapp add whatsapp', list, remove"
+    _cmd "phone"    "mirror your iPhone (AirPlay) or Android (scrcpy) — 'phone setup' once"
     _cmd "night"    "night light — on/off/toggle/warmer/cooler/<kelvin>"
     _cmd "voice"    "local voice typing (whisper.cpp → types into focused field)"
     _cmd "dnd"      "do not disturb — silence notifications (on/off/toggle)"
@@ -1264,7 +1301,11 @@ EOF
 _wallpaper_mode() { vendi-ctl palette 2>/dev/null | sed -n 's/^mode=//p'; }
 
 _appearance_current() {
-    local saved; saved="$(cat "$APPEARANCE_FILE" 2>/dev/null)"
+    # cat's failure (file doesn't exist yet — true for every fresh install
+    # until `vendi appearance` has been set once) still trips `set -e` even
+    # with stderr redirected, since it's a failing command substitution — the
+    # `|| true` is required, not decorative.
+    local saved; saved="$(cat "$APPEARANCE_FILE" 2>/dev/null || true)"
     if [[ "$saved" == auto ]]; then _wallpaper_mode
     elif [[ "$saved" == light || "$saved" == dark ]]; then printf '%s\n' "$saved"
     else case "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)" in
@@ -2058,6 +2099,152 @@ cmd_night() {
     esac
 }
 
+# ── phone mirroring (`vendi phone`) ───────────────────────────────────────────
+# iPhone: AirPlay screen mirroring into a clean, borderless, phone-shaped
+# window (vendiwm's built-in `phone` window rule sizes it to the stream and
+# rounds it like the phone). View only — iOS doesn't accept remote control.
+# Android: scrcpy — same window, with full mouse + keyboard control.
+PHONE_LOG="${XDG_RUNTIME_DIR:-/tmp}/vendi-phone.log"
+PHONE_HID_PID=/run/vendi-phone/pid
+# phone control running? (by PID file — a name match also hits our own sudo)
+_phone_hid_pid() { local p; p=$(cat "$PHONE_HID_PID" 2>/dev/null || true); [[ -n "$p" && -d /proc/$p ]] && echo "$p"; return 0; }
+# AirPlay's fixed ports (uxplay -p): tcp 7000,7001,7100 · udp 6000,6001,7011
+_phone_ufw() {
+    _have ufw && sudo ufw status 2>/dev/null | grep -q "Status: active" || return 0
+    local net
+    for net in 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12; do
+        sudo ufw allow from "$net" to any port 5353 proto udp comment "vendi phone (mDNS)" >/dev/null
+        sudo ufw allow from "$net" to any port 7000:7001 proto tcp comment "vendi phone (AirPlay)" >/dev/null
+        sudo ufw allow from "$net" to any port 7100 proto tcp comment "vendi phone (AirPlay)" >/dev/null
+        sudo ufw allow from "$net" to any port 6000:6001 proto udp comment "vendi phone (AirPlay)" >/dev/null
+        sudo ufw allow from "$net" to any port 7011 proto udp comment "vendi phone (AirPlay)" >/dev/null
+    done
+    _ok "firewall: AirPlay open to your local network only"
+}
+
+cmd_phone() {
+    local sub=${1:-start}
+    local name; name=$(hostnamectl hostname 2>/dev/null || hostname)
+    case "$sub" in
+        setup)
+            _header "vendi phone — setup"
+            sudo pacman -S --needed --noconfirm gst-plugins-base gst-plugins-good gst-plugins-bad \
+                gst-libav gst-plugin-va avahi nss-mdns libplist scrcpy android-tools || return 1
+            if ! _have uxplay; then
+                local helper; helper=$(_dev_aur_helper)
+                if [[ -z "$helper" ]]; then
+                    _err "uxplay (the AirPlay receiver) is in the AUR — install yay or paru first"
+                    return 1
+                fi
+                "$helper" -S --needed --noconfirm uxplay || return 1
+            fi
+            sudo systemctl enable --now avahi-daemon >/dev/null 2>&1 && _ok "network discovery (avahi) on"
+            _phone_ufw
+            _ok "ready — run: vendi phone"
+            ;;
+        start|on|iphone)
+            if ! _have uxplay || ! systemctl is-active -q avahi-daemon; then
+                _warn "phone mirroring isn't set up yet"
+                _info "run once: vendi phone setup"
+                return 1
+            fi
+            # A 60ms audio output buffer: video is shown the instant it arrives
+            # (-vsync no), so audio mustn't sit in a ~200ms default buffer or it
+            # trails the picture. -s 2560x1440: a portrait iPhone streams at
+            # ~1440px tall — sharper than the window shows, without 4K's extra
+            # encode + bitrate latency.
+            local want="-n ${name} -nh -p -s 2560x1440@60 -fps 60 -vsync no -srgb no -vs waylandsink -reset 0"
+            local asink="pulsesink buffer-time=60000 latency-time=10000"
+            local pid; pid=$(pgrep -x uxplay | head -1 || true)
+            if [[ -n "$pid" ]]; then
+                # (it outlives logouts — make sure it's running today's options)
+                if [[ "$(tr '\0' ' ' < /proc/$pid/cmdline)" == "uxplay ${want} -as ${asink} " ]]; then
+                    _info "already listening — on your iPhone: Control Center → Screen Mirroring → ${name}"
+                    return 0
+                fi
+                pkill -x uxplay || true
+                local n=0
+                while pgrep -x uxplay >/dev/null && (( n++ < 30 )); do sleep 0.1; done
+                pkill -9 -x uxplay 2>/dev/null || true
+            fi
+            # -p fixed ports (firewall) · -nh no "@host" suffix · -s: advertise a
+            # 1440p display (default 1080p made the portrait stream only 1080px
+            # tall, upscaled in the window) · -fps 60
+            # (default 30) · -vsync no: show frames as they arrive instead of
+            # holding them for audio sync (lower latency, no stutter) · waylandsink so
+            # it's a native window vendiwm can shape; -reset 0 keeps the window
+            # up across short Wi-Fi hiccups.
+            GST_DEBUG="${GST_DEBUG:-2}" setsid stdbuf -oL -eL \
+                uxplay $want -as "$asink" >"$PHONE_LOG" 2>&1 < /dev/null &
+            disown
+            _ok "listening as \"${name}\""
+            _info "on your iPhone: Control Center → Screen Mirroring → ${name}"
+            notify-send -a "Phone" -i phone "Ready to mirror" "On your iPhone: Control Center → Screen Mirroring → ${name}" 2>/dev/null
+            ;;
+        android)
+            if ! _have scrcpy; then _warn "run once: vendi phone setup"; return 1; fi
+            if ! adb devices 2>/dev/null | awk 'NR>1 && $2=="device"' | grep -q .; then
+                _warn "no Android phone found"
+                _info "plug it in over USB with USB debugging on (Settings → Developer options)"
+                return 1
+            fi
+            setsid scrcpy --window-borderless --stay-awake --turn-screen-off >"$PHONE_LOG" 2>&1 < /dev/null &
+            disown
+            _ok "mirroring your Android phone — click and type in the window to control it"
+            ;;
+        control)
+            # iPhone control: this computer becomes a Bluetooth keyboard+mouse
+            # for the phone (vendi-phone-hid). Clicks/keys on the mirror go to
+            # the phone; everything else stays on the laptop.
+            if [[ "${2:-}" == "stop" || "${2:-}" == "off" ]]; then
+                local hp; hp=$(_phone_hid_pid)
+                [[ -n "$hp" ]] && sudo kill -TERM "$hp"
+                _ok "phone control off (bluetooth back to normal)"
+                return 0
+            fi
+            if [[ -n "$(_phone_hid_pid)" ]]; then
+                _info "phone control is already on — stop it with: vendi phone control stop"
+                return 0
+            fi
+            _info "taking over Bluetooth as a keyboard + mouse (AirPods reconnect in a moment)"
+            sudo -b sh -c "VENDIWM_SOCK='${VENDIWM_SOCK:-}' SUDO_USER='$USER' SUDO_UID='$(id -u)' \
+                /usr/lib/vendi/vendi-phone-hid > /run/vendi-phone-hid.log 2>&1" || return 1
+            _ok "phone control on"
+            if [[ ! -f /var/lib/vendi/phone-hid.json ]]; then
+                _info "first time: on the iPhone, Settings → Bluetooth → tap “vendiOS” to pair,"
+                _info "turn on AssistiveTouch (Always Show Menu off), then: vendi phone calibrate (automatic)"
+            fi
+            ;;
+        calibrate)
+            local hp; hp=$(_phone_hid_pid)
+            if [[ -z "$hp" ]]; then
+                _warn "phone control isn't on — run: vendi phone control"; return 1
+            fi
+            if [[ "${2:-}" == "manual" ]]; then
+                sudo kill -USR2 "$hp"
+                _info "click on the phone mirror where the pointer is (you'll get a notification)"
+            else
+                sudo kill -USR1 "$hp"
+                _info "calibrating automatically — keep the mirror visible and the mouse still for a few seconds"
+            fi
+            ;;
+        stop|off)
+            local hp; hp=$(_phone_hid_pid)
+            [[ -n "$hp" ]] && { sudo kill -TERM "$hp" 2>/dev/null || true; }
+            pkill -x uxplay 2>/dev/null || true; pkill -x scrcpy 2>/dev/null || true
+            _ok "phone mirroring stopped"
+            ;;
+        status)
+            if pgrep -x uxplay >/dev/null; then _ok "iPhone mirroring: listening as \"${name}\""
+            else _info "iPhone mirroring: off"; fi
+            pgrep -x scrcpy >/dev/null && _ok "Android mirroring: on"
+            return 0
+            ;;
+        *) _err "unknown: vendi phone ${sub}"
+           _info "usage: vendi phone [setup|start|stop|status|control [stop]|calibrate|android]"; return 1 ;;
+    esac
+}
+
 # ── voice typing (`vendi voice`) ──────────────────────────────────────────────
 # Local speech-to-text (whisper.cpp) typed into the focused field via wtype
 # (which drives vendiwm's virtual-keyboard). Toggle: first call records, second
@@ -2299,6 +2486,7 @@ case "${1:-help}" in
     display|displays|monitor|monitors) cmd_display ;;
     wifi)     cmd_wifi  ;;
     bt|bluetooth) cmd_bt ;;
+    buds|airpods) shift; cmd_buds "$@" ;;
     audio)    cmd_audio ;;
     power)    cmd_power ;;
     screensaver|saver|ss) shift; cmd_screensaver "$@" ;;
@@ -2310,6 +2498,8 @@ case "${1:-help}" in
     clip|clipboard) shift; cmd_clip "$@" ;;
     font)     shift; cmd_font "$@" ;;
     game|gaming) shift; cmd_game "$@" ;;
+    webapp|webapps|web) shift; exec vendi-webapp "$@" ;;
+    phone|mirror) shift; cmd_phone "$@" ;;
     night|nightlight) shift; cmd_night "$@" ;;
     voice|dictate) shift; cmd_voice "$@" ;;
     dnd|donotdisturb) shift; cmd_dnd "$@" ;;

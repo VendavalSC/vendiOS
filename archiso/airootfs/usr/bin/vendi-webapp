@@ -1,0 +1,579 @@
+#!/usr/bin/env python3
+# vendi-webapp — websites as apps.
+#
+#   vendi webapp add whatsapp                 a preset
+#   vendi webapp add "Linear" https://linear.app
+#   vendi webapp list | remove <app> | open <app>
+#
+# Each web app gets its own window (its own app id, so window rules, the
+# launcher and the shelf treat it like any app), its own saved logins and
+# cookies, and a launcher entry with the site's real icon. Links to other
+# sites open in your normal browser; downloads land in ~/Downloads; site
+# notifications and camera/mic (calls) work; zoom is remembered.
+#
+# Engine: WebKitGTK (the Safari engine), which ships with vendiOS. It can't
+# play DRM video (Spotify, Netflix) — those use Chrome/Chromium in app mode
+# when one is installed.
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+
+HOME = os.path.expanduser("~")
+DATA = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(HOME, ".local/share")), "vendi/webapps")
+APPS = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(HOME, ".local/share")), "applications")
+UA_FETCH = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+
+# name, url, needs DRM
+PRESETS = {
+    "whatsapp":      ("WhatsApp", "https://web.whatsapp.com", False),
+    "telegram":      ("Telegram", "https://web.telegram.org/a/", False),
+    "discord":       ("Discord", "https://discord.com/app", False),
+    "chatgpt":       ("ChatGPT", "https://chatgpt.com", False),
+    "claude":        ("Claude", "https://claude.ai", False),
+    "gemini":        ("Gemini", "https://gemini.google.com", False),
+    "notion":        ("Notion", "https://www.notion.so", False),
+    "figma":         ("Figma", "https://www.figma.com/files", False),
+    "gmail":         ("Gmail", "https://mail.google.com", False),
+    "calendar":      ("Google Calendar", "https://calendar.google.com", False),
+    "drive":         ("Google Drive", "https://drive.google.com", False),
+    "maps":          ("Google Maps", "https://maps.google.com", False),
+    "photos":        ("Google Photos", "https://photos.google.com", False),
+    "youtube":       ("YouTube", "https://www.youtube.com", False),
+    "youtube-music": ("YouTube Music", "https://music.youtube.com", False),
+    "instagram":     ("Instagram", "https://www.instagram.com", False),
+    "x":             ("X", "https://x.com", False),
+    "reddit":        ("Reddit", "https://www.reddit.com", False),
+    "messenger":     ("Messenger", "https://www.messenger.com", False),
+    "tiktok":        ("TikTok", "https://www.tiktok.com", False),
+    "twitch":        ("Twitch", "https://www.twitch.tv", False),
+    "linkedin":      ("LinkedIn", "https://www.linkedin.com", False),
+    "pinterest":     ("Pinterest", "https://www.pinterest.com", False),
+    "github":        ("GitHub", "https://github.com", False),
+    "linear":        ("Linear", "https://linear.app", False),
+    "excalidraw":    ("Excalidraw", "https://excalidraw.com", False),
+    "slack":         ("Slack", "https://app.slack.com/client", False),
+    "teams":         ("Microsoft Teams", "https://teams.microsoft.com", False),
+    "outlook":       ("Outlook", "https://outlook.live.com/mail/", False),
+    "spotify":       ("Spotify", "https://open.spotify.com", True),
+    "netflix":       ("Netflix", "https://www.netflix.com", True),
+}
+
+# Sign-in pages must stay inside the app (they bounce back to it afterwards).
+AUTH_HOSTS = ("accounts.google.com", "login.microsoftonline.com", "login.live.com",
+              "appleid.apple.com", "github.com/login", "auth0.com", "okta.com",
+              "facebook.com", "discord.com", "slack.com", "atlassian.com", "clerk.")
+
+
+def slug(name):
+    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return s or "webapp"
+
+
+def app_dir(app_id):
+    return os.path.join(DATA, app_id)
+
+
+def load(app_id):
+    with open(os.path.join(app_dir(app_id), "app.json")) as f:
+        return json.load(f)
+
+
+def save(app_id, cfg):
+    os.makedirs(app_dir(app_id), exist_ok=True)
+    with open(os.path.join(app_dir(app_id), "app.json"), "w") as f:
+        json.dump(cfg, f, indent=1)
+
+
+def wm_class(app_id):
+    # a valid GApplication id → becomes the Wayland app_id
+    return "dev.vendios.webapp." + re.sub(r"[^A-Za-z0-9_]", "_", app_id)
+
+
+def chrome_bin():
+    for b in ("google-chrome-stable", "google-chrome", "chromium", "brave", "vivaldi-stable"):
+        if shutil.which(b):
+            return b
+    return None
+
+
+def say(msg, kind="info"):
+    col = {"ok": "32", "err": "31", "warn": "33"}.get(kind, "36")
+    print(f"\033[{col}m●\033[0m {msg}")
+
+
+# ── icons ────────────────────────────────────────────────────────────────────
+
+def fetch(url, limit=4_000_000):
+    req = urllib.request.Request(url, headers={"User-Agent": UA_FETCH})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.read(limit), r.geturl()
+
+
+def icon_candidates(url):
+    """Best-first icon URLs for a site: web-app manifest icons, apple-touch
+    icons, <link rel=icon>, then /favicon.ico."""
+    out = []
+    try:
+        html, final = fetch(url, 1_500_000)
+        html = html.decode("utf-8", "replace")
+    except Exception:
+        html, final = "", url
+    links = re.findall(r"<link\b[^>]*>", html, re.I)
+
+    def attr(tag, name):
+        m = re.search(name + r"\s*=\s*[\"']([^\"']+)[\"']", tag, re.I)
+        return m.group(1) if m else ""
+
+    def size_of(s):
+        m = re.match(r"(\d+)x(\d+)", s or "")
+        return int(m.group(1)) if m else 0
+
+    for tag in links:
+        if "manifest" in attr(tag, "rel").lower():
+            try:
+                murl = urllib.parse.urljoin(final, attr(tag, "href"))
+                mani = json.loads(fetch(murl, 500_000)[0])
+                for ic in sorted(mani.get("icons", []),
+                                 key=lambda i: -max([size_of(s) for s in i.get("sizes", "").split()] or [0])):
+                    out.append((1000 + max([size_of(s) for s in ic.get("sizes", "").split()] or [0]),
+                                urllib.parse.urljoin(murl, ic["src"])))
+            except Exception:
+                pass
+    for tag in links:
+        rel = attr(tag, "rel").lower()
+        if "icon" in rel:
+            sz = size_of(attr(tag, "sizes")) or (180 if "apple" in rel else 32)
+            if attr(tag, "href").endswith(".svg"):
+                sz = 512
+            out.append((sz, urllib.parse.urljoin(final, attr(tag, "href"))))
+    p = urllib.parse.urlparse(final)
+    out.append((16, f"{p.scheme}://{p.netloc}/favicon.ico"))
+    out.sort(key=lambda x: -x[0])
+    return [u for _, u in out]
+
+
+def letter_icon(name, path):
+    """No usable icon: a rounded tile with the app's initial (as SVG)."""
+    import colorsys
+    import html
+    h = (sum(map(ord, name)) % 360) / 360.0
+    r, g, b = (int(c * 255) for c in colorsys.hls_to_rgb(h, 0.55, 0.55))
+    ch = html.escape((name.strip() or "?")[0].upper())
+    with open(path, "w") as f:
+        f.write(f"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<rect width="256" height="256" rx="56" fill="rgb({r},{g},{b})"/>
+<text x="128" y="128" dy=".35em" text-anchor="middle" font-family="sans-serif" font-weight="700"
+ font-size="150" fill="#fff">{ch}</text></svg>
+""")
+
+
+def get_icon(name, url, dest):
+    import gi
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf
+    for cand in icon_candidates(url):
+        try:
+            data, _ = fetch(cand, 3_000_000)
+            loader = GdkPixbuf.PixbufLoader()
+            loader.write(data)
+            loader.close()
+            pb = loader.get_pixbuf()
+            if pb is None or pb.get_width() < 24:
+                continue
+            if pb.get_width() > 256:
+                pb = pb.scale_simple(256, int(256 * pb.get_height() / pb.get_width()),
+                                     GdkPixbuf.InterpType.HYPER)
+            pb.savev(dest, "png", [], [])
+            return True
+        except Exception:
+            continue
+    letter_icon(name, dest.removesuffix(".png") + ".svg")
+    return False
+
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+def icon_path(app_id):
+    png = os.path.join(app_dir(app_id), "icon.png")
+    return png if os.path.exists(png) else os.path.join(app_dir(app_id), "icon.svg")
+
+
+def write_desktop(app_id, cfg):
+    os.makedirs(APPS, exist_ok=True)
+    path = os.path.join(APPS, f"vendi-webapp-{app_id}.desktop")
+    with open(path, "w") as f:
+        f.write(f"""[Desktop Entry]
+Type=Application
+Name={cfg['name']}
+Comment=Web app · {urllib.parse.urlparse(cfg['url']).netloc}
+Exec=vendi-webapp open {app_id} %u
+Icon={icon_path(app_id)}
+StartupWMClass={wm_class(app_id)}
+Categories=Network;WebApp;
+Keywords=web;webapp;{app_id};
+X-Vendi-WebApp={app_id}
+""")
+    subprocess.run(["update-desktop-database", APPS], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+
+
+def cmd_add(args):
+    if not args:
+        say("usage: vendi webapp add <preset> | <name> <url> [--icon file] [--chrome]", "err")
+        say("presets: " + ", ".join(sorted(PRESETS)))
+        return 1
+    use_chrome = "--chrome" in args
+    args = [a for a in args if a != "--chrome"]
+    icon_file = None
+    if "--icon" in args:
+        i = args.index("--icon")
+        icon_file = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
+    drm = False
+    if len(args) == 1 and args[0].lower() in PRESETS:
+        name, url, drm = PRESETS[args[0].lower()]
+        app_id = args[0].lower()
+    elif len(args) >= 2:
+        name, url = args[0], args[1]
+        if not re.match(r"^https?://", url):
+            url = "https://" + url
+        app_id = slug(name)
+    elif len(args) == 1 and re.match(r"^(https?://)?[\w.-]+\.\w+", args[0]):
+        url = args[0] if args[0].startswith("http") else "https://" + args[0]
+        host = urllib.parse.urlparse(url).netloc.removeprefix("www.")
+        name = host.split(".")[0].capitalize()
+        app_id = slug(name)
+    else:
+        say(f"no preset called {args[0]!r} — give a name and a URL", "err")
+        say("presets: " + ", ".join(sorted(PRESETS)))
+        return 1
+
+    engine = "webkit"
+    if drm or use_chrome:
+        if chrome_bin():
+            engine = "chrome"
+        elif drm:
+            say(f"{name} plays protected (DRM) media, which the built-in engine can't — "
+                "install google-chrome (AUR) or chromium and re-add it for playback", "warn")
+    cfg = {"name": name, "url": url, "engine": engine, "zoom": 1.0}
+    save(app_id, cfg)
+    icon = os.path.join(app_dir(app_id), "icon.png")
+    say(f"fetching {name}'s icon…")
+    if icon_file:
+        shutil.copy(icon_file, icon)
+    elif not get_icon(name, url, icon):
+        say("no icon on the site — made a lettered one", "warn")
+    write_desktop(app_id, cfg)
+    say(f"{name} added — it's in the launcher (super+space), or run: vendi webapp open {app_id}", "ok")
+    return 0
+
+
+def cmd_list(_):
+    if not os.path.isdir(DATA) or not os.listdir(DATA):
+        say("no web apps yet — try: vendi webapp add whatsapp")
+        return 0
+    for app_id in sorted(os.listdir(DATA)):
+        try:
+            cfg = load(app_id)
+        except Exception:
+            continue
+        eng = "  (chrome)" if cfg.get("engine") == "chrome" else ""
+        print(f"  {app_id:<16} {cfg['name']:<18} {cfg['url']}{eng}")
+    return 0
+
+
+def cmd_remove(args):
+    if not args:
+        say("usage: vendi webapp remove <app>", "err")
+        return 1
+    app_id = args[0]
+    if not os.path.isdir(app_dir(app_id)):
+        say(f"no web app {app_id!r} (see: vendi webapp list)", "err")
+        return 1
+    keep = "--keep-data" in args
+    desk = os.path.join(APPS, f"vendi-webapp-{app_id}.desktop")
+    if os.path.exists(desk):
+        os.remove(desk)
+    if keep:
+        say(f"removed {app_id} (logins kept in {app_dir(app_id)})", "ok")
+    else:
+        shutil.rmtree(app_dir(app_id), ignore_errors=True)
+        say(f"removed {app_id} and its saved data", "ok")
+    subprocess.run(["update-desktop-database", APPS], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    return 0
+
+
+def cmd_open(args):
+    if not args:
+        say("usage: vendi webapp open <app>", "err")
+        return 1
+    app_id = args[0]
+    try:
+        cfg = load(app_id)
+    except Exception:
+        say(f"no web app {app_id!r} (see: vendi webapp list)", "err")
+        return 1
+    start = args[1] if len(args) > 1 and args[1].startswith("http") else cfg["url"]
+    if cfg.get("engine") == "chrome" and chrome_bin():
+        prof = os.path.join(app_dir(app_id), "chrome")
+        os.execvp(chrome_bin(), [chrome_bin(), f"--app={start}", f"--user-data-dir={prof}",
+                                 f"--class={wm_class(app_id)}", "--ozone-platform-hint=auto"])
+    return run_webkit(app_id, cfg, start)
+
+
+# ── the window ───────────────────────────────────────────────────────────────
+
+def site_of(host):
+    parts = (host or "").lower().split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def run_webkit(app_id, cfg, start):
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("WebKit2", "4.1")
+    from gi.repository import Gtk, Gdk, Gio, GLib, WebKit2
+
+    base = app_dir(app_id)
+    home_site = site_of(urllib.parse.urlparse(cfg["url"]).hostname)
+
+    def dark_pref():
+        try:
+            v = open(os.path.join(HOME, ".config/vendi/appearance")).read().strip()
+            return v != "light"
+        except Exception:
+            return True
+
+    class App(Gtk.Application):
+        def __init__(self):
+            super().__init__(application_id=wm_class(app_id),
+                             flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+            self.win = None
+
+        def do_command_line(self, _cmdline):
+            self.activate()
+            return 0
+
+        def do_activate(self):
+            if self.win:
+                self.win.present()
+                return
+            Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", dark_pref())
+            win = Gtk.ApplicationWindow(application=self, title=cfg["name"])
+            win.set_default_size(1180, 780)
+            # no GTK title bar or frame — vendiwm draws the window's frame;
+            # the page goes edge to edge
+            win.set_decorated(False)
+            icon = icon_path(app_id)
+            if os.path.exists(icon):
+                try:
+                    win.set_icon_from_file(icon)
+                except GLib.Error:
+                    pass
+
+            dm = WebKit2.WebsiteDataManager(
+                base_data_directory=os.path.join(base, "data"),
+                base_cache_directory=os.path.join(base, "cache"))
+            ctx = WebKit2.WebContext.new_with_website_data_manager(dm)
+            dm.get_cookie_manager().set_persistent_storage(
+                os.path.join(base, "cookies.sqlite"), WebKit2.CookiePersistentStorage.SQLITE)
+            # the app's own site may notify without asking every launch
+            origin = WebKit2.SecurityOrigin.new_for_uri(cfg["url"])
+            ctx.initialize_notification_permissions([origin], [])
+            ctx.connect("download-started", self.on_download)
+
+            view = WebKit2.WebView.new_with_context(ctx)
+            s = view.get_settings()
+            s.set_enable_media_stream(True)
+            s.set_enable_webrtc(True)
+            s.set_enable_encrypted_media(True)
+            s.set_enable_smooth_scrolling(True)
+            s.set_javascript_can_access_clipboard(True)
+            s.set_enable_developer_extras(True)
+            s.set_hardware_acceleration_policy(WebKit2.HardwareAccelerationPolicy.ALWAYS)
+            if cfg.get("user_agent"):
+                s.set_user_agent(cfg["user_agent"])
+            view.set_zoom_level(cfg.get("zoom", 1.0))
+            view.connect("permission-request", self.on_permission)
+            view.connect("decide-policy", self.on_policy)
+            view.connect("create", self.on_create)
+            view.connect("notify::title", lambda v, _p: win.set_title(v.get_title() or cfg["name"]))
+            view.connect("notify::estimated-load-progress", self.on_progress)
+
+            # thin accent loading bar over the page
+            overlay = Gtk.Overlay()
+            overlay.add(view)
+            self.bar = Gtk.ProgressBar()
+            self.bar.set_valign(Gtk.Align.START)
+            self.bar.get_style_context().add_class("vendi-load")
+            css = Gtk.CssProvider()
+            css.load_from_data(b"""
+                /* no GTK frame at all: CSD keeps a shadow/border margin around
+                   the page even undecorated - that's the dark inner border */
+                window, window.background, window.csd, window.solid-csd,
+                decoration, decoration-overlay {
+                    margin: 0; padding: 0; border: none; border-radius: 0;
+                    box-shadow: none; outline: none; background: transparent;
+                }
+                progressbar.vendi-load trough { min-height: 2px; background: transparent; border: none; }
+                progressbar.vendi-load progress { min-height: 2px; background: #cba6f7; border: none; border-radius: 0; }
+            """)
+            Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css,
+                                                     Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            overlay.add_overlay(self.bar)
+            win.add(overlay)
+            win.connect("key-press-event", self.on_key)
+            self.view, self.win = view, win
+            view.load_uri(start)
+            win.show_all()
+
+        # ── behaviour ──────────────────────────────────────────────
+        def on_progress(self, view, _p):
+            p = view.get_estimated_load_progress()
+            self.bar.set_fraction(p)
+            self.bar.set_visible(p < 1.0)
+
+        def on_permission(self, _view, req):
+            # notifications, camera/mic for calls, clipboard, persistent storage
+            req.allow()
+            return True
+
+        def external(self, uri):
+            p = urllib.parse.urlparse(uri)
+            if p.scheme not in ("http", "https"):
+                return p.scheme not in ("about", "data", "blob", "javascript")
+            host = (p.hostname or "").lower()
+            if site_of(host) == home_site:
+                return False
+            return not any(a in host or a in uri for a in AUTH_HOSTS)
+
+        def open_outside(self, uri):
+            try:
+                Gio.AppInfo.launch_default_for_uri(uri, None)
+            except GLib.Error:
+                subprocess.Popen(["xdg-open", uri])
+
+        def on_policy(self, _view, decision, dtype):
+            if dtype == WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
+                action = decision.get_navigation_action()
+                uri = action.get_request().get_uri()
+                if action.is_user_gesture() and self.external(uri):
+                    self.open_outside(uri)
+                    decision.ignore()
+                    return True
+            elif dtype == WebKit2.PolicyDecisionType.NEW_WINDOW_ACTION:
+                uri = decision.get_navigation_action().get_request().get_uri()
+                if self.external(uri):
+                    self.open_outside(uri)
+                else:
+                    self.view.load_uri(uri)
+                decision.ignore()
+                return True
+            return False
+
+        def on_create(self, _view, action):
+            uri = action.get_request().get_uri()
+            if uri and uri != "about:blank":
+                if self.external(uri):
+                    self.open_outside(uri)
+                else:
+                    self.view.load_uri(uri)
+            return None
+
+        def on_download(self, _ctx, download):
+            def decide(d, name):
+                dl = os.path.join(HOME, "Downloads")
+                os.makedirs(dl, exist_ok=True)
+                target = os.path.join(dl, os.path.basename(name) or "download")
+                root, ext = os.path.splitext(target)
+                n = 1
+                while os.path.exists(target):
+                    target = f"{root} ({n}){ext}"
+                    n += 1
+                d.set_destination(GLib.filename_to_uri(target, None))
+                return True
+            download.connect("decide-destination", decide)
+            download.connect("finished", lambda d: subprocess.Popen(
+                ["notify-send", "-a", cfg["name"], "Downloaded",
+                 os.path.basename(GLib.filename_from_uri(d.get_destination())[0])]))
+
+        def on_key(self, _win, ev):
+            ctrl = ev.state & Gdk.ModifierType.CONTROL_MASK
+            alt = ev.state & Gdk.ModifierType.MOD1_MASK
+            shift = ev.state & Gdk.ModifierType.SHIFT_MASK
+            k = Gdk.keyval_name(ev.keyval)
+            v = self.view
+            if (ctrl and k == "r") or k == "F5":
+                v.reload()
+            elif alt and k == "Left":
+                v.go_back()
+            elif alt and k == "Right":
+                v.go_forward()
+            elif alt and k == "Home":
+                v.load_uri(cfg["url"])
+            elif ctrl and k in ("plus", "equal", "KP_Add"):
+                self.zoom(v.get_zoom_level() + 0.1)
+            elif ctrl and k in ("minus", "KP_Subtract"):
+                self.zoom(v.get_zoom_level() - 0.1)
+            elif ctrl and k in ("0", "KP_0"):
+                self.zoom(1.0)
+            elif ctrl and shift and k in ("O", "o"):
+                self.open_outside(v.get_uri())
+            elif ctrl and k == "l":
+                Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(v.get_uri() or "", -1)
+                subprocess.Popen(["notify-send", "-a", cfg["name"], "Link copied", v.get_uri() or ""])
+            elif k == "F12":
+                insp = v.get_inspector()
+                insp.show()
+            else:
+                return False
+            return True
+
+        def zoom(self, z):
+            z = round(max(0.3, min(3.0, z)), 2)
+            self.view.set_zoom_level(z)
+            c = load(app_id)
+            c["zoom"] = z
+            save(app_id, c)
+
+    return App().run([sys.argv[0]])
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else "help"
+    rest = args[1:]
+    if cmd in ("add", "new", "install"):
+        return cmd_add(rest)
+    if cmd in ("list", "ls"):
+        return cmd_list(rest)
+    if cmd in ("remove", "rm", "uninstall"):
+        return cmd_remove(rest)
+    if cmd in ("open", "run", "launch"):
+        return cmd_open(rest)
+    if cmd == "presets":
+        for k in sorted(PRESETS):
+            n, u, drm = PRESETS[k]
+            print(f"  {k:<14} {n:<16} {u}{'  (needs Chrome for playback)' if drm else ''}")
+        return 0
+    print("""vendi webapp — websites as apps
+
+  vendi webapp add <preset>              e.g. whatsapp, discord, chatgpt, notion
+  vendi webapp add <name> <url>          any site ([--icon file] [--chrome])
+  vendi webapp list                      your web apps
+  vendi webapp open <app>                launch one (they're in the launcher too)
+  vendi webapp remove <app>              remove it and its saved data (--keep-data)
+  vendi webapp presets                   everything add knows by name
+
+Inside a web app: ctrl+r reload · alt+←/→ back/forward · alt+home start page ·
+ctrl+plus/minus/0 zoom · ctrl+l copy link · ctrl+shift+o open in browser""")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)
