@@ -1,6 +1,15 @@
 [
   {
     "date": "2026-09-25",
+    "macrostructure": "Marquee Hero (Apple-style, one feature per screen)",
+    "theme": "custom",
+    "theme_axes": "dark / grotesk-sans / chromatic-other (mauve)",
+    "vibe": "Apple product page in vendiOS mauve",
+    "enrichment": "real screenshots + pinned scroll stage",
+    "brief": "vendiOS product page v3 per user: mauve, Apple vibe"
+  },
+  {
+    "date": "2026-09-25",
     "macrostructure": "Split Studio + docs rail",
     "theme": "custom",
     "theme_axes": "dark / grotesk-sans / cool",

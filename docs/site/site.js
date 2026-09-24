@@ -13,20 +13,64 @@ const io = new IntersectionObserver((entries) => {
 }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
 document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
 
-// Hero screenshot: starts slightly tilted back and small, settles flat as you scroll to it.
-const hero = document.querySelector('.showcase .shot');
-if (hero && !calm) {
+const clamp01 = (v) => Math.min(Math.max(v, 0), 1);
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const onFrame = (fn) => {
   let ticking = false;
-  const update = () => {
-    ticking = false;
-    const r = hero.getBoundingClientRect();
-    const p = Math.min(Math.max(1 - (r.top - innerHeight * 0.15) / (innerHeight * 0.75), 0), 1); // 0 → 1
-    const e = 1 - Math.pow(1 - p, 3);
-    hero.style.transform = `perspective(1600px) rotateX(${(1 - e) * 14}deg) scale(${0.9 + e * 0.1})`;
-  };
-  addEventListener('scroll', () => { if (!ticking) { ticking = true; requestAnimationFrame(update); } }, { passive: true });
-  addEventListener('resize', update); update();
+  const run = () => { ticking = false; fn(); };
+  addEventListener('scroll', () => { if (!ticking) { ticking = true; requestAnimationFrame(run); } }, { passive: true });
+  addEventListener('resize', run); run();
+};
+
+// Hero stage: the screenshot starts small in a pool of mauve light and grows to
+// full size while the section is pinned.
+const stage = document.querySelector('.stage');
+if (stage && !calm) {
+  const shot = stage.querySelector('.shot');
+  const pin = stage.querySelector('.stage-pin');
+  onFrame(() => {
+    if (innerWidth <= 700) { shot.style.transform = ''; pin.style.removeProperty('--glow'); return; }
+    const r = stage.getBoundingClientRect();
+    const start = innerHeight * 0.65, span = start + (r.height - innerHeight) * 0.75;
+    const e = easeOut(clamp01((start - r.top) / span));
+    shot.style.transform = `translateY(${(1 - e) * 8}vh) scale(${0.74 + e * 0.26})`;
+    pin.style.setProperty('--glow', (1 - e * 0.4).toFixed(3));
+  });
 }
+
+// Statement: words light up in reading order as it scrolls through.
+document.querySelectorAll('[data-words]').forEach((el) => {
+  const words = [];
+  const wrap = (node, hl) => {
+    for (const n of [...node.childNodes]) {
+      if (n.nodeType === 3) {
+        const frag = document.createDocumentFragment();
+        n.textContent.split(/(\s+)/).forEach((t) => {
+          if (!t) return;
+          if (/^\s+$/.test(t)) { frag.append(t); return; }
+          const w = document.createElement('span');
+          w.className = 'w' + (hl ? ' hl' : ''); w.textContent = t;
+          frag.append(w); words.push(w);
+        });
+        n.replaceWith(frag);
+      } else if (n.nodeType === 1) {
+        wrap(n, hl || n.classList.contains('hl'));
+        if (n.classList.contains('hl')) n.replaceWith(...n.childNodes);
+      }
+    }
+  };
+  wrap(el, false);
+  if (calm) { words.forEach((w) => w.classList.add('on')); return; }
+  onFrame(() => {
+    const r = el.getBoundingClientRect();
+    const p = clamp01((innerHeight * 0.85 - r.top) / (r.height + innerHeight * 0.35));
+    const n = Math.round(p * words.length);
+    words.forEach((w, i) => w.classList.toggle('on', i < n));
+  });
+});
+
+// Feature screenshots settle into place as they arrive.
+document.querySelectorAll('.feature .shot').forEach((el) => io.observe(el));
 
 // Docs: sliding marker in the index + highlight the section you're reading.
 const rail = document.querySelector('.rail');

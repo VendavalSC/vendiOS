@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vendiOS</title>
-<meta name="description" content="Arch Linux with its own tiling window manager, bar and installer. Free, open source, and ready the moment it installs.">
+<meta name="description" content="Minimal. Modern. Yours. A Linux desktop where windows find their own place, everything moves like it’s alive, and it’s all ready the moment you log in.">
 <meta property="og:title" content="vendiOS">
-<meta property="og:description" content="A tiling desktop that sets itself up. Arch Linux with its own window manager, bar and installer.">
+<meta property="og:description" content="Minimal. Modern. Yours. A Linux desktop that’s ready the moment you log in.">
 <meta property="og:image" content="img/og.jpg">
-<meta name="theme-color" content="#0d0c16">
+<meta name="theme-color" content="#0b0a12">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='50,4 90,50 50,96 10,50' fill='%23c9a6f7'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -29,7 +29,7 @@
       <a class="hide-sm" href="#features">Features</a>
       <a href="docs.html">Docs</a>
       <a class="hide-sm" href="https://github.com/VendavalSC/vendiOS">GitHub</a>
-      <a class="btn btn-primary" href="#download">Download</a>
+      <a class="btn btn-primary" href="#get">Download</a>
     </nav>
   </div>
 </header>
@@ -38,109 +38,98 @@
 
 <section class="hero">
   <div class="wrap">
+    <p class="eyebrow rise" style="--d:0ms">vendiOS public beta</p>
     <h1>
-      <span class="line rise" style="--d:0ms">A tiling desktop</span>
-      <span class="line rise hl" style="--d:120ms">that sets itself up.</span>
+      <span class="word rise" style="--d:100ms">Minimal.</span>
+      <span class="word rise" style="--d:260ms">Modern.</span>
+      <span class="word rise" style="--d:420ms">Yours.</span>
     </h1>
-    <p class="sub rise" style="--d:260ms">vendiOS is Arch Linux with its own window manager, bar and installer. Windows arrange themselves, everything works on the first boot, and you never have to open a config file unless you want to.</p>
-    <div class="cta rise" style="--d:380ms">
-      <a class="btn btn-primary" href="#download">Download the beta <span class="arrow" aria-hidden="true">→</span></a>
-      <a class="btn btn-ghost" href="docs.html">Read the docs</a>
+    <p class="sub rise" style="--d:620ms">A Linux desktop where windows find their own place, everything moves like it’s alive, and it’s all ready the moment you log in.</p>
+    <div class="cta rise" style="--d:780ms">
+      <a class="btn btn-primary" href="#get">Download the beta</a>
+      <a class="link-arrow" href="#features">See what’s inside <span class="arrow" aria-hidden="true">›</span></a>
     </div>
-    <p class="meta rise" style="--d:480ms"><b>v0.1.0-beta</b> · free and open source · x86_64</p>
   </div>
 </section>
 
-<section class="showcase" aria-label="Screenshot">
-  <div class="wrap">
+<section class="stage" aria-label="The vendiOS desktop">
+  <div class="stage-pin">
     <figure class="shot">
-      <img src="img/hero.webp" width="1920" height="1080" alt="The vendiOS desktop: Neovim on the left, a terminal showing the vendiOS logo and system info at the top right, and Firefox on the vendiOS GitHub page below it, all tiled side by side under the notch-style bar.">
+      <img src="img/hero.webp" width="1920" height="1080" alt="The vendiOS desktop: Neovim on the left, a terminal showing the vendiOS logo and system info at the top right, and Firefox below it, all tiled side by side under the notch-style bar.">
     </figure>
   </div>
 </section>
 
-<section class="features" id="features">
+<section class="statement" aria-label="In short">
   <div class="wrap">
-    <div class="section-head reveal">
-      <h2>Made for it, not bolted on.</h2>
-      <p>The window manager, the bar, the launcher and the lock screen are all written for vendiOS, so they behave like parts of one thing instead of five projects taped together.</p>
-    </div>
+    <p data-words>Windows tile themselves. Every motion runs on springs. Every setting is <span class="hl">one key away.</span> And you never have to touch a config file.</p>
+  </div>
+</section>
 
-    <div class="row">
-      <div class="copy reveal">
-        <h3>Windows you’re not using wait on a shelf.</h3>
-        <p>Send a window to the scratchpad and it flies into a live card at the side of the screen. It keeps running in there: the music visualizer keeps dancing, the build keeps compiling.</p>
-        <p>Click a card to swap it back in, or shift-click to put it next to what you’re doing.</p>
-        <p class="keys"><span><kbd>super</kbd> <kbd>shift</kbd> <kbd>−</kbd> send</span><span><kbd>super</kbd> <kbd>−</kbd> show or hide</span></p>
-      </div>
-      <figure class="shot reveal" style="--d:120ms">
-        <img src="img/scratchpad.webp" width="1920" height="1080" loading="lazy" alt="A terminal showing the vendi command's help, with a shelf on the left holding two live, miniature terminals: one with system info, one with a music visualizer.">
-      </figure>
-    </div>
+<section class="feature" id="features">
+  <div class="wrap">
+    <p class="kicker reveal">Scratchpad</p>
+    <h2 class="reveal">A shelf for everything else.</h2>
+    <p class="lead reveal">Send a window to the side of the screen and it keeps running there as a live card. The visualizer keeps dancing, the build keeps compiling. Click it, and it’s back.</p>
+    <figure class="shot">
+      <img src="img/scratchpad.webp" width="1920" height="1080" loading="lazy" alt="A terminal showing the vendi command's help, with a shelf on the left holding two live, miniature terminals: one with system info, one with a music visualizer.">
+    </figure>
+    <p class="keys reveal"><span><kbd>super</kbd> <kbd>shift</kbd> <kbd>−</kbd> send to the shelf</span><span><kbd>super</kbd> <kbd>−</kbd> show or hide it</span></p>
+  </div>
+</section>
 
-    <div class="row flip">
-      <div class="copy reveal">
-        <h3>The bar opens into a dashboard.</h3>
-        <p><kbd>super</kbd> <kbd>D</kbd> brings down a calendar, the weather, what’s playing, and switches for Wi‑Fi, Bluetooth, do not disturb and screen recording.</p>
-        <p>Its other tabs cover system stats, wallpapers, monitors and the screensaver, so the everyday settings are one key away rather than in a settings app.</p>
-      </div>
-      <figure class="shot reveal" style="--d:120ms">
-        <img src="img/dashboard.webp" width="1920" height="1080" loading="lazy" alt="The vendiOS dashboard: a calendar, a large clock with the weather, a music card, and a grid of quick settings, over the blue diamond wallpaper.">
-      </figure>
-    </div>
+<section class="feature">
+  <div class="wrap">
+    <p class="kicker reveal">Dashboard</p>
+    <h2 class="reveal">One key. Everything else.</h2>
+    <p class="lead reveal"><kbd>super</kbd> <kbd>D</kbd> brings down your calendar, the weather, what’s playing, and the switches you reach for every day: Wi‑Fi, Bluetooth, do not disturb, recording.</p>
+    <figure class="shot">
+      <img src="img/dashboard.webp" width="1120" height="800" loading="lazy" alt="The vendiOS dashboard: a calendar, a large clock with the weather, a music card, and a grid of quick settings.">
+    </figure>
+  </div>
+</section>
 
-    <div class="row">
-      <div class="copy reveal">
-        <h3>Type a few letters, press enter.</h3>
-        <p><kbd>super</kbd> <kbd>space</kbd> finds apps as you type. If nothing matches, the last line searches the web for you instead.</p>
-        <p>Every shortcut is one key away too: <kbd>super</kbd> <kbd>K</kbd> shows them all on screen, so there’s nothing to memorise before you start.</p>
-      </div>
-      <figure class="shot reveal" style="--d:120ms">
-        <img src="img/launcher.webp" width="1920" height="1080" loading="lazy" alt="The vendiOS launcher at the top of the screen with 'el' typed, listing matching apps and a web search option.">
-      </figure>
+<section class="feature">
+  <div class="wrap">
+    <p class="kicker reveal">Launcher</p>
+    <h2 class="reveal">Type. Enter. Done.</h2>
+    <p class="lead reveal"><kbd>super</kbd> <kbd>space</kbd> finds apps as you type, and searches the web when nothing matches. <kbd>super</kbd> <kbd>K</kbd> shows every shortcut on screen, so there’s nothing to memorise.</p>
+    <figure class="shot">
+      <img src="img/launcher.webp" width="1000" height="560" loading="lazy" alt="The vendiOS launcher at the top of the screen with 'el' typed, listing matching apps and a web search option.">
+    </figure>
+  </div>
+</section>
+
+<section class="more">
+  <div class="wrap">
+    <h2 class="reveal">And so much more.</h2>
+    <div class="tiles">
+      <div class="tile wide reveal"><p class="big">A snapshot <em>before every update.</em></p><p>If an update ever breaks something, <code>vendi rollback</code> and a reboot put you right back where you were. Your files stay untouched.</p></div>
+      <div class="tile reveal" style="--d:80ms"><p class="big">Installs <em>offline.</em></p><p>Every package is on the 1.9 GB image, AMD, Intel and NVIDIA drivers included.</p></div>
+      <div class="tile reveal"><p class="big">Encrypted <em>by default.</em></p><p>LUKS2 with argon2id. One passphrase at boot.</p></div>
+      <div class="tile reveal" style="--d:80ms"><p class="big">One command <em>for it all.</em></p><p><code>vendi wifi</code>, <code>bt</code>, <code>display</code>, <code>update</code> and about twenty more.</p></div>
+      <div class="tile reveal" style="--d:160ms"><p class="big">Themes that <em>change everything.</em></p><p>Bar, terminal and apps recolour together, live. Or take the colours from your wallpaper.</p></div>
+      <div class="tile reveal"><p class="big">Capture, record, <em>copy text.</em></p><p>Screenshot an area, record the screen, or grab the text out of anything you can see.</p></div>
+      <div class="tile reveal" style="--d:80ms"><p class="big">Games in <em>one command.</em></p><p><code>vendi game</code> sets up Steam, Lutris, gamemode, gamescope and MangoHud.</p></div>
+      <div class="tile reveal" style="--d:160ms"><p class="big">Your phone, <em>on your desktop.</em></p><p>Mirror an iPhone over AirPlay, or an Android phone over USB.</p></div>
+      <div class="tile wide reveal"><p class="big">Still Arch, <em>underneath.</em></p><p><code>pacman</code>, the AUR and Arch’s own repositories work exactly the way you’d expect. vendiOS just makes the part you see feel finished.</p></div>
+      <div class="tile reveal" style="--d:80ms"><p class="big">A tour that <em>makes you do it.</em></p><p>On first login, a short walkthrough waits for you to actually try each move.</p></div>
     </div>
   </div>
 </section>
 
-<section class="specs">
+<section class="get" id="get">
   <div class="wrap">
-    <div class="section-head reveal">
-      <h2>And the parts you’d otherwise set up yourself.</h2>
+    <svg class="mark-big reveal" viewBox="0 0 100 100" aria-hidden="true"><polygon points="50,4 90,50 50,96 10,50"/></svg>
+    <h2 class="reveal">Get vendiOS.</h2>
+    <p class="lead reveal">Free and open source. The first public beta is ready to try.</p>
+    <div class="cta reveal">
+      <a class="btn btn-primary" href="https://github.com/VendavalSC/vendiOS/releases/latest">Download ISO · 1.9 GB</a>
+      <a class="link-arrow" href="docs.html#install">How to install <span class="arrow" aria-hidden="true">›</span></a>
     </div>
-    <div class="spec-grid">
-      <div class="spec reveal"><h4>A snapshot before every update</h4><p>The disk is btrfs. If an update breaks something, <code>vendi rollback</code> and a reboot put you back.</p></div>
-      <div class="spec reveal" style="--d:80ms"><h4>Installs without internet</h4><p>The 1.9 GB image carries every package, AMD, Intel and NVIDIA drivers included.</p></div>
-      <div class="spec reveal"><h4>Encrypted by default</h4><p>LUKS2 with argon2id. One passphrase at boot and that’s it.</p></div>
-      <div class="spec reveal" style="--d:80ms"><h4>One command for the system</h4><p><code>vendi wifi</code>, <code>bt</code>, <code>audio</code>, <code>display</code>, <code>update</code> and about twenty more.</p></div>
-      <div class="spec reveal"><h4>Themes that change everything at once</h4><p>Bar, terminal and apps recolour together, live. Or let <code>dynamic</code> take the colours from your wallpaper.</p></div>
-      <div class="spec reveal" style="--d:80ms"><h4>Screenshots, recording, text grabbing</h4><p>Built in and on keys: capture an area, record the screen, or copy the text out of any part of it.</p></div>
-      <div class="spec reveal"><h4>Mouse and touch still work</h4><p>Hold <kbd>super</kbd> and drag windows around. On a touchscreen, tap to click and long-press for the right button.</p></div>
-      <div class="spec reveal" style="--d:80ms"><h4>Gaming in one command</h4><p><code>vendi game</code> sets up Steam, Lutris, gamemode, gamescope and MangoHud.</p></div>
-      <div class="spec reveal"><h4>Websites as apps</h4><p><code>vendi webapp add whatsapp</code> gives a site its own window and launcher icon.</p></div>
-      <div class="spec reveal" style="--d:80ms"><h4>Your phone on your desktop</h4><p>Mirror an iPhone over AirPlay or an Android phone over USB with <code>vendi phone</code>.</p></div>
-      <div class="spec reveal"><h4>A tour that makes you do it</h4><p>On first login a short walkthrough waits for you to actually open a window, switch workspace and find the overview.</p></div>
-      <div class="spec reveal" style="--d:80ms"><h4>Still Arch underneath</h4><p><code>pacman</code>, the AUR and Arch’s own repositories, exactly as you’d expect.</p></div>
-    </div>
-  </div>
-</section>
-
-<section class="download" id="download">
-  <div class="wrap">
-    <div class="dl-card reveal">
-      <h2>Try the first public beta.</h2>
-      <p class="lead">I use vendiOS every day on the laptop I build it on. This is the first version for everyone else, so expect a few rough edges, and tell me when you find one.</p>
-      <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/VendavalSC/vendiOS/releases/latest">Download ISO · 1.9 GB <span class="arrow" aria-hidden="true">→</span></a>
-        <a class="btn btn-ghost" href="docs.html#install">Install guide</a>
-      </div>
-      <ol class="steps">
-        <li>Write it to a USB stick with <code>dd</code>, Fedora Media Writer or balenaEtcher.</li>
-        <li><span class="warn">Turn off Secure Boot</span>, it isn’t supported yet, and boot from the stick.</li>
-        <li>Answer a few screens. Nothing touches your disk until you confirm on the last one.</li>
-      </ol>
-      <p class="sum">v0.1.0-beta · sha256 48a6fd8ad4e7cee783f4552d64ad32d4f9a5d5297eece4a4a5db03310b26a985</p>
-    </div>
-    <p class="reveal" style="margin-top: var(--space-lg); font-size: var(--text-sm);">Like the wallpaper? It’s made for vendiOS. <a href="img/vendios-shards-4k.jpg" download>Download it in 4K</a>.</p>
+    <p class="fine reveal"><span class="warn">Turn off Secure Boot first</span>, it isn’t supported yet. Nothing touches your disk until you confirm on the installer’s last screen. It’s a beta, so tell me when you find a rough edge.</p>
+    <p class="fine reveal">Like the wallpaper? It was made for vendiOS. <a href="img/vendios-shards-4k.jpg" download>Download it in 4K</a>.</p>
+    <p class="sum reveal">v0.1.0-beta · sha256 48a6fd8ad4e7cee783f4552d64ad32d4f9a5d5297eece4a4a5db03310b26a985</p>
   </div>
 </section>
 
