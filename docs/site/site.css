@@ -118,21 +118,25 @@ h1, h2, h3, h4 { font-family: var(--font-display); color: var(--color-ink); font
 }
 @keyframes rise { to { opacity: 1; transform: none; filter: none; } }
 
-/* ── hero stage: the desktop grows to full size while pinned ── */
-.stage { position: relative; height: 170vh; }
-.stage-pin { position: sticky; top: 0; height: 100vh; display: grid; place-items: center; overflow: clip; }
-.stage-pin::before {
-  content: ""; position: absolute; left: 50%; top: 55%; width: 120vw; height: 95vh;
+/* ── hero screenshot: rises in once, sits in mauve light, leans toward the cursor ── */
+.stage { position: relative; padding: var(--space-xl) 0 var(--space-4xl); perspective: 1800px; }
+.stage::before {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 110vw; height: 85%;
   transform: translate(-50%, -50%);
   background: radial-gradient(closest-side, var(--color-glow), transparent);
-  opacity: var(--glow, 0.9);
+  pointer-events: none;
 }
-.stage .shot { width: min(92vw, 1600px); transform-origin: 50% 50%; will-change: transform; }
-@media (max-width: 700px) {
-  .stage { height: auto; }
-  .stage-pin { position: relative; height: auto; padding: var(--space-xl) 0 var(--space-2xl); }
-  .stage-pin::before { height: 120%; }
+.stage .shot {
+  max-width: 72rem; margin: 0 auto;
+  transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+  transition: transform 900ms var(--ease-out);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .js .stage::before { opacity: 0; animation: glowIn 1.8s var(--ease-out) 900ms forwards; }
+  .js .rise-shot { opacity: 0; translate: 0 80px; scale: 0.94; animation: shotIn 1.4s var(--ease-out) 900ms forwards; }
+}
+@keyframes glowIn { to { opacity: 1; } }
+@keyframes shotIn { to { opacity: 1; translate: 0 0; scale: 1; } }
 .shot {
   position: relative; margin: 0;
   border-radius: var(--radius-lg); overflow: hidden;

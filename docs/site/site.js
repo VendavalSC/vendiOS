@@ -22,20 +22,17 @@ const onFrame = (fn) => {
   addEventListener('resize', run); run();
 };
 
-// Hero stage: the screenshot starts small in a pool of mauve light and grows to
-// full size while the section is pinned.
-const stage = document.querySelector('.stage');
-if (stage && !calm) {
-  const shot = stage.querySelector('.shot');
-  const pin = stage.querySelector('.stage-pin');
-  onFrame(() => {
-    if (innerWidth <= 700) { shot.style.transform = ''; pin.style.removeProperty('--glow'); return; }
-    const r = stage.getBoundingClientRect();
-    const start = innerHeight * 0.65, span = start + (r.height - innerHeight) * 0.75;
-    const e = easeOut(clamp01((start - r.top) / span));
-    shot.style.transform = `translateY(${(1 - e) * 8}vh) scale(${0.74 + e * 0.26})`;
-    pin.style.setProperty('--glow', (1 - e * 0.4).toFixed(3));
+// Hero screenshot leans gently toward the cursor.
+const heroShot = document.querySelector('.stage .shot');
+if (heroShot && !calm && matchMedia('(hover: hover) and (pointer: fine)').matches) {
+  const stageEl = heroShot.closest('.stage');
+  stageEl.addEventListener('pointermove', (e) => {
+    const r = heroShot.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width - 0.5, y = (e.clientY - r.top) / r.height - 0.5;
+    heroShot.style.setProperty('--rx', `${(-y * 4).toFixed(2)}deg`);
+    heroShot.style.setProperty('--ry', `${(x * 4).toFixed(2)}deg`);
   });
+  stageEl.addEventListener('pointerleave', () => { heroShot.style.setProperty('--rx', '0deg'); heroShot.style.setProperty('--ry', '0deg'); });
 }
 
 // Statement: words light up in reading order as it scrolls through.
