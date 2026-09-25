@@ -158,16 +158,32 @@ document.querySelectorAll('.keys-demo').forEach(async (box) => {
   }
 });
 
-// 9 themes: hover or tap a swatch to recolour the tile.
+// 9 themes: hover a swatch to preview it on the tile, click to theme the whole site.
+const THEMES = { mocha: '#cba6f7', latte: '#8839ef', gruvbox: '#fe8019', nord: '#88c0d0', tokyonight: '#7aa2f7', everforest: '#a7c080', mono: '#ffffff', think: '#e2231a', dynamic: '#7e8af0' };
+const setSiteTheme = (name) => {
+  if (!THEMES[name]) return;
+  document.documentElement.style.setProperty('--color-accent', THEMES[name]);
+  try { localStorage.setItem('vendi-theme', name); } catch (e) {}
+};
 document.querySelectorAll('.themes-tile').forEach((tile) => {
   const btns = [...tile.querySelectorAll('.swatches button')], name = tile.querySelector('.tname');
-  const pick = (b) => {
+  const nameOf = (b) => b.getAttribute('aria-label').split(',')[0];
+  let chosen = (() => { try { return localStorage.getItem('vendi-theme'); } catch (e) { return null; } })() || 'mocha';
+  const show = (b) => { name.textContent = nameOf(b); tile.style.setProperty('--tile-accent', THEMES[nameOf(b)]); };
+  const settle = () => {
+    const b = btns.find((x) => nameOf(x) === chosen) || btns[0];
     btns.forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
-    tile.style.setProperty('--tile-accent', b.classList.contains('dyn') ? 'var(--theme-nord)' : getComputedStyle(b).getPropertyValue('--c'));
-    name.textContent = b.getAttribute('aria-label').split(',')[0];
+    tile.style.removeProperty('--tile-accent'); name.textContent = nameOf(b);
   };
-  btns.forEach((b) => { b.addEventListener('pointerenter', () => pick(b)); b.addEventListener('focus', () => pick(b)); b.addEventListener('click', () => pick(b)); });
-  pick(btns[0]);
+  btns.forEach((b) => {
+    b.title = `Theme the site ${nameOf(b)}`;
+    b.addEventListener('pointerenter', () => show(b));
+    b.addEventListener('focus', () => show(b));
+    b.addEventListener('click', () => { chosen = nameOf(b); setSiteTheme(chosen); settle(); });
+  });
+  tile.querySelector('.swatches').addEventListener('pointerleave', settle);
+  tile.querySelector('.swatches').addEventListener('focusout', settle);
+  settle();
 });
 
 // Encrypted: the passphrase types in, the lock opens.
