@@ -86,8 +86,8 @@
 <section id="install">
 <h2>Installing</h2>
 <ol>
-  <li>Download the ISO from the <a href="https://github.com/VendavalSC/vendiOS/releases/latest">release page</a>, along with the <code>.sha256</code> file. To check it: <code>sha256sum -c vendios-2026.09.24-x86_64.iso.sha256</code>.</li>
-  <li>Write it to a USB stick. On Linux: <code>sudo dd if=vendios-2026.09.24-x86_64.iso of=/dev/sdX bs=4M status=progress oflag=sync</code>. On Windows or macOS, Fedora Media Writer or balenaEtcher will do it.</li>
+  <li>Download the ISO from the <a href="https://github.com/VendavalSC/vendiOS/releases/latest">release page</a>, along with the <code>.sha256</code> file. To check it: <code>sha256sum -c vendios-*.iso.sha256</code>.</li>
+  <li>Write it to a USB stick. On Linux: <code>sudo dd if=vendios-*.iso of=/dev/sdX bs=4M status=progress oflag=sync</code>. On Windows or macOS, Fedora Media Writer or balenaEtcher will do it.</li>
   <li>Turn off Secure Boot in your firmware settings and boot from the stick.</li>
   <li>The installer starts on its own. It asks for language, timezone and keyboard; which disk to use (the whole disk, free space, or your own partitions); btrfs or ext4; whether to encrypt; your user and hostname; which bar; and optional extras like swap and the <code>yay</code> AUR helper.</li>
   <li>Nothing is written to the disk until the last screen, where you confirm. Then reboot, log in, and you’re at the desktop.</li>

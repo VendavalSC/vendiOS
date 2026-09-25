@@ -70,7 +70,7 @@ h1, h2, h3, h4 { font-family: var(--font-display); color: var(--color-ink); font
 }
 .nav.is-scrolled {
   background: var(--color-glass);
-  -webkit-backdrop-filter: blur(20px) saturate(1.8); backdrop-filter: blur(20px) saturate(1.8);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6); backdrop-filter: blur(28px) saturate(1.6);
   box-shadow: 0 1px 0 var(--color-rule);
 }
 .nav .wrap { height: 100%; display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); }

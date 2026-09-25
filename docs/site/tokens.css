@@ -28,7 +28,7 @@
   --theme-think:      #e2231a;
   --color-focus:   oklch(88% 0.12 305);
   --color-warn:    oklch(84% 0.12 80);
-  --color-glass:   oklch(11% 0.012 295 / 0.72);
+  --color-glass:   oklch(11% 0.012 295 / 0.94);
   --color-shadow:  oklch(8% 0.03 270 / 0.55);
 
   /* type */
