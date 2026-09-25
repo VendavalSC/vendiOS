@@ -75,9 +75,18 @@ h1, h2, h3, h4 { font-family: var(--font-display); color: var(--color-ink); font
 }
 .nav .wrap { height: 100%; display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); }
 .mark { display: flex; align-items: center; gap: var(--space-xs); color: var(--color-ink); text-decoration: none; font-family: var(--font-display); font-weight: 600; font-size: 1.3rem; letter-spacing: -0.02em; white-space: nowrap; }
-.mark svg { width: 0.85em; height: 0.85em; fill: var(--color-accent); transition: transform var(--dur-slow) var(--ease-out); }
+.mark svg { width: 0.85em; height: 0.85em; fill: var(--color-accent); }
 .mark:hover { color: var(--color-ink); }
-.mark:hover svg { transform: rotate(180deg); }
+/* playful spin on hover: wind up, twirl past, wobble, settle */
+.mark svg.spin { animation: markSpin 1.15s linear; }
+@keyframes markSpin {
+  0%   { transform: rotate(0deg) scale(1); animation-timing-function: var(--ease-in-out); }
+  14%  { transform: rotate(-24deg) scale(0.88); animation-timing-function: var(--ease-in); }
+  55%  { transform: rotate(410deg) scale(1.18); animation-timing-function: var(--ease-out); }
+  72%  { transform: rotate(344deg) scale(0.96); animation-timing-function: var(--ease-in-out); }
+  86%  { transform: rotate(368deg) scale(1.03); animation-timing-function: var(--ease-in-out); }
+  100% { transform: rotate(360deg) scale(1); }
+}
 .nav-links { display: flex; align-items: center; gap: var(--space-lg); font-size: 0.8rem; }
 .nav-links a:not(.btn) { color: var(--color-ink-2); text-decoration: none; white-space: nowrap; transition: color var(--dur-fast); }
 .nav-links a:not(.btn):hover, .nav-links a[aria-current="page"] { color: var(--color-ink); }

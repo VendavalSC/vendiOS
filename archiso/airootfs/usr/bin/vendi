@@ -33,7 +33,10 @@ if [[ -f "${HOME}/.config/vendi/shell-theme.zsh" ]]; then
     TEAL=$'\e[38;2;'"${VENDI_TEAL:-148;226;213}"$'m'
 fi
 
+# The big logo (diamond + wordmark). `vendi theme` writes a copy recoloured to
+# the accent; fall back to the shipped mauve one.
 LOGO_FILE=/usr/share/vendios/logo.txt
+[[ -f "$HOME/.config/vendi/logo.txt" ]] && LOGO_FILE="$HOME/.config/vendi/logo.txt"
 
 _logo() {
     if [[ -f "$LOGO_FILE" ]]; then
@@ -681,16 +684,16 @@ EOF
     _gtk_theme_write "$name"
     _ok "GTK theme written (new GTK windows follow the theme)"
 
-    # ── shard logo (recolor its two faces to the accent) ───────
+    # ── diamond logo (fastfetch + the big `vendi` logo) in the accent ───────
     local shard_src=/usr/share/vendios/shard.txt shard="$HOME/.config/vendi/shard.txt"
+    local acc; acc=$(_rgbsemi "$a")
     if [[ -f "$shard_src" ]]; then
-        local lt dk
-        lt=$(_rgbsemi "$a")
-        dk=$(printf "%d;%d;%d" $((16#${a:0:2}*55/100)) $((16#${a:2:2}*55/100)) $((16#${a:4:2}*55/100)))
-        sed -e "s/38;2;205;167;250/38;2;${lt}/g" -e "s/38;2;124;77;191/38;2;${dk}/g" "$shard_src" > "$shard"
+        sed -e "s/38;2;205;167;250/38;2;${acc}/g" "$shard_src" > "$shard"
     else
         shard=$shard_src
     fi
+    [[ -f /usr/share/vendios/logo.txt ]] && sed -e "s/38;2;205;167;250/38;2;${acc}/g" \
+        -e "s/38;2;203;166;247/38;2;${acc}/g" /usr/share/vendios/logo.txt > "$HOME/.config/vendi/logo.txt"
 
     # ── fastfetch ──────────────────────────────────────────────
     mkdir -p "$HOME/.config/fastfetch"

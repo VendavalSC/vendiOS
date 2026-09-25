@@ -22,7 +22,7 @@ return {
   },
 
   -- Transparent floats over the live vendiwm blur look great; keep the dashboard
-  -- showing the vendiOS shard.
+  -- showing the vendiOS diamond.
   {
     "folke/snacks.nvim",
     opts = {
@@ -30,14 +30,14 @@ return {
         preset = {
           header = table.concat({
             "",
-            "          ▟█▙          ",
-            "        ▟█████▙        ",
-            "      ▟████ ████▙      ",
-            "    ▟████   ▝████▙    ",
-            "    ▜████   ▗████▛    ",
-            "      ▜████ ████▛      ",
-            "        ▜█████▛        ",
-            "          ▜█▛          ",
+            "              ▗▟▙▖             ",
+            "             ▄████▄            ",
+            "           ▄████████▄          ",
+            "         ▗▟██████████▙▖        ",
+            "         ▝▜██████████▛▘        ",
+            "           ▀████████▀          ",
+            "             ▀████▀            ",
+            "              ▝▜▛▘             ",
             "",
             "        v e n d i V i m        ",
             "",

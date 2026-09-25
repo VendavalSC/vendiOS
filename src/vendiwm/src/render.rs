@@ -264,7 +264,7 @@ void main() {
 /// Build the output-sized wallpaper buffer. A user image (from the theme's
 /// `wallpaper` path, cover-scaled) wins; otherwise a procedural obsidian
 /// gradient derived from the theme: vertical fade of the background color, a
-/// soft accent glow up top, and a faint shard watermark in the lower right.
+/// soft accent glow up top, and a faint diamond watermark in the lower right.
 pub fn wallpaper_buffer(
     w: i32,
     h: i32,
@@ -306,23 +306,11 @@ fn procedural_wallpaper(w: i32, h: i32, background: [f32; 4], accent: [f32; 4]) 
     let bot = (top.0 * 0.58, top.1 * 0.58, top.2 * 0.58);
     let (mr, mg, mb) = (accent[0] * 255.0, accent[1] * 255.0, accent[2] * 255.0);
 
-    // Shard watermark geometry (mirrors the vendibar logo), anchored in the
-    // lower-right quadrant at ~55% of screen height.
+    // Diamond watermark (the vendiOS mark: 80% wide, 92% tall), anchored in
+    // the lower-right quadrant at ~55% of screen height.
     let s = hf * 0.55;
-    let (ox, oy) = (wf * 0.80 - s * 0.5, hf * 0.62 - s * 0.5);
-    let t = (ox + s * 0.42, oy + s * 0.04);
-    let r = (ox + s * 0.92, oy + s * 0.30);
-    let b = (ox + s * 0.60, oy + s * 0.97);
-    let l = (ox + s * 0.10, oy + s * 0.46);
-    fn in_tri(p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> bool {
-        let sign = |p1: (f32, f32), p2: (f32, f32), p3: (f32, f32)| {
-            (p1.0 - p3.0) * (p2.1 - p3.1) - (p2.0 - p3.0) * (p1.1 - p3.1)
-        };
-        let (d1, d2, d3) = (sign(p, a, b), sign(p, b, c), sign(p, c, a));
-        let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
-        let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
-        !(has_neg && has_pos)
-    }
+    let (cx, cy) = (wf * 0.80, hf * 0.62);
+    let (hw, hh) = (s * 0.40, s * 0.46);
 
     for y in 0..h {
         let ty = y as f32 / hf;
@@ -341,12 +329,10 @@ fn procedural_wallpaper(w: i32, h: i32, background: [f32; 4], accent: [f32; 4]) 
             let glow = (1.0 - (gx * gx * 3.2 + gy * gy * 5.0).sqrt()).clamp(0.0, 1.0);
             let glow = glow * glow * 0.10;
 
-            // Shard watermark: two faces at slightly different strengths.
-            let shard = if in_tri(p, t, b, l) { 0.050 }
-                else if in_tri(p, t, r, b)    { 0.085 }
-                else { 0.0 };
+            // Diamond watermark.
+            let mark = if ((p.0 - cx).abs() / hw + (p.1 - cy).abs() / hh) <= 1.0 { 0.065 } else { 0.0 };
 
-            let mix = glow + shard;
+            let mix = glow + mark;
             let rr = (bg.0 + (mr - bg.0) * mix).round() as u8;
             let gg = (bg.1 + (mg - bg.1) * mix).round() as u8;
             let bb = (bg.2 + (mb - bg.2) * mix).round() as u8;

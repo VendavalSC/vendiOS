@@ -7,6 +7,14 @@ const nav = document.querySelector('.nav');
 const onScrollNav = () => nav && nav.classList.toggle('is-scrolled', scrollY > 8);
 addEventListener('scroll', onScrollNav, { passive: true }); onScrollNav();
 
+// The logo does a little spin when you point at it (once per visit of the cursor).
+document.querySelectorAll('.mark').forEach((m) => {
+  const svg = m.querySelector('svg');
+  if (!svg || calm) return;
+  m.addEventListener('pointerenter', () => { if (!svg.classList.contains('spin')) svg.classList.add('spin'); });
+  svg.addEventListener('animationend', () => svg.classList.remove('spin'));
+});
+
 // Reveal blocks once as they enter the viewport.
 const io = new IntersectionObserver((entries) => {
   for (const e of entries) if (e.isIntersecting) { e.target.classList.add('is-in'); io.unobserve(e.target); }

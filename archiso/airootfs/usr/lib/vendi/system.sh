@@ -643,6 +643,13 @@ sys_install_vendi_cli() {
         mkdir -p "/mnt${tree}"
         cp -a "${tree}/." "/mnt${tree}/"
     done
+    # The vendiOS mark as a system icon (os-release LOGO=vendios).
+    local icon
+    for icon in /usr/share/pixmaps/vendios.svg \
+                /usr/share/icons/hicolor/scalable/apps/vendios.svg \
+                /usr/share/icons/hicolor/scalable/apps/vendios-symbolic.svg; do
+        [[ -f "$icon" ]] && install -Dm644 "$icon" "/mnt${icon}"
+    done
 
     # Enable vendi's --user units globally (works pre-boot in the chroot via
     # `--global`, which writes /etc/systemd/user/*.wants symlinks — unlike a

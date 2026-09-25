@@ -145,49 +145,25 @@ fn build_ui(app: &gtk::Application) {
     });
 }
 
-/// The vendi mark, drawn by hand: an obsidian crystal shard (think the
-/// Obsidian notes logo) — a tall, slanted gem with a bright left face and a
-/// deep right face, leaning right with a sharp bottom point.
+/// The vendiOS mark: a flat diamond in the theme accent.
 fn vendi_logo() -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.add_css_class("logo");
     area.set_content_width(18);
     area.set_content_height(18);
     area.set_valign(gtk::Align::Center);
-    // Faces derive from the theme accent: bright face slightly lifted toward
-    // white, dark face at ~60% — keeps the obsidian look in any accent.
+    // The vendiOS diamond, filled with the theme accent.
     let (ar, ag, ab) = modules::accent_rgb();
-    let light = (ar + (1.0 - ar) * 0.18, ag + (1.0 - ag) * 0.18, ab + (1.0 - ab) * 0.18);
-    let dark  = (ar * 0.58, ag * 0.58, ab * 0.58);
     area.set_draw_func(move |_, cr, w, h| {
         let (w, h) = (w as f64, h as f64);
-        // Shard silhouette (clockwise):
-        //   T  = top peak (off-center left)
-        //   R  = right shoulder
-        //   B  = bottom tip (sharp, leaning right)
-        //   L  = left hip
-        // Ridge runs T → B and splits the shard into two faces.
-        let t = (w * 0.42, h * 0.04);
-        let r = (w * 0.92, h * 0.30);
-        let b = (w * 0.60, h * 0.97);
-        let l = (w * 0.10, h * 0.46);
-
-        let face = |cr: &gtk::cairo::Context, pts: &[(f64, f64)], rgb: (f64, f64, f64)| {
-            cr.set_source_rgb(rgb.0, rgb.1, rgb.2);
-            cr.move_to(pts[0].0, pts[0].1);
-            for p in &pts[1..] { cr.line_to(p.0, p.1); }
-            cr.close_path();
-            let _ = cr.fill();
-        };
-        // Left face catches the light; right face stays deep obsidian.
-        face(cr, &[t, b, l], light);
-        face(cr, &[t, r, b], dark);
-        // Ridge highlight — a hairline along the T→B edge.
-        cr.set_source_rgba(0.93, 0.88, 1.0, 0.85);
-        cr.set_line_width(0.9);
-        cr.move_to(t.0, t.1);
-        cr.line_to(b.0, b.1);
-        let _ = cr.stroke();
+        // Same proportions as the mark everywhere else: 80% wide, 92% tall.
+        cr.set_source_rgb(ar, ag, ab);
+        cr.move_to(w * 0.50, h * 0.04);
+        cr.line_to(w * 0.90, h * 0.50);
+        cr.line_to(w * 0.50, h * 0.96);
+        cr.line_to(w * 0.10, h * 0.50);
+        cr.close_path();
+        let _ = cr.fill();
     });
     // The mark is the system button: click summons the actions menu.
     area.set_tooltip_text(Some("vendiOS menu"));
